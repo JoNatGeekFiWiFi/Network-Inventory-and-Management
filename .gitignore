@@ -1,0 +1,5 @@
+# Local helper, not part of the project
+push-to-github.sh
+
+# Stray git lock files
+*.lock
