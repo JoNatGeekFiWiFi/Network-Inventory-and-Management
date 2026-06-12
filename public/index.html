@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Network Inventory &amp; Management</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/2.47.0/iconfont/tabler-icons.min.css" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><i class="ti ti-network"></i> <span>Network Inventory</span> <span class="env">testing</span></div>
+    <div class="spacer"></div>
+    <div id="userMenu" class="usermenu"></div>
+  </header>
+  <div class="layout">
+    <nav class="sidebar" id="sidebar">
+      <a href="#/sites" data-nav="sites"><i class="ti ti-map-pin"></i> Sites</a>
+      <a href="#/customers" data-nav="customers"><i class="ti ti-users"></i> Customers</a>
+      <a href="#/inventory" data-nav="inventory"><i class="ti ti-router"></i> Inventory</a>
+      <a href="#/activity" data-nav="activity"><i class="ti ti-history"></i> Activity</a>
+      <a href="#/users" data-nav="users" id="navUsers" style="display:none"><i class="ti ti-user-shield"></i> Users</a>
+    </nav>
+    <main id="view" class="content"><div class="loading">Loading…</div></main>
+  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -70,6 +70,9 @@ A wholesale/third-party carrier circuit used to serve a customer when not on own
 |---|---|
 | `id`, `asset_tag`, `serial` | Identity |
 | `model_ref` | Picked from the Device Model catalog (§3.10) — sets manufacturer/model/type |
+| `management_mode` | **platform-managed** (default) or **provider-managed** (e.g. Cox coax modem — inventory only, see §3.4a) |
+| `ownership` | **Us** / **Carrier** / **Third-party distributor** |
+| `owner_org` / `account_number` / `owner_account` / `owner_sub_account` | The org + account number + account & sub-account — **always captured** (even for our own gear, there's a carrier/distributor account) (→ §3.8a) |
 | `status` | In stock / Deployed / Spare / RMA / Retired |
 | `assigned_to` | **Polymorphic:** POP Site **or** Customer Site |
 | `serial` | Captured on add; stored, not shown in simple list |
@@ -77,14 +80,33 @@ A wholesale/third-party carrier circuit used to serve a customer when not on own
 | `admin_password` | Privileged login, platform-managed (encrypted, masked) — **NOC only** |
 | `tech_username` / `tech_password` | Limited on-site account — **visible to field & support techs** |
 | `factory_wifi_ssid` / `factory_wifi_password` | Only for `has_wifi` models (e.g. MikroTik WiFi) |
+| `cellular.{carrier,imei,sim_iccid,sku,phone_number}` | Only for `has_cellular` models (5G/LTE modem-routers); platform-managed, 5G is the WAN |
 | `purchase` / `warranty` / `eol` | Lifecycle |
 | `custom_fields` | Per device-type |
 | `checkout_history[]` | Assignment/movement log |
 | `interfaces[]` / `ip_assignments[]` | NOC/NetBox layer (optional, shown in advanced mode) |
 | `interfaces[].role` | WAN1 / WAN2 / LAN / MGMT — **WAN roles shown in simple/tech view** |
+| `interfaces[].traffic` | Live in/out throughput + historical series (graphed on device page) |
+| `interfaces[].events[]` | Port activity log: link up/down, errors, timestamps |
 | `mgmt_overlay` | **ZeroTier** or **WireGuard** (out-of-band mgmt — see §6) |
 | `mgmt_address` | Device's IP on the management overlay |
 | `mgmt_supported[]` | Which overlays this hardware can run |
+
+### 3.4a Provider-managed devices (e.g. Cox coax modems)
+
+Some hardware is **inventoried but never configured by the platform** — the carrier owns all provisioning. The prime case: coax/DOCSIS modems on **brokered Cox circuits**. `management_mode = provider-managed`.
+
+For these the platform tracks only:
+
+| Field | Notes |
+|---|---|
+| `manufacturer` / `model` | From the catalog (§3.10) |
+| `serial` | Unit serial |
+| `purchased_from` | Where it was bought (vendor/source) |
+| `hfc_mac` | HFC/DOCSIS MAC — the address Cox uses to provision the modem |
+| `associated_connection` | The brokered carrier connection it serves (→ §3.5) |
+
+Provider-managed devices have **no management overlay, no admin/tech credentials, and no config build/push** — those fields and flows are suppressed in the UI. They still appear in inventory, status, and the brokered connection's record. When **Deployed**, they're still assigned to a POP or client site (`assigned_to`) so location is tracked — but **without** management-IP allocation.
 
 ### 3.5 Connection (customer site connectivity)
 
@@ -131,6 +153,7 @@ The billing/relationship entity that owns one or more customer sites. No on-net/
 | `id`, `name` | |
 | `account_ref` / `billing` | Account number, billing contact |
 | `contacts[]` | Account contacts |
+| `previous_isps[]` | Prior provider(s) + **reason they left** (sales/retention context) |
 | `sites[]` | Customer sites under this account (→ §3.2) |
 | `status` | Active / Suspended / Closed |
 
@@ -150,6 +173,27 @@ Master list of the carriers, transit, and wholesale companies that supply connec
 | `circuits[]` / `brokered_carriers[]` | What we buy from them |
 
 Maintained as a managed list so circuits and brokered connections pick from known providers rather than free-text.
+
+### 3.8a Owner accounts (carrier / distributor)
+
+When hardware is **carrier-** or **distributor-owned**, we hold accounts with that owner — often **many accounts and sub-accounts** per owner. Modeled as a hierarchy so a device points at exactly one sub-account.
+
+```
+Owner (carrier or 3rd-party distributor)
+  └─< Account (one of several we hold)
+        └─< Sub-account (device points here)
+```
+
+| Field | Notes |
+|---|---|
+| `owner` | Carrier or distributor org (a distributor resells a carrier) |
+| `owner_type` | Carrier / Distributor |
+| `account` | Master account we hold with the owner |
+| `sub_account` | Sub-account under that account |
+| `status` | **Active** or **No account** |
+| `access.{pin, portal_username, portal_password, security_passphrase?}` | Account access creds for NOC to manage the account — **NOC/Admin only**, masked, reads logged. Field set is provider-specific (e.g. **Cox = PIN, username, password; no passphrase**). Only populated when status = Active |
+
+A device's `owner_account` / `owner_sub_account` reference into this hierarchy. (Distributors may also link to the underlying carrier.) The account number and account info are **always recorded**, regardless of whether the hardware itself is owned by us, the carrier, or a distributor.
 
 ### 3.9 Controller (managed integration endpoint)
 
@@ -177,10 +221,26 @@ A managed catalog of manufacturer + model entries that assets are classified aga
 | `model` | e.g. CCR2004, RB5009, U6-Pro |
 | `device_type` | Router / Switch / Access point / … |
 | `has_wifi` | If true, asset form captures factory WiFi SSID + password |
+| `has_cellular` | If true (5G/LTE modem-router), asset form captures cellular fields |
 | `default_overlay` / `driver` | Hints for provisioning (optional) |
 | `notes` | |
 
 **Permissions:** catalog entries are **added/edited only by Admin and NOC** roles. All other roles select from the existing list when adding hardware — they cannot create new manufacturer/model entries.
+
+### 3.11 Activity Log (audit trail)
+
+Immutable record of user actions, surfaced in the NOC/Admin historical-activity view.
+
+| Field | Notes |
+|---|---|
+| `id`, `timestamp` | |
+| `actor` | User who performed the action |
+| `action` | add / edit / deploy / reassign / credential_read / config_push / login / catalog_change |
+| `target` | What was acted on (asset, site, account, controller, catalog entry…) |
+| `details` | Before/after or context |
+| `ip` / `role` | Origin and actor's role at the time |
+
+Append-only (immutable); filterable by actor, target, action, and date.
 
 ## 4. Key Relationships
 
@@ -219,6 +279,14 @@ Same data, filtered views. A "NOC mode" toggle reveals the NetBox-depth fields o
 
 **Credential visibility:** device admin/factory passwords are visible **only to NOC/Admin**. Field techs and support techs see only the limited **tech account** (`tech_username`/`tech_password`). Credential fields are masked with show-on-demand, and access is logged.
 
+### NOC/Admin-only features
+
+Beyond everything in the simple view, NOC and Admin roles get:
+
+1. **Catalog management** — add/edit hardware manufacturers, vendors, and models (the Device Model catalog, §3.10) and other managed lists.
+2. **Full credential visibility** — view all device credentials (admin/factory passwords, WiFi creds), masked with show-on-demand.
+3. **Historical user activity (audit log)** — a record of who did what and when across the platform: hardware add/edit, deploys/reassignments, credential reads, config builds/pushes, logins, catalog changes. Filterable by user, site, device, and action type; entries are immutable. Credential reads in particular are always logged here.
+
 ## 6. Management Network (Out-of-Band Access)
 
 The platform reaches devices over a management overlay, **independent of the customer WAN connection**. This is how the platform polls, monitors, provisions, and — critically — discovers the dynamic WAN IP of a connection by querying the device directly over the overlay.
@@ -248,6 +316,20 @@ Requirements:
 - This applies regardless of overlay (ZeroTier or WireGuard) — the uniqueness rule spans the whole management plane.
 
 Note: deep customer-side IPAM remains a NOC-only feature, but **management-network IPAM is foundational** and always on.
+
+### 6.2 Device telemetry — port traffic & activity
+
+Opening a device (on a client or POP site) shows **live and historical port activity**:
+
+- **Live throughput** per port (in/out) and a device-level total.
+- **Peak download and peak upload** (shown separately) for the selected range.
+- **Historical traffic graph** with a selectable time range (1h / 24h / 7d / custom).
+- **Per-port graphs** as expandable dropdowns, each with its **own independent range and resolution** selectors (separate per port and from the device-level graph).
+- **Port activity log** — link up/down events, errors, and resets with timestamps.
+
+**Retention:** telemetry is stored at **1-minute resolution for 60 days** by default; **NOC users can select a longer retention** per device or globally.
+
+Telemetry is collected by polling the device over the **management overlay** (SNMP/REST/API per vendor) and stored as time series. Available for both client-site and POP-site devices; richer detail (per-queue, per-VLAN) is NOC-side.
 
 ## 7. Config Building & Provisioning
 
@@ -306,7 +388,7 @@ Each controller has a `sync_enabled` flag and records last-sync time/result. Syn
 - **Phase 1 — Inventory core:** Asset model, POP + Customer site entities, assignment, status, custom fields. (Snipe-IT parity)
 - **Phase 2 — Connectivity:** Connection model, Brokered Carrier, circuits, impact query.
 - **Phase 3 — NOC depth:** Racks, IPAM, interfaces, config context. (NetBox parity)
-- **Phase 4 — Roles & layouts:** Role-based views, advanced/NOC mode toggle.
+- **Phase 4 — Roles & layouts:** Role-based views, advanced/NOC mode toggle, credential visibility rules, catalog management, **activity/audit log**.
 - **Phase 5 — Management overlay:** ZeroTier + WireGuard integration (one per device), **no-overlap management IPAM** (unique address allocation, overlap detection), `mgmt_address` reachability, dynamic-IP polling over overlay.
 - **Phase 6 — Config automation:** MikroTik RouterOS v7 driver (REST API) first; Ubiquiti UniFi + UISP controller drivers; build configs in-platform, push, intended-vs-running reconciliation.
 - **Phase 7 — Remote management:** Monitoring, drift detection, config backup (RMM features).

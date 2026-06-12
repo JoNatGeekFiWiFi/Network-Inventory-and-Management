@@ -1,0 +1,16 @@
+{
+  "name": "network-inventory-platform",
+  "version": "0.1.0",
+  "description": "Network hardware inventory and remote management platform (testing build)",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "seed": "node db.js --seed",
+    "reset": "node db.js --reset"
+  },
+  "engines": { "node": ">=22.5" },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

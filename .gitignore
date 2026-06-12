@@ -1,5 +1,16 @@
-# Local helper, not part of the project
+# Dependencies
+node_modules/
+
+# Database files (created at runtime)
+*.db
+*.db-shm
+*.db-wal
+data.db
+
+# Local helper / env
 push-to-github.sh
+.env
+*.log
 
 # Stray git lock files
 *.lock
