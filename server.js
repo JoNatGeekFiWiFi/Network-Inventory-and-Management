@@ -55,6 +55,7 @@ app.use('/api', (req, res, next) => {
 });
 
 const requireAdmin = (req, res, next) => (req.user && req.user.role === 'admin') ? next() : res.status(403).json({ error: 'Admin only' });
+const requireNoc = (req, res, next) => (req.user && ['noc', 'admin'].includes(req.user.role)) ? next() : res.status(403).json({ error: 'NOC/Admin only' });
 
 app.get('/api/me', (req, res) => res.json(req.user));
 
@@ -89,6 +90,35 @@ app.delete('/api/users/:id', requireAdmin, (req, res) => {
   if (Number(req.params.id) === req.user.id) return res.status(400).json({ error: 'Cannot delete yourself' });
   db.prepare('DELETE FROM users WHERE id=?').run(req.params.id);
   audit(req, 'delete', 'user#' + req.params.id);
+  res.json({ ok: true });
+});
+
+// ---- device model catalog (NOC/Admin manage) ----
+app.get('/api/models', (req, res) => {
+  res.json(db.prepare('SELECT * FROM device_models ORDER BY manufacturer, model').all());
+});
+app.post('/api/models', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!b.manufacturer || !b.model) return res.status(400).json({ error: 'Manufacturer and model required' });
+  const info = db.prepare('INSERT INTO device_models (manufacturer, model, device_type, has_wifi, has_cellular) VALUES (?,?,?,?,?)')
+    .run(N(b.manufacturer), N(b.model), N(b.device_type), b.has_wifi ? 1 : 0, b.has_cellular ? 1 : 0);
+  audit(req, 'create', 'model#' + info.lastInsertRowid, b.manufacturer + ' ' + b.model);
+  res.json({ id: info.lastInsertRowid });
+});
+app.put('/api/models/:id', requireNoc, (req, res) => {
+  const b = req.body || {};
+  const ex = db.prepare('SELECT * FROM device_models WHERE id=?').get(req.params.id);
+  if (!ex) return res.status(404).json({ error: 'not found' });
+  db.prepare('UPDATE device_models SET manufacturer=?, model=?, device_type=?, has_wifi=?, has_cellular=? WHERE id=?')
+    .run(N(b.manufacturer, ex.manufacturer), N(b.model, ex.model), N(b.device_type, ex.device_type), b.has_wifi ? 1 : 0, b.has_cellular ? 1 : 0, req.params.id);
+  audit(req, 'edit', 'model#' + req.params.id, b.manufacturer + ' ' + b.model);
+  res.json({ ok: true });
+});
+app.delete('/api/models/:id', requireNoc, (req, res) => {
+  const inUse = db.prepare('SELECT COUNT(*) AS n FROM devices WHERE model_id=?').get(req.params.id);
+  if (inUse.n > 0) return res.status(409).json({ error: `In use by ${inUse.n} device(s)` });
+  db.prepare('DELETE FROM device_models WHERE id=?').run(req.params.id);
+  audit(req, 'delete', 'model#' + req.params.id);
   res.json({ ok: true });
 });
 
@@ -131,7 +161,7 @@ app.get('/api/accounts/:id', (req, res) => {
   res.json(a);
 });
 
-app.post('/api/accounts', (req, res) => {
+app.post('/api/accounts', requireNoc, (req, res) => {
   const b = req.body || {};
   const info = db.prepare('INSERT INTO accounts (name, account_number, status, billing_address, notes) VALUES (?,?,?,?,?)')
     .run(N(b.name), N(b.account_number), b.status || 'Active', N(b.billing_address), N(b.notes));
@@ -148,7 +178,7 @@ app.post('/api/accounts', (req, res) => {
   res.json({ id });
 });
 
-app.put('/api/accounts/:id', (req, res) => {
+app.put('/api/accounts/:id', requireNoc, (req, res) => {
   const b = req.body || {};
   db.prepare('UPDATE accounts SET name=?, account_number=?, status=?, billing_address=?, notes=? WHERE id=?')
     .run(N(b.name), N(b.account_number), N(b.status, 'Active'), N(b.billing_address), N(b.notes), req.params.id);
@@ -156,7 +186,7 @@ app.put('/api/accounts/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete('/api/accounts/:id', (req, res) => {
+app.delete('/api/accounts/:id', requireNoc, (req, res) => {
   db.prepare('DELETE FROM accounts WHERE id=?').run(req.params.id);
   audit(req, 'delete', 'account#' + req.params.id);
   res.json({ ok: true });

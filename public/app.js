@@ -42,6 +42,7 @@ async function logout() { try { await fetch('/api/logout', { method: 'POST' }); 
 function setupHeader() {
   $('#userMenu').innerHTML = `<div class="who"><div class="nm">${esc(CURRENT_USER.name || CURRENT_USER.email)}</div><div class="rl">${esc(CURRENT_USER.role)}</div></div>
     <button class="btn sm" onclick="logout()"><i class="ti ti-logout"></i> Sign out</button>`;
+  $('#navModels').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
 }
 function toast(msg) {
@@ -104,6 +105,9 @@ async function route() {
     if (p[0] === 'users' && p[1] === 'new') { setNav('users'); return await formUser({}); }
     if (p[0] === 'users' && p[2] === 'edit') { setNav('users'); return await formUser({ id: p[1] }); }
     if (p[0] === 'users') { setNav('users'); return await renderUsers(); }
+    if (p[0] === 'models' && p[1] === 'new') { setNav('models'); return await formModel({}); }
+    if (p[0] === 'models' && p[2] === 'edit') { setNav('models'); return await formModel({ id: p[1] }); }
+    if (p[0] === 'models') { setNav('models'); return await renderModels(); }
     view().innerHTML = '<div class="card" style="padding:20px">Not found</div>';
   } catch (e) { if (e.message === 'auth') return; view().innerHTML = `<div class="card" style="padding:20px">Error: ${esc(e.message)}</div>`; }
 }
@@ -237,7 +241,7 @@ async function renderCustomers() {
     <div style="flex:1;min-width:0"><div>${esc(a.name)}</div><div class="small mono sec-muted">${esc(a.account_number || '')}</div></div>
     <span class="small sec-muted">${a.site_count} site${a.site_count === 1 ? '' : 's'}</span>
     ${statusPill(a.status)}<i class="ti ti-chevron-right muted"></i></div>`).join('');
-  view().innerHTML = `<div class="head"><h1 style="flex:1">Customers</h1><a class="btn" href="#/customer/new"><i class="ti ti-plus"></i> Add customer</a></div>
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Customers</h1>${isPriv() ? '<a class="btn" href="#/customer/new"><i class="ti ti-plus"></i> Add customer</a>' : ''}</div>
     <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No customers</div>'}</div>`;
 }
 
@@ -258,7 +262,7 @@ async function renderCustomer(id) {
     <div class="head"><div class="av" style="width:46px;height:46px;border-radius:8px;font-size:16px">${initials(a.name)}</div>
       <div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(a.name)}</h1>${statusPill(a.status)}</div>
       <div class="small mono sec-muted" style="margin-top:3px">${esc(a.account_number || '')}</div></div>
-      <a class="btn" href="#/customer/${a.id}/edit"><i class="ti ti-edit"></i> Edit</a></div>
+      ${isPriv() ? `<a class="btn" href="#/customer/${a.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}</div>
     <div class="grid3" style="margin:16px 0">
       <div class="metric"><div class="l">Sites</div><div class="v">${a.sites.length}</div></div>
       <div class="metric"><div class="l">Devices</div><div class="v">${a.device_count}</div></div>
@@ -393,6 +397,7 @@ function attachSearch(host, items, name, value, placeholder) {
 }
 
 async function formCustomer(q) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
   let a = { name: '', account_number: '', status: 'Active', billing_address: '', notes: '' };
   if (q.id) a = await api('/accounts/' + q.id);
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
@@ -445,7 +450,7 @@ async function saveSite(id) {
 async function formDevice(q) {
   let d = { name: '', status: 'Deployed', management_mode: 'platform', mgmt_overlay: 'WireGuard', ownership: 'us', account_status: 'active', online: 1 };
   if (q.id) d = await api('/devices/' + q.id);
-  const modelOpts = META.models.map(m => ({ v: m.id, l: m.manufacturer + ' ' + m.model }));
+  const modelOpts = (await api('/models')).map(m => ({ v: m.id, l: m.manufacturer + ' ' + m.model }));
   const siteOpts = (await api('/sites')).map(s => ({ v: s.id, l: s.name }));
   const popOpts = META.pops.map(p => ({ v: p.id, l: 'POP · ' + p.name }));
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
@@ -570,4 +575,48 @@ async function saveUser(id) {
 async function delUser(id) {
   if (!confirm('Delete this user?')) return;
   try { await api('/users/' + id, { method: 'DELETE' }); toast('Deleted'); renderUsers(); } catch (e) { toast(e.message); }
+}
+
+// ---------- Device model catalog (NOC/Admin) ----------
+function selYesNo(name, val) { return `<select name="${name}"><option value="1" ${val ? 'selected' : ''}>Yes</option><option value="0" ${val ? '' : 'selected'}>No</option></select>`; }
+async function renderModels() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const models = await api('/models');
+  const rows = models.map(m => `<div class="row">
+    <i class="ti ti-${iconFor(m.device_type)} sec-muted"></i>
+    <div style="flex:1;min-width:0"><div>${esc(m.manufacturer)} ${esc(m.model)}</div>
+      <div class="small sec-muted">${esc(m.device_type || '—')}${m.has_wifi ? ' · WiFi' : ''}${m.has_cellular ? ' · Cellular' : ''}</div></div>
+    <a class="btn sm" href="#/models/${m.id}/edit"><i class="ti ti-edit"></i></a>
+    <button class="btn sm" onclick="delModel(${m.id})"><i class="ti ti-trash"></i></button></div>`).join('');
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Models</h1><a class="btn" href="#/models/new"><i class="ti ti-plus"></i> Add model</a></div>
+    <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No models yet</div>'}</div>
+    <div class="help">The hardware catalog — what shows up in the Model picker when adding devices. NOC/Admin only.</div>`;
+}
+async function formModel(q) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  let m = { manufacturer: '', model: '', device_type: 'Router', has_wifi: 0, has_cellular: 0 };
+  if (q.id) m = (await api('/models')).find(x => x.id == q.id) || m;
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/models'"><i class="ti ti-chevron-left"></i> Models</div>
+    <h1>${q.id ? 'Edit' : 'Add'} model</h1>
+    <div class="card" style="margin-top:14px;padding:16px" id="f">
+      <div class="grid2">${field('Manufacturer', 'manufacturer', m.manufacturer, { ph: 'e.g. MikroTik' })}${field('Model', 'model', m.model, { ph: 'e.g. CCR2004' })}</div>
+      ${field('Device type', 'device_type', m.device_type, { type: 'select', options: ['Router', 'Switch', 'Access point', 'Modem', 'Other'] })}
+      <div class="grid2"><div class="fld"><label class="fl">Has WiFi</label>${selYesNo('has_wifi', m.has_wifi)}</div>
+      <div class="fld"><label class="fl">Has cellular (5G/LTE)</label>${selYesNo('has_cellular', m.has_cellular)}</div></div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
+      <button class="btn primary" onclick="saveModel(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
+}
+async function saveModel(id) {
+  const d = collect('#f');
+  if (!d.manufacturer || !d.model) { toast('Manufacturer and model required'); return; }
+  d.has_wifi = Number(d.has_wifi); d.has_cellular = Number(d.has_cellular);
+  try {
+    if (id) { await api('/models/' + id, { method: 'PUT', body: JSON.stringify(d) }); }
+    else { await api('/models', { method: 'POST', body: JSON.stringify(d) }); }
+    toast('Saved'); location.hash = '#/models';
+  } catch (e) { toast(e.message); }
+}
+async function delModel(id) {
+  if (!confirm('Delete this model?')) return;
+  try { await api('/models/' + id, { method: 'DELETE' }); toast('Deleted'); renderModels(); } catch (e) { toast(e.message); }
 }
