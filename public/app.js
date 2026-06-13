@@ -81,29 +81,29 @@ async function init() {
 function setNav(name) { document.querySelectorAll('.sidebar a').forEach(a => a.classList.toggle('active', a.dataset.nav === name)); }
 
 async function route() {
-  if (!CURRENT_USER) return renderLogin();
+  if (!CURRENT_USER) return await renderLogin();
   const h = location.hash.replace(/^#/, '') || '/sites';
   const p = h.split('?')[0].split('/').filter(Boolean);
   const q = Object.fromEntries(new URLSearchParams(h.split('?')[1] || ''));
   view().innerHTML = '<div class="loading">Loading…</div>';
   try {
-    if (p[0] === 'sites' && !p[1]) { setNav('sites'); return renderSites(); }
-    if (p[0] === 'site' && p[1] === 'new') { setNav('sites'); return formSite(q); }
-    if (p[0] === 'site' && p[2] === 'notes') { setNav('sites'); return renderNotes(p[1]); }
-    if (p[0] === 'site' && p[2] === 'edit') { setNav('sites'); return formSite({ id: p[1] }); }
-    if (p[0] === 'site') { setNav('sites'); return renderSite(p[1]); }
-    if (p[0] === 'customers') { setNav('customers'); return renderCustomers(); }
-    if (p[0] === 'customer' && p[1] === 'new') { setNav('customers'); return formCustomer({}); }
-    if (p[0] === 'customer' && p[2] === 'edit') { setNav('customers'); return formCustomer({ id: p[1] }); }
-    if (p[0] === 'customer') { setNav('customers'); return renderCustomer(p[1]); }
-    if (p[0] === 'inventory') { setNav('inventory'); return renderInventory(); }
-    if (p[0] === 'device' && p[1] === 'new') { setNav('inventory'); return formDevice(q); }
-    if (p[0] === 'device' && p[2] === 'edit') { setNav('inventory'); return formDevice({ id: p[1] }); }
-    if (p[0] === 'device') { setNav('inventory'); return renderDevice(p[1]); }
-    if (p[0] === 'activity') { setNav('activity'); return renderActivity(); }
-    if (p[0] === 'users' && p[1] === 'new') { setNav('users'); return formUser({}); }
-    if (p[0] === 'users' && p[2] === 'edit') { setNav('users'); return formUser({ id: p[1] }); }
-    if (p[0] === 'users') { setNav('users'); return renderUsers(); }
+    if (p[0] === 'sites' && !p[1]) { setNav('sites'); return await renderSites(); }
+    if (p[0] === 'site' && p[1] === 'new') { setNav('sites'); return await formSite(q); }
+    if (p[0] === 'site' && p[2] === 'notes') { setNav('sites'); return await renderNotes(p[1]); }
+    if (p[0] === 'site' && p[2] === 'edit') { setNav('sites'); return await formSite({ id: p[1] }); }
+    if (p[0] === 'site') { setNav('sites'); return await renderSite(p[1]); }
+    if (p[0] === 'customers') { setNav('customers'); return await renderCustomers(); }
+    if (p[0] === 'customer' && p[1] === 'new') { setNav('customers'); return await formCustomer({}); }
+    if (p[0] === 'customer' && p[2] === 'edit') { setNav('customers'); return await formCustomer({ id: p[1] }); }
+    if (p[0] === 'customer') { setNav('customers'); return await renderCustomer(p[1]); }
+    if (p[0] === 'inventory') { setNav('inventory'); return await renderInventory(); }
+    if (p[0] === 'device' && p[1] === 'new') { setNav('inventory'); return await formDevice(q); }
+    if (p[0] === 'device' && p[2] === 'edit') { setNav('inventory'); return await formDevice({ id: p[1] }); }
+    if (p[0] === 'device') { setNav('inventory'); return await renderDevice(p[1]); }
+    if (p[0] === 'activity') { setNav('activity'); return await renderActivity(); }
+    if (p[0] === 'users' && p[1] === 'new') { setNav('users'); return await formUser({}); }
+    if (p[0] === 'users' && p[2] === 'edit') { setNav('users'); return await formUser({ id: p[1] }); }
+    if (p[0] === 'users') { setNav('users'); return await renderUsers(); }
     view().innerHTML = '<div class="card" style="padding:20px">Not found</div>';
   } catch (e) { if (e.message === 'auth') return; view().innerHTML = `<div class="card" style="padding:20px">Error: ${esc(e.message)}</div>`; }
 }
@@ -138,7 +138,7 @@ async function renderSites() {
 }
 
 async function renderSite(id) {
-  const s = await api('/site/' + id);
+  const s = await api('/sites/' + id);
   const connCards = s.connections.map(c => {
     const ipline = c.ip_type === 'Static' ? `Static · ${esc(c.static_ip || '')}` : `Dynamic · ${esc(c.current_ip || '')}`;
     return `<div class="metric" style="background:var(--surface);border:.5px solid var(--border)">
@@ -192,7 +192,7 @@ function initials(n) { return (n || '?').split(' ').map(x => x[0]).join('').slic
 
 // ---------- Notes ----------
 async function renderNotes(id) {
-  const s = await api('/site/' + id);
+  const s = await api('/sites/' + id);
   let access = null;
   if (isPriv()) { try { access = await api('/sites/' + id + '/access'); } catch {} }
   const accessHtml = isPriv() && access ? `
@@ -283,7 +283,7 @@ async function renderInventory() {
 
 // ---------- Device detail ----------
 async function renderDevice(id) {
-  const d = await api('/device/' + id);
+  const d = await api('/devices/' + id);
   const credFields = [];
   if (d.has_admin_password) credFields.push(['Admin password', 'admin_password', 'noc']);
   if (d.has_factory_password) credFields.push(['Factory password', 'factory_password', 'noc']);
@@ -395,7 +395,7 @@ async function saveCustomer(id) {
 
 async function formSite(q) {
   let s = { name: '', service_address: '', status: 'Active', current_mgmt_ip: '', current_public_ip: '', account_id: q.account || '' };
-  if (q.id) s = await api('/site/' + q.id);
+  if (q.id) s = await api('/sites/' + q.id);
   const accOpts = META.accounts.map(a => ({ v: a.id, l: a.name }));
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${q.id ? 'Edit' : 'Add'} site</h1>
@@ -419,7 +419,7 @@ async function saveSite(id) {
 
 async function formDevice(q) {
   let d = { name: '', status: 'Deployed', management_mode: 'platform', mgmt_overlay: 'WireGuard', ownership: 'us', account_status: 'active', online: 1 };
-  if (q.id) d = await api('/device/' + q.id);
+  if (q.id) d = await api('/devices/' + q.id);
   const modelOpts = META.models.map(m => ({ v: m.id, l: m.manufacturer + ' ' + m.model }));
   const siteOpts = (await api('/sites')).map(s => ({ v: s.id, l: s.name }));
   const popOpts = META.pops.map(p => ({ v: p.id, l: 'POP · ' + p.name }));
