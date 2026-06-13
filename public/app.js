@@ -372,6 +372,26 @@ function collect(formSel) {
   return data;
 }
 
+// Type-to-search dropdown. host = element to fill; items = [{v,l}]; writes a hidden input[name].
+function attachSearch(host, items, name, value, placeholder) {
+  if (!host) return;
+  host.classList.add('ss');
+  const cur = items.find(i => String(i.v) === String(value == null ? '' : value));
+  host.innerHTML = `<input type="text" class="ss-input" placeholder="${esc(placeholder || 'Search…')}" value="${cur ? esc(cur.l) : ''}" autocomplete="off"/>
+    <input type="hidden" name="${name}" value="${cur ? esc(String(cur.v)) : ''}"/>
+    <div class="ss-list" style="display:none"></div>`;
+  const input = host.querySelector('.ss-input'), hidden = host.querySelector('input[type=hidden]'), list = host.querySelector('.ss-list');
+  const draw = (f) => {
+    const q = (f || '').toLowerCase();
+    const m = items.filter(i => i.l.toLowerCase().includes(q)).slice(0, 80);
+    list.innerHTML = m.length ? m.map(i => `<div class="ss-opt" data-v="${esc(String(i.v))}">${esc(i.l)}</div>`).join('') : '<div class="ss-opt muted">No matches</div>';
+  };
+  input.addEventListener('focus', () => { draw(''); list.style.display = 'block'; });
+  input.addEventListener('input', () => { hidden.value = ''; draw(input.value); list.style.display = 'block'; });
+  list.addEventListener('mousedown', (e) => { const o = e.target.closest('.ss-opt'); if (!o || !o.dataset.v) return; hidden.value = o.dataset.v; input.value = o.textContent; list.style.display = 'none'; });
+  input.addEventListener('blur', () => setTimeout(() => { list.style.display = 'none'; }, 150));
+}
+
 async function formCustomer(q) {
   let a = { name: '', account_number: '', status: 'Active', billing_address: '', notes: '' };
   if (q.id) a = await api('/accounts/' + q.id);
@@ -399,8 +419,8 @@ async function formSite(q) {
   const accOpts = META.accounts.map(a => ({ v: a.id, l: a.name }));
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${q.id ? 'Edit' : 'Add'} site</h1>
-    <div class="card" style="margin-top:14px;padding:16px" id="f">
-      ${field('Customer / account', 'account_id', s.account_id || s.account?.id, { type: 'select', options: accOpts })}
+    <div class="card" style="margin-top:14px;padding:16px;overflow:visible" id="f">
+      <div class="fld"><label class="fl">Customer / account</label><div id="ss-account"></div></div>
       ${field('Site name', 'name', s.name, { ph: 'e.g. Riverside Office' })}
       ${field('Service address', 'service_address', s.service_address, { ph: 'Street, city, state (optional if GPS)' })}
       <div class="grid2">${field('Latitude', 'lat', s.lat || '', { mono: true })}${field('Longitude', 'lng', s.lng || '', { mono: true })}</div>
@@ -409,12 +429,17 @@ async function formSite(q) {
       ${field('Current management IP', 'current_mgmt_ip', s.current_mgmt_ip, { mono: true })}
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
       <button class="btn primary" onclick="saveSite(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
+  attachSearch($('#ss-account'), accOpts, 'account_id', s.account_id || (s.account && s.account.id), 'Search customer…');
 }
 async function saveSite(id) {
   const d = collect('#f');
-  if (id) { await api('/sites/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/site/' + id; }
-  else { const r = await api('/sites', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/site/' + r.id; }
-  toast('Saved');
+  if (!d.account_id) { toast('Pick a customer/account'); return; }
+  if (!d.name) { toast('Enter a site name'); return; }
+  try {
+    if (id) { await api('/sites/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/site/' + id; }
+    else { const r = await api('/sites', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/site/' + r.id; }
+    toast('Saved');
+  } catch (e) { toast(e.message); }
 }
 
 async function formDevice(q) {
@@ -425,13 +450,13 @@ async function formDevice(q) {
   const popOpts = META.pops.map(p => ({ v: p.id, l: 'POP · ' + p.name }));
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${q.id ? 'Edit' : 'Add'} hardware</h1>
-    <div class="card" style="margin-top:14px;padding:16px" id="f">
+    <div class="card" style="margin-top:14px;padding:16px;overflow:visible" id="f">
       ${field('Device name', 'name', d.name, { ph: 'e.g. Edge Router' })}
       <div class="fld"><label class="fl">Management mode</label><div class="seg">
         <button type="button" class="segbtn ${d.management_mode !== 'provider' ? 'on' : ''}" id="mm-plat" onclick="setMM('platform')"><i class="ti ti-settings-automation"></i> Platform-managed</button>
         <button type="button" class="segbtn ${d.management_mode === 'provider' ? 'on' : ''}" id="mm-prov" onclick="setMM('provider')"><i class="ti ti-building-broadcast-tower"></i> Provider-managed</button>
       </div><input type="hidden" name="management_mode" value="${d.management_mode}"/></div>
-      <div class="grid2">${field('Model', 'model_id', d.model_id, { type: 'select', options: [{ v: '', l: '—' }].concat(modelOpts) })}
+      <div class="grid2"><div class="fld"><label class="fl">Model</label><div id="ss-model"></div></div>
       ${field('Status', 'status', d.status, { type: 'select', options: ['Deployed', 'In stock', 'Spare', 'RMA', 'Retired'] })}</div>
       <div class="grid2">${field('Serial number', 'serial', d.serial, { mono: true })}${field('MAC address', 'mac', d.mac, { mono: true })}</div>
 
@@ -466,14 +491,17 @@ async function formDevice(q) {
           <button type="button" class="segbtn ${d.assigned_type === 'pop' ? 'on' : ''}" id="dt-pop" onclick="setDest('pop')"><i class="ti ti-server-2"></i> POP site</button>
         </div>
         <input type="hidden" name="assigned_type" value="${d.assigned_type || 'site'}"/>
-        <div id="destSite" style="display:${d.assigned_type === 'pop' ? 'none' : 'block'}">${field('Client site', 'assigned_site_id', d.assigned_site_id, { type: 'select', options: [{ v: '', l: '—' }].concat(siteOpts) })}</div>
-        <div id="destPop" style="display:${d.assigned_type === 'pop' ? 'block' : 'none'}">${field('POP site', 'assigned_pop_id', d.assigned_pop_id, { type: 'select', options: [{ v: '', l: '—' }].concat(popOpts) })}</div>
+        <div id="destSite" style="display:${d.assigned_type === 'pop' ? 'none' : 'block'}"><label class="fl">Client site</label><div id="ss-site"></div></div>
+        <div id="destPop" style="display:${d.assigned_type === 'pop' ? 'block' : 'none'}"><label class="fl">POP site</label><div id="ss-pop"></div></div>
       </div>
 
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
       <button class="btn primary" onclick="saveDevice(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div>
     </div>`;
   $('select[name=status]').addEventListener('change', e => { $('#deployBox').style.display = e.target.value === 'Deployed' ? 'block' : 'none'; });
+  attachSearch($('#ss-model'), modelOpts, 'model_id', d.model_id, 'Search manufacturer / model…');
+  attachSearch($('#ss-site'), siteOpts, 'assigned_site_id', d.assigned_site_id, 'Search client site…');
+  attachSearch($('#ss-pop'), popOpts, 'assigned_pop_id', d.assigned_pop_id, 'Search POP…');
 }
 function setMM(m) { $('input[name=management_mode]').value = m; $('#mm-plat').classList.toggle('on', m === 'platform'); $('#mm-prov').classList.toggle('on', m === 'provider'); $('#provExtra').style.display = m === 'provider' ? 'block' : 'none'; $('#platExtra').style.display = m === 'provider' ? 'none' : 'block'; }
 function setOwn(o) { $('input[name=ownership]').value = o; ['us', 'carrier', 'distributor'].forEach(x => $('#ow-' + x).classList.toggle('on', x === o)); }
@@ -482,9 +510,17 @@ function setDest(t) { $('input[name=assigned_type]').value = t; $('#dt-site').cl
 async function saveDevice(id) {
   const d = collect('#f');
   d.online = 1;
-  if (id) { await api('/devices/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/device/' + id; }
-  else { const r = await api('/devices', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/device/' + r.id; }
-  toast('Saved');
+  if (!d.name) { toast('Enter a device name'); return; }
+  // Normalize empty optional/FK fields so SQLite doesn't choke
+  ['model_id', 'assigned_site_id', 'assigned_pop_id', 'controller_id'].forEach(k => { if (d[k] === '') d[k] = null; });
+  if (d.status !== 'Deployed') { d.assigned_type = null; d.assigned_site_id = null; d.assigned_pop_id = null; }
+  else if (d.assigned_type === 'site') d.assigned_pop_id = null;
+  else if (d.assigned_type === 'pop') d.assigned_site_id = null;
+  try {
+    if (id) { await api('/devices/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/device/' + id; }
+    else { const r = await api('/devices', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/device/' + r.id; }
+    toast('Saved');
+  } catch (e) { toast(e.message); }
 }
 
 // ---------- Users (admin) ----------
