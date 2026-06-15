@@ -241,8 +241,8 @@ async function renderCustomers() {
     <div style="flex:1;min-width:0"><div>${esc(a.name)}</div><div class="small mono sec-muted">${esc(a.account_number || '')}</div></div>
     <span class="small sec-muted">${a.site_count} site${a.site_count === 1 ? '' : 's'}</span>
     ${statusPill(a.status)}<i class="ti ti-chevron-right muted"></i></div>`).join('');
-  view().innerHTML = `<div class="head"><h1 style="flex:1">Customers</h1>${isPriv() ? '<a class="btn" href="#/customer/new"><i class="ti ti-plus"></i> Add customer</a>' : ''}</div>
-    <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No customers</div>'}</div>`;
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Accounts</h1>${isPriv() ? '<a class="btn" href="#/customer/new"><i class="ti ti-plus"></i> Add account</a>' : ''}</div>
+    <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No accounts yet</div>'}</div>`;
 }
 
 async function renderCustomer(id) {
@@ -258,7 +258,7 @@ async function renderCustomer(id) {
     <div class="stat">${statusPill(s.conn_status)}<span class="small mono">${s.device_online}/${s.device_total} online</span></div>
     <i class="ti ti-chevron-right muted"></i></div>`).join('');
   view().innerHTML = `
-    <div class="crumb" onclick="location.hash='#/customers'"><i class="ti ti-chevron-left"></i> Customers</div>
+    <div class="crumb" onclick="location.hash='#/customers'"><i class="ti ti-chevron-left"></i> Accounts</div>
     <div class="head"><div class="av" style="width:46px;height:46px;border-radius:8px;font-size:16px">${initials(a.name)}</div>
       <div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(a.name)}</h1>${statusPill(a.status)}</div>
       <div class="small mono sec-muted" style="margin-top:3px">${esc(a.account_number || '')}</div></div>
@@ -401,7 +401,7 @@ async function formCustomer(q) {
   let a = { name: '', account_number: '', status: 'Active', billing_address: '', notes: '' };
   if (q.id) a = await api('/accounts/' + q.id);
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
-    <h1>${q.id ? 'Edit' : 'Add'} customer</h1>
+    <h1>${q.id ? 'Edit' : 'Add'} account</h1>
     <div class="card" style="margin-top:14px;padding:16px" id="f">
       ${field('Account name', 'name', a.name, { ph: 'e.g. Acme Logistics' })}
       <div class="grid2">${field('Account number', 'account_number', a.account_number, { mono: true })}
@@ -474,8 +474,8 @@ async function formDevice(q) {
         <button type="button" class="segbtn ${d.ownership === 'carrier' ? 'on' : ''}" id="ow-carrier" onclick="setOwn('carrier')">Carrier</button>
         <button type="button" class="segbtn ${d.ownership === 'distributor' ? 'on' : ''}" id="ow-distributor" onclick="setOwn('distributor')">Distributor</button>
       </div><input type="hidden" name="ownership" value="${d.ownership}"/>
-      <div class="grid3">${field('Owner / account with', 'owner_org', d.owner_org)}${field('Account number', 'account_number', d.account_number, { mono: true })}${field('Sub-account', 'owner_sub_account', d.owner_sub_account)}</div>
-      <div class="help">Account info is always recorded — even for gear we own there's a carrier/distributor account.</div>
+      <div class="grid3">${field('Carrier / distributor', 'owner_org', d.owner_org, { ph: 'e.g. Verizon, Granite' })}${field('Account number', 'account_number', d.account_number, { mono: true })}${field('Sub-account', 'owner_sub_account', d.owner_sub_account)}</div>
+      <div class="help">This is the carrier/distributor account the hardware sits on — not the customer. Always recorded, even for gear we own.</div>
       </div>
 
       <div id="platExtra" style="display:${d.management_mode === 'provider' ? 'none' : 'block'}">
