@@ -23,6 +23,14 @@ export function isEmpty() {
   return row.n === 0;
 }
 
+// Lightweight migrations: add columns to existing tables if missing (preserves data)
+export function migrate() {
+  const has = (t, c) => db.prepare(`PRAGMA table_info(${t})`).all().some(col => col.name === c);
+  const ensure = (t, c, def) => { if (!has(t, c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${def}`); };
+  ensure('accounts', 'sub_account', 'TEXT');
+  ensure('accounts', 'pin', 'TEXT');
+}
+
 export function seed() {
   db.exec('BEGIN');
   try {

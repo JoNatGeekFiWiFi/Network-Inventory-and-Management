@@ -252,6 +252,11 @@ async function renderCustomer(id) {
   const prev = a.previous_isps.map(p => `<div class="kv" style="display:block">
     <div style="display:flex;justify-content:space-between"><span>${esc(p.provider)}</span><span class="small muted">${esc(p.until_label || '')}</span></div>
     <div class="small sec-muted" style="margin-top:3px"><span class="muted">Why they left:</span> ${esc(p.reason || '')}</div></div>`).join('');
+  const det = [];
+  if (a.sub_account) det.push(kv('Sub-account', esc(a.sub_account)));
+  if (isPriv() && a.has_pin) det.push(`<div class="kv"><span class="small sec-muted">PIN <span class="badge noc">NOC</span></span><span class="mono" style="cursor:pointer;filter:blur(5px)" title="click to reveal" onclick="this.style.filter='none'">${esc(a.pin)}</span></div>`);
+  if (a.billing_address) det.push(kv('Billing', esc(a.billing_address)));
+  const detCard = det.length ? `<div class="card"><div class="hd"><h2>Account details</h2></div><div style="padding:0 14px 10px">${det.join('')}</div></div>` : '';
   const sites = a.sites.map(s => `<div class="row rowlink" onclick="location.hash='#/site/${s.id}'">
     <span class="dot" style="flex:none;background:${pillFor(s.needs_attention ? 'Standby' : 'Up')[1]}"></span>
     <div style="flex:1;min-width:0"><div>${esc(s.name)}</div><div class="small mono sec-muted">mgmt ${esc(s.current_mgmt_ip || '—')} · pub ${esc(s.current_public_ip || '—')}</div></div>
@@ -268,6 +273,7 @@ async function renderCustomer(id) {
       <div class="metric"><div class="l">Devices</div><div class="v">${a.device_count}</div></div>
       <div class="metric"><div class="l">Needs attention</div><div class="v" style="color:var(--warning)">${a.needs_attention}</div></div>
     </div>
+    ${detCard}
     ${contacts ? `<div class="card"><div class="hd"><h2>Contacts</h2></div><div style="padding:0 14px 10px">${contacts}</div></div>` : ''}
     ${prev ? `<div class="card"><div class="hd"><h2><i class="ti ti-history-toggle"></i> Previous ISP</h2></div><div style="padding:0 14px 10px">${prev}</div></div>` : ''}
     <div class="card"><div class="hd"><h2>Sites · ${a.sites.length}</h2><a class="btn sm" href="#/site/new?account=${a.id}"><i class="ti ti-plus"></i> Add site</a></div>${sites || '<div class="row muted">No sites</div>'}</div>`;
@@ -406,6 +412,8 @@ async function formCustomer(q) {
       ${field('Account name', 'name', a.name, { ph: 'e.g. Acme Logistics' })}
       <div class="grid2">${field('Account number', 'account_number', a.account_number, { mono: true })}
       ${field('Status', 'status', a.status, { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}</div>
+      <div class="grid2">${field('Sub-account (optional)', 'sub_account', a.sub_account, { mono: true })}
+      ${field('Account PIN', 'pin', '', { mono: true, ph: q.id ? 'unchanged' : 'NOC/Admin only' })}</div>
       ${field('Billing address', 'billing_address', a.billing_address)}
       ${field('Notes', 'notes', a.notes, { type: 'textarea' })}
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
@@ -474,7 +482,7 @@ async function formDevice(q) {
         <button type="button" class="segbtn ${d.ownership === 'carrier' ? 'on' : ''}" id="ow-carrier" onclick="setOwn('carrier')">Carrier</button>
         <button type="button" class="segbtn ${d.ownership === 'distributor' ? 'on' : ''}" id="ow-distributor" onclick="setOwn('distributor')">Distributor</button>
       </div><input type="hidden" name="ownership" value="${d.ownership}"/>
-      <div class="grid3">${field('Carrier / distributor', 'owner_org', d.owner_org, { ph: 'e.g. Verizon, Granite' })}${field('Account number', 'account_number', d.account_number, { mono: true })}${field('Sub-account', 'owner_sub_account', d.owner_sub_account)}</div>
+      <div class="grid2">${field('Carrier / distributor', 'owner_org', d.owner_org, { ph: 'e.g. Verizon, Granite' })}${field('Account number', 'account_number', d.account_number, { mono: true })}</div>
       <div class="help">This is the carrier/distributor account the hardware sits on — not the customer. Always recorded, even for gear we own.</div>
       </div>
 

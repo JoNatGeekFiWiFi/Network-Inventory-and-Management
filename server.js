@@ -2,7 +2,7 @@
 import express from 'express';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { db, initSchema, isEmpty, seed } from './db.js';
+import { db, initSchema, migrate, isEmpty, seed } from './db.js';
 import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie } from './auth.js';
 import { hashPassword, verifyPassword } from './hash.js';
 
@@ -12,6 +12,7 @@ app.use(express.json());
 
 // First-run: create schema + seed if empty
 initSchema();
+migrate();
 if (isEmpty()) { seed(); console.log('Database seeded on first run.'); }
 
 // ---- helpers ----
@@ -147,6 +148,7 @@ app.get('/api/accounts', (req, res) => {
     SELECT a.*,
       (SELECT COUNT(*) FROM sites s WHERE s.account_id=a.id) AS site_count
     FROM accounts a ORDER BY a.name`).all();
+  rows.forEach(r => delete r.pin); // never expose PIN in the list
   res.json(rows);
 });
 
@@ -158,13 +160,15 @@ app.get('/api/accounts/:id', (req, res) => {
   a.sites = db.prepare('SELECT * FROM sites WHERE account_id=?').all(a.id).map(withSiteSummary);
   a.device_count = a.sites.reduce((n, s) => n + s.device_total, 0);
   a.needs_attention = a.sites.filter(s => s.needs_attention).length;
+  a.has_pin = !!a.pin;
+  if (!isPriv(req)) delete a.pin; // PIN visible to NOC/Admin only
   res.json(a);
 });
 
 app.post('/api/accounts', requireNoc, (req, res) => {
   const b = req.body || {};
-  const info = db.prepare('INSERT INTO accounts (name, account_number, status, billing_address, notes) VALUES (?,?,?,?,?)')
-    .run(N(b.name), N(b.account_number), b.status || 'Active', N(b.billing_address), N(b.notes));
+  const info = db.prepare('INSERT INTO accounts (name, account_number, sub_account, pin, status, billing_address, notes) VALUES (?,?,?,?,?,?,?)')
+    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.pin), b.status || 'Active', N(b.billing_address), N(b.notes));
   const id = info.lastInsertRowid;
   for (const c of (b.contacts || [])) {
     db.prepare('INSERT INTO account_contacts (account_id,name,role,email,phone,is_primary,is_billing) VALUES (?,?,?,?,?,?,?)')
@@ -180,8 +184,9 @@ app.post('/api/accounts', requireNoc, (req, res) => {
 
 app.put('/api/accounts/:id', requireNoc, (req, res) => {
   const b = req.body || {};
-  db.prepare('UPDATE accounts SET name=?, account_number=?, status=?, billing_address=?, notes=? WHERE id=?')
-    .run(N(b.name), N(b.account_number), N(b.status, 'Active'), N(b.billing_address), N(b.notes), req.params.id);
+  db.prepare('UPDATE accounts SET name=?, account_number=?, sub_account=?, status=?, billing_address=?, notes=? WHERE id=?')
+    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.status, 'Active'), N(b.billing_address), N(b.notes), req.params.id);
+  if (b.pin) db.prepare('UPDATE accounts SET pin=? WHERE id=?').run(b.pin, req.params.id);
   audit(req, 'edit', 'account#' + req.params.id, b.name);
   res.json({ ok: true });
 });

@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   account_number TEXT,
+  sub_account TEXT,
+  pin TEXT,                                 -- sensitive: NOC/Admin only
   status TEXT NOT NULL DEFAULT 'Active',
   billing_address TEXT,
   notes TEXT,
