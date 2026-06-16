@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { db, initSchema, migrate, isEmpty, seed } from './db.js';
 import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie } from './auth.js';
 import { hashPassword, verifyPassword } from './hash.js';
+import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseCidr } from './wg.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -123,10 +124,109 @@ app.delete('/api/models/:id', requireNoc, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---- management overlay settings + provisioning (NOC/Admin) ----
+const getSetting = (k) => { const r = db.prepare('SELECT value FROM settings WHERE key=?').get(k); return r ? r.value : null; };
+const setSetting = (k, v) => db.prepare('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, v == null ? '' : v);
+
+app.get('/api/settings', requireNoc, (req, res) => {
+  res.json({
+    zt_network_id: getSetting('zt_network_id') || '',
+    wg_endpoint: getSetting('wg_endpoint') || '',
+    wg_subnet: getSetting('wg_subnet') || '',
+    wg_dns: getSetting('wg_dns') || '',
+    wg_server_pub: getSetting('wg_server_pub') || '',
+    has_zt_api_token: !!getSetting('zt_api_token'),
+    has_wg_server_priv: !!getSetting('wg_server_priv')
+  });
+});
+app.put('/api/settings', requireNoc, (req, res) => {
+  const b = req.body || {};
+  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns']) if (b[k] !== undefined) setSetting(k, b[k]);
+  if (b.zt_api_token) setSetting('zt_api_token', b.zt_api_token);
+  if (!getSetting('wg_server_priv')) { const kp = wgKeypair(); setSetting('wg_server_priv', kp.privateKey); setSetting('wg_server_pub', kp.publicKey); }
+  audit(req, 'edit', 'settings', 'overlay settings');
+  res.json({ ok: true });
+});
+// Full hub (server) wg0.conf — includes the hub private key + all peers. Sensitive, audited.
+app.get('/api/settings/wg/hub-config', requireNoc, (req, res) => {
+  const subnet = getSetting('wg_subnet'), priv = getSetting('wg_server_priv');
+  if (!subnet || !priv) return res.status(400).json({ error: 'Set the WireGuard subnet and save first' });
+  const { mask } = parseCidr(subnet);
+  const port = (getSetting('wg_endpoint') || '').split(':')[1] || '51820';
+  const peers = db.prepare("SELECT name, wg_public_key, mgmt_address FROM devices WHERE mgmt_overlay='WireGuard' AND wg_public_key IS NOT NULL AND mgmt_address IS NOT NULL").all();
+  let cfg = `[Interface]\nAddress = ${serverIp(subnet)}/${mask}\nListenPort = ${port}\nPrivateKey = ${priv}\n`;
+  for (const p of peers) cfg += `\n# ${p.name}\n[Peer]\nPublicKey = ${p.wg_public_key}\nAllowedIPs = ${p.mgmt_address}/32\n`;
+  audit(req, 'credential_read', 'settings', 'WG hub config (' + peers.length + ' peers)');
+  res.json({ config: cfg, peers: peers.length });
+});
+app.post('/api/settings/wg/regenerate', requireNoc, (req, res) => {
+  const kp = wgKeypair(); setSetting('wg_server_priv', kp.privateKey); setSetting('wg_server_pub', kp.publicKey);
+  audit(req, 'edit', 'settings', 'regenerated WG server key');
+  res.json({ public_key: kp.publicKey });
+});
+
+// Provision (or re-provision) a device on WireGuard: keypair + non-overlapping IP
+app.post('/api/devices/:id/wireguard', requireNoc, (req, res) => {
+  const dvc = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
+  if (!dvc) return res.status(404).json({ error: 'not found' });
+  const subnet = getSetting('wg_subnet');
+  if (!subnet) return res.status(400).json({ error: 'Set a WireGuard subnet in Settings first' });
+  let pub = dvc.wg_public_key, priv = dvc.wg_private_key;
+  if (!pub || !priv) { const kp = wgKeypair(); pub = kp.publicKey; priv = kp.privateKey; }
+  let addr = dvc.mgmt_address;
+  if (!addr || dvc.mgmt_overlay !== 'WireGuard') {
+    const taken = db.prepare("SELECT mgmt_address FROM devices WHERE mgmt_overlay='WireGuard' AND mgmt_address IS NOT NULL AND id<>?").all(req.params.id).map(r => r.mgmt_address);
+    taken.push(serverIp(subnet));
+    addr = nextFreeIp(subnet, taken);
+  }
+  if (!addr) return res.status(400).json({ error: 'No free IP in the WireGuard subnet' });
+  db.prepare('UPDATE devices SET wg_public_key=?, wg_private_key=?, mgmt_overlay=?, mgmt_address=? WHERE id=?').run(pub, priv, 'WireGuard', addr, req.params.id);
+  audit(req, 'edit', 'device#' + req.params.id, 'WireGuard provisioned ' + addr);
+  res.json({ address: addr, public_key: pub });
+});
+
+// Download a device's WireGuard config (+ the server peer stanza). Contains a private key — audited.
+app.get('/api/devices/:id/wireguard/config', requireNoc, (req, res) => {
+  const dvc = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
+  if (!dvc) return res.status(404).json({ error: 'not found' });
+  if (!dvc.wg_private_key || !dvc.mgmt_address) return res.status(400).json({ error: 'Device is not provisioned on WireGuard yet' });
+  const cfg = deviceConfig({
+    privateKey: dvc.wg_private_key, address: dvc.mgmt_address, dns: getSetting('wg_dns'),
+    serverPub: getSetting('wg_server_pub') || 'SET_WG_SERVER_KEY', endpoint: getSetting('wg_endpoint') || 'YOUR_HUB:51820',
+    allowed: getSetting('wg_subnet') || '10.0.0.0/8'
+  });
+  const peer = serverPeerStanza({ name: dvc.name, publicKey: dvc.wg_public_key, address: dvc.mgmt_address });
+  audit(req, 'credential_read', 'device#' + req.params.id, 'WireGuard config');
+  res.json({ config: cfg, server_peer: peer, address: dvc.mgmt_address });
+});
+
+// Pull member IPs from ZeroTier Central and update matched devices
+app.post('/api/zerotier/sync', requireNoc, async (req, res) => {
+  const nwid = getSetting('zt_network_id'), token = getSetting('zt_api_token');
+  if (!nwid || !token) return res.status(400).json({ error: 'Set ZeroTier network ID and API token in Settings first' });
+  let members;
+  try {
+    const r = await fetch(`https://api.zerotier.com/api/v1/network/${nwid}/member`, { headers: { Authorization: 'token ' + token } });
+    if (!r.ok) return res.status(502).json({ error: 'ZeroTier API returned ' + r.status });
+    members = await r.json();
+  } catch (e) { return res.status(502).json({ error: 'ZeroTier unreachable: ' + e.message }); }
+  let updated = 0;
+  const devs = db.prepare("SELECT id, zt_node_id FROM devices WHERE zt_node_id IS NOT NULL AND zt_node_id<>''").all();
+  for (const d of devs) {
+    const m = (members || []).find(x => (x.nodeId || (x.config && x.config.nodeId)) === d.zt_node_id);
+    const ip = m && m.config && Array.isArray(m.config.ipAssignments) ? m.config.ipAssignments[0] : null;
+    if (ip) { db.prepare("UPDATE devices SET mgmt_overlay='ZeroTier', mgmt_address=? WHERE id=?").run(ip, d.id); updated++; }
+  }
+  audit(req, 'edit', 'zerotier', `sync: ${updated} device(s) from ${(members || []).length} member(s)`);
+  res.json({ members: (members || []).length, updated });
+});
+
 // Strip credential values from a device row, replace with has_* flags
 function publicDevice(d) {
   const out = { ...d };
   for (const f of ALL_CREDS) { out['has_' + f] = !!out[f]; delete out[f]; }
+  out.wg_provisioned = !!out.wg_private_key;
+  delete out.wg_private_key; // only released via the audited config endpoint
   return out;
 }
 
@@ -320,7 +420,7 @@ app.post('/api/devices/:id/reveal', (req, res) => {
 
 app.post('/api/devices', (req, res) => {
   const b = req.body || {};
-  const cols = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','account_number','owner_account','owner_sub_account','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_password','admin_password','tech_username','tech_password','factory_wifi_ssid','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase'];
+  const cols = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','account_number','owner_account','owner_sub_account','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_password','admin_password','tech_username','tech_password','factory_wifi_ssid','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase','zt_node_id'];
   const vals = cols.map(c => b[c] === undefined ? null : b[c]);
   const info = db.prepare(`INSERT INTO devices (${cols.join(',')}) VALUES (${cols.map(()=>'?').join(',')})`).run(...vals);
   audit(req, 'create', 'device#' + info.lastInsertRowid, b.name);
@@ -331,7 +431,7 @@ app.put('/api/devices/:id', (req, res) => {
   const b = req.body || {};
   const existing = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'not found' });
-  const cols = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','account_number','owner_account','owner_sub_account','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_wifi_ssid','tech_username'];
+  const cols = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','account_number','owner_account','owner_sub_account','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_wifi_ssid','tech_username','zt_node_id'];
   // credentials only overwritten if provided (non-empty)
   const credCols = ['factory_password','admin_password','tech_password','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase'];
   const sets = [], vals = [];

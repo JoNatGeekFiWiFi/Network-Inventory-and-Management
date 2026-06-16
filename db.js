@@ -29,6 +29,10 @@ export function migrate() {
   const ensure = (t, c, def) => { if (!has(t, c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${def}`); };
   ensure('accounts', 'sub_account', 'TEXT');
   ensure('accounts', 'pin', 'TEXT');
+  ensure('devices', 'zt_node_id', 'TEXT');
+  ensure('devices', 'wg_public_key', 'TEXT');
+  ensure('devices', 'wg_private_key', 'TEXT');
+  db.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
 }
 
 export function seed() {

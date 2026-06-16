@@ -14,6 +14,7 @@ Hardware inventory and remote management platform. Hardware is assigned to **cus
 - Device detail with credential reveal and a (sample-data) traffic graph
 - Add / edit forms for customers, sites, and hardware — including the device classes we designed: platform-managed (MikroTik/UniFi/UISP), provider-managed (Cox coax modems), and 5G modem routers; ownership (us / carrier / distributor) + account info
 - **Role-based credential masking** driven by the signed-in user's role (NOC / Admin / Field tech / Support). NOC/Admin see admin/factory/account credentials and site-access codes; field/support see only the limited tech account. Reveals are written to the activity log.
+- **Management overlays** — ZeroTier (reads member IP assignments via the Central API) and WireGuard (generates keypairs, assigns non-overlapping IPs, produces device + hub configs to apply). See below.
 - Activity (audit) log
 
 > Not yet in this build (by design): configuration/provisioning, live device polling (telemetry is stubbed with sample data), per-port graphs, controller sync.
@@ -30,6 +31,39 @@ Sign-in is required. The seed creates four test accounts (the login screen lists
 | support@geekitek.test | support123 | support — simplified, tech account only |
 
 **Before exposing this to the team / VPS:** sign in as admin → **Users** → change the admin password and create real accounts for each person (then deactivate or delete the test ones). Passwords are stored as salted scrypt hashes; sessions are httpOnly cookies (14-day expiry).
+
+## Management overlays (ZeroTier & WireGuard)
+
+Configure these under **Settings** (NOC/Admin only). Tokens and keys are stored server-side and never shown to other roles.
+
+### ZeroTier (reads assignments from ZeroTier Central)
+
+1. Create a network at my.zerotier.com and copy its **Network ID**.
+2. Create an **API token** (ZeroTier account → API Access Tokens).
+3. In **Settings → ZeroTier**, paste the Network ID + API token and Save.
+4. On each device, set its **ZeroTier node ID** (Device → Edit, or the Management overlay card).
+5. Click **Sync ZeroTier now** — the platform pulls each member's assigned IP into the device's management IP. ZeroTier owns the IP range ("let it decide").
+
+### WireGuard (platform assigns IPs, you apply configs)
+
+1. In **Settings → WireGuard**, set the **Hub endpoint** (`your-vps-host:51820`) and a **managed subnet** (e.g. `10.200.0.0/16`), then Save — this generates the hub keypair.
+2. On a device → **Management overlay → Provision on WireGuard**: assigns a non-overlapping IP + keypair.
+3. **WireGuard config** → download the device `.conf` (load it on the device).
+4. Stand up the hub on the VPS (one time, then re-apply when peers change):
+
+```bash
+sudo apt-get install -y wireguard
+# Settings → Download hub wg0.conf, then put it here:
+sudo tee /etc/wireguard/wg0.conf < downloaded-wg0.conf
+sudo chmod 600 /etc/wireguard/wg0.conf
+sudo sysctl -w net.ipv4.ip_forward=1            # if you route between peers
+sudo wg-quick up wg0
+sudo systemctl enable wg-quick@wg0
+```
+
+Open the WireGuard UDP port (e.g. `51820/udp`) in your Hetzner Cloud Firewall. After provisioning more devices, re-download the hub config and `sudo wg syncconf wg0 <(wg-quick strip wg0)` (or `wg-quick down/up wg0`).
+
+The app stays non-root and never touches host networking — it generates and tracks configs; you apply them. The hub `wg0.conf` and device configs contain private keys, so their downloads are NOC/Admin-only and logged to Activity.
 
 ## Requirements
 

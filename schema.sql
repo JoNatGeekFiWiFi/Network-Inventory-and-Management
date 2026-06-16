@@ -17,6 +17,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at TEXT NOT NULL
 );
 
+-- Key/value app settings (overlay config, etc.)
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+
 -- Customer / account (no on-net/brokered type; that lives on connections)
 CREATE TABLE IF NOT EXISTS accounts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,6 +188,10 @@ CREATE TABLE IF NOT EXISTS devices (
   acct_portal_username TEXT,
   acct_portal_password TEXT,
   acct_passphrase TEXT,
+  -- management overlay identifiers
+  zt_node_id TEXT,
+  wg_public_key TEXT,
+  wg_private_key TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

@@ -43,6 +43,7 @@ function setupHeader() {
   $('#userMenu').innerHTML = `<div class="who"><div class="nm">${esc(CURRENT_USER.name || CURRENT_USER.email)}</div><div class="rl">${esc(CURRENT_USER.role)}</div></div>
     <button class="btn sm" onclick="logout()"><i class="ti ti-logout"></i> Sign out</button>`;
   $('#navModels').style.display = isPriv() ? '' : 'none';
+  $('#navSettings').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
 }
 function toast(msg) {
@@ -108,6 +109,7 @@ async function route() {
     if (p[0] === 'models' && p[1] === 'new') { setNav('models'); return await formModel({}); }
     if (p[0] === 'models' && p[2] === 'edit') { setNav('models'); return await formModel({ id: p[1] }); }
     if (p[0] === 'models') { setNav('models'); return await renderModels(); }
+    if (p[0] === 'settings') { setNav('settings'); return await renderSettings(); }
     view().innerHTML = '<div class="card" style="padding:20px">Not found</div>';
   } catch (e) { if (e.message === 'auth') return; view().innerHTML = `<div class="card" style="padding:20px">Error: ${esc(e.message)}</div>`; }
 }
@@ -322,6 +324,19 @@ async function renderDevice(id) {
   if (d.owner_sub_account) info.push(['Sub-account', d.owner_sub_account]);
   if (d.cell_carrier) { info.push(['Cellular carrier', d.cell_carrier]); info.push(['Phone', d.cell_phone || '—']); info.push(['IMEI', d.cell_imei || '—']); info.push(['SIM/ICCID', d.cell_sim || '—']); }
 
+  const overlayCard = (d.management_mode === 'provider') ? '' : `
+    <div class="card"><div class="hd"><h2><i class="ti ti-router-2"></i> Management overlay</h2><span class="tag">${esc(d.mgmt_overlay || 'none')}</span></div>
+      <div style="padding:0 14px 14px">
+        <div class="kv"><span class="small sec-muted">Overlay IP</span><span class="mono">${esc(d.mgmt_address || '—')}</span></div>
+        <div class="kv"><span class="small sec-muted">ZeroTier node ID</span><span class="mono">${esc(d.zt_node_id || '—')}</span></div>
+        ${isPriv() ? `<div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
+          ${d.wg_provisioned
+            ? `<button class="btn sm" onclick="showWg(${d.id})"><i class="ti ti-shield-lock"></i> WireGuard config</button><button class="btn sm" onclick="provisionWg(${d.id})"><i class="ti ti-refresh"></i> Re-provision</button>`
+            : `<button class="btn sm" onclick="provisionWg(${d.id})"><i class="ti ti-shield-lock"></i> Provision on WireGuard</button>`}
+          ${d.zt_node_id ? `<button class="btn sm" onclick="ztSyncDevice(${d.id})"><i class="ti ti-refresh"></i> Sync ZeroTier</button>` : ''}
+        </div><div id="wgout"></div>` : '<div class="help">Overlay provisioning is NOC/Admin only.</div>'}
+      </div></div>`;
+
   view().innerHTML = `
     <div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(d.name)}</h1>${statusPill(d.online ? 'Online' : 'Offline')}</div>
@@ -336,6 +351,8 @@ async function renderDevice(id) {
       <div class="help">Telemetry stubbed with sample data for this testing build · 1-min res / 60-day retention planned</div></div></div>`}
 
     <div class="card"><div class="hd"><h2>Details</h2></div><div style="padding:0 14px 10px">${info.map(([k, v]) => `<div class="kv"><span class="small sec-muted">${esc(k)}</span><span class="mono small">${v}</span></div>`).join('')}</div></div>
+
+    ${overlayCard}
 
     ${visibleCreds.length ? `<div class="card"><div class="hd"><h2><i class="ti ti-key"></i> Credentials</h2><button class="btn sm" onclick="revealCreds(${d.id})"><i class="ti ti-eye"></i> Reveal</button></div><div style="padding:0 14px 10px">${credRows}<div class="help"><i class="ti ti-lock"></i> Masked · reveal is logged${isPriv() ? '' : ' · NOC-only fields hidden for your role'}</div></div></div>` : ''}`;
 
@@ -491,7 +508,8 @@ async function formDevice(q) {
           <button type="button" class="segbtn ${d.mgmt_overlay !== 'ZeroTier' ? 'on' : ''}" id="ov-WireGuard" onclick="setOv('WireGuard')"><i class="ti ti-shield-lock"></i> WireGuard</button>
           <button type="button" class="segbtn ${d.mgmt_overlay === 'ZeroTier' ? 'on' : ''}" id="ov-ZeroTier" onclick="setOv('ZeroTier')"><i class="ti ti-network"></i> ZeroTier</button>
         </div><input type="hidden" name="mgmt_overlay" value="${d.mgmt_overlay || 'WireGuard'}"/></div>
-        ${field('Management IP', 'mgmt_address', d.mgmt_address, { mono: true, ph: 'e.g. 10.20.1.1' })}
+        ${field('Management IP', 'mgmt_address', d.mgmt_address, { mono: true, ph: 'auto-set when provisioned' })}
+        ${field('ZeroTier node ID (if using ZeroTier)', 'zt_node_id', d.zt_node_id, { mono: true, ph: '10-hex node id' })}
         <div class="box"><div class="small" style="font-weight:500;margin-bottom:8px"><i class="ti ti-key"></i> Credentials</div>
         <div class="grid2">${field('Admin password', 'admin_password', '', { ph: q.id ? 'unchanged' : '' })}${field('Factory password', 'factory_password', '', { ph: q.id ? 'unchanged' : '' })}</div>
         <div class="grid2">${field('Tech username', 'tech_username', d.tech_username)}${field('Tech password', 'tech_password', '', { ph: q.id ? 'unchanged' : '' })}</div></div>
@@ -627,4 +645,88 @@ async function saveModel(id) {
 async function delModel(id) {
   if (!confirm('Delete this model?')) return;
   try { await api('/models/' + id, { method: 'DELETE' }); toast('Deleted'); renderModels(); } catch (e) { toast(e.message); }
+}
+
+// ---------- Settings: management overlays (NOC/Admin) ----------
+async function renderSettings() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const s = await api('/settings');
+  view().innerHTML = `<h1>Settings</h1><div class="small sec-muted" style="margin:4px 0 14px">Management network &amp; overlays</div>
+    <div class="card" style="padding:16px" id="zt">
+      <h2 style="margin-bottom:12px"><i class="ti ti-network"></i> ZeroTier</h2>
+      ${field('Network ID', 'zt_network_id', s.zt_network_id, { mono: true, ph: '16-hex network id' })}
+      ${field('API token', 'zt_api_token', '', { mono: true, ph: s.has_zt_api_token ? 'unchanged' : 'ZeroTier Central API token' })}
+      <div class="help">Used to read members' assigned IPs from ZeroTier Central. Token is NOC/Admin-only and stored server-side.</div>
+      <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" onclick="saveSettings()"><i class="ti ti-check"></i> Save</button>
+      <button class="btn" onclick="ztSync()"><i class="ti ti-refresh"></i> Sync ZeroTier now</button></div>
+    </div>
+    <div class="card" style="padding:16px" id="wg">
+      <h2 style="margin-bottom:12px"><i class="ti ti-shield-lock"></i> WireGuard</h2>
+      <div class="grid2">${field('Hub endpoint', 'wg_endpoint', s.wg_endpoint, { mono: true, ph: 'mgmt.host:51820' })}
+      ${field('Subnet (managed range)', 'wg_subnet', s.wg_subnet, { mono: true, ph: '10.200.0.0/16' })}</div>
+      ${field('DNS (optional)', 'wg_dns', s.wg_dns, { mono: true })}
+      <div class="fld"><label class="fl">Hub public key</label>
+        <input value="${esc(s.wg_server_pub || '(generated on save)')}" readonly style="font-family:var(--mono);background:var(--surface2)"/>
+        <div class="help">Devices use this as the [Peer] PublicKey. Private key stays server-side. ${s.has_wg_server_priv ? '' : 'Save once to generate the hub keypair.'}</div></div>
+      <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap"><button class="btn primary" onclick="saveSettings()"><i class="ti ti-check"></i> Save</button>
+      <button class="btn" onclick="dlHub()"><i class="ti ti-download"></i> Download hub wg0.conf</button>
+      <button class="btn" onclick="regenWg()"><i class="ti ti-refresh"></i> Regenerate hub key</button></div>
+      <div id="hubout"></div>
+    </div>
+    <div class="help">After saving the WireGuard subnet, open a device → Management overlay → Provision on WireGuard to assign it a non-overlapping IP and download its config. Apply the device's <span class="mono">[Peer]</span> stanza to your hub.</div>`;
+}
+async function saveSettings() {
+  const z = collect('#zt'), w = collect('#wg');
+  const d = Object.assign({}, z, w);
+  if (!d.zt_api_token) delete d.zt_api_token; // blank = keep existing
+  try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
+}
+async function regenWg() {
+  if (!confirm('Regenerate the hub keypair? Existing device configs will need to be re-downloaded.')) return;
+  try { await api('/settings/wg/regenerate', { method: 'POST' }); toast('New hub key generated'); renderSettings(); } catch (e) { toast(e.message); }
+}
+async function ztSync() {
+  try { const r = await api('/zerotier/sync', { method: 'POST' }); toast(`ZeroTier: updated ${r.updated} of ${r.members} members`); } catch (e) { toast(e.message); }
+}
+async function dlHub() {
+  try {
+    const r = await api('/settings/wg/hub-config');
+    const out = $('#hubout');
+    out.innerHTML = `<div style="margin-top:12px"><div class="small sec-muted" style="margin-bottom:4px">Hub config — put at <span class="mono">/etc/wireguard/wg0.conf</span> (${r.peers} peer(s))</div>
+      <textarea id="hubcfg" readonly rows="8" style="font-family:var(--mono);font-size:12px"></textarea>
+      <button class="btn sm" id="hubdl" style="margin-top:8px"><i class="ti ti-download"></i> Download wg0.conf</button></div>`;
+    $('#hubcfg').value = r.config;
+    $('#hubdl').addEventListener('click', () => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([r.config], { type: 'text/plain' }));
+      a.download = 'wg0.conf'; a.click();
+    });
+  } catch (e) { toast(e.message); }
+}
+
+// ---------- Device overlay actions ----------
+async function provisionWg(id) {
+  try { const r = await api('/devices/' + id + '/wireguard', { method: 'POST' }); toast('Provisioned ' + r.address); renderDevice(id); } catch (e) { toast(e.message); }
+}
+async function ztSyncDevice(id) {
+  try { const r = await api('/zerotier/sync', { method: 'POST' }); toast(`ZeroTier: updated ${r.updated} of ${r.members}`); renderDevice(id); } catch (e) { toast(e.message); }
+}
+async function showWg(id) {
+  try {
+    const r = await api('/devices/' + id + '/wireguard/config');
+    const out = $('#wgout');
+    out.innerHTML = `<div style="margin-top:12px">
+      <div class="small sec-muted" style="margin-bottom:4px">Device config (<span class="mono">${esc(r.address)}</span>)</div>
+      <textarea id="wgcfg" readonly rows="8" style="font-family:var(--mono);font-size:12px"></textarea>
+      <div class="small sec-muted" style="margin:8px 0 4px">Add this [Peer] to the hub</div>
+      <textarea id="wgpeer" readonly rows="4" style="font-family:var(--mono);font-size:12px"></textarea>
+      <button class="btn sm" id="wgdl" style="margin-top:8px"><i class="ti ti-download"></i> Download .conf</button></div>`;
+    $('#wgcfg').value = r.config;
+    $('#wgpeer').value = r.server_peer;
+    $('#wgdl').addEventListener('click', () => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([r.config], { type: 'text/plain' }));
+      a.download = 'wg-' + id + '.conf'; a.click();
+    });
+  } catch (e) { toast(e.message); }
 }
