@@ -141,8 +141,8 @@ app.get('/api/settings', requireNoc, (req, res) => {
 });
 app.put('/api/settings', requireNoc, (req, res) => {
   const b = req.body || {};
-  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns']) if (b[k] !== undefined) setSetting(k, b[k]);
-  if (b.zt_api_token) setSetting('zt_api_token', b.zt_api_token);
+  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  if (b.zt_api_token) setSetting('zt_api_token', String(b.zt_api_token).trim());
   if (!getSetting('wg_server_priv')) { const kp = wgKeypair(); setSetting('wg_server_priv', kp.privateKey); setSetting('wg_server_pub', kp.publicKey); }
   audit(req, 'edit', 'settings', 'overlay settings');
   res.json({ ok: true });
@@ -200,6 +200,30 @@ app.get('/api/devices/:id/wireguard/config', requireNoc, (req, res) => {
   res.json({ config: cfg, server_peer: peer, address: dvc.mgmt_address });
 });
 
+// Live list of ZeroTier members, annotated with which device (if any) is linked
+app.get('/api/zerotier/members', requireNoc, async (req, res) => {
+  const nwid = getSetting('zt_network_id'), token = getSetting('zt_api_token');
+  if (!nwid || !token) return res.status(400).json({ error: 'Set ZeroTier network ID and API token in Settings first' });
+  let members;
+  try {
+    const r = await fetch(`https://api.zerotier.com/api/v1/network/${nwid}/member`, { headers: { Authorization: 'token ' + token } });
+    if (!r.ok) { const t = await r.text().catch(() => ''); return res.status(502).json({ error: `ZeroTier API ${r.status}${t ? ': ' + t.slice(0, 160) : ''}` }); }
+    members = await r.json();
+  } catch (e) { return res.status(502).json({ error: 'ZeroTier unreachable: ' + e.message }); }
+  const devs = db.prepare("SELECT id, name, zt_node_id FROM devices WHERE zt_node_id IS NOT NULL AND zt_node_id<>''").all();
+  const map = {}; devs.forEach(d => { map[d.zt_node_id] = { id: d.id, name: d.name }; });
+  const now = Date.now();
+  const out = (members || []).map(m => {
+    const nodeId = m.nodeId || (m.config && m.config.nodeId) || '';
+    const ips = (m.config && Array.isArray(m.config.ipAssignments)) ? m.config.ipAssignments : [];
+    const lastSeen = m.lastSeen || m.lastOnline || 0;
+    const online = (m.online !== undefined) ? !!m.online : (lastSeen > 0 && (now - lastSeen) < 300000);
+    return { nodeId, name: m.name || '', description: m.description || '', authorized: !!(m.config && m.config.authorized), ip: ips[0] || null, lastSeen, online, device: map[nodeId] || null };
+  });
+  out.sort((a, b) => (b.online - a.online) || (a.name || a.nodeId).localeCompare(b.name || b.nodeId));
+  res.json({ network: nwid, count: out.length, online: out.filter(m => m.online).length, members: out });
+});
+
 // Pull member IPs from ZeroTier Central and update matched devices
 app.post('/api/zerotier/sync', requireNoc, async (req, res) => {
   const nwid = getSetting('zt_network_id'), token = getSetting('zt_api_token');
@@ -207,7 +231,11 @@ app.post('/api/zerotier/sync', requireNoc, async (req, res) => {
   let members;
   try {
     const r = await fetch(`https://api.zerotier.com/api/v1/network/${nwid}/member`, { headers: { Authorization: 'token ' + token } });
-    if (!r.ok) return res.status(502).json({ error: 'ZeroTier API returned ' + r.status });
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      const hint = r.status === 401 ? ' (token rejected — check it has no extra spaces and is a Central API token)' : '';
+      return res.status(502).json({ error: `ZeroTier API ${r.status}${hint}${t ? ': ' + t.slice(0, 160) : ''}` });
+    }
     members = await r.json();
   } catch (e) { return res.status(502).json({ error: 'ZeroTier unreachable: ' + e.message }); }
   let updated = 0;

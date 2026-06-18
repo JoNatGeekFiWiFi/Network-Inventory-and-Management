@@ -44,6 +44,7 @@ function setupHeader() {
     <button class="btn sm" onclick="logout()"><i class="ti ti-logout"></i> Sign out</button>`;
   $('#navModels').style.display = isPriv() ? '' : 'none';
   $('#navSettings').style.display = isPriv() ? '' : 'none';
+  $('#navZt').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
 }
 function toast(msg) {
@@ -110,6 +111,7 @@ async function route() {
     if (p[0] === 'models' && p[2] === 'edit') { setNav('models'); return await formModel({ id: p[1] }); }
     if (p[0] === 'models') { setNav('models'); return await renderModels(); }
     if (p[0] === 'settings') { setNav('settings'); return await renderSettings(); }
+    if (p[0] === 'zerotier') { setNav('zerotier'); return await renderZeroTier(); }
     view().innerHTML = '<div class="card" style="padding:20px">Not found</div>';
   } catch (e) { if (e.message === 'auth') return; view().innerHTML = `<div class="card" style="padding:20px">Error: ${esc(e.message)}</div>`; }
 }
@@ -475,6 +477,11 @@ async function saveSite(id) {
 async function formDevice(q) {
   let d = { name: '', status: 'Deployed', management_mode: 'platform', mgmt_overlay: 'WireGuard', ownership: 'us', account_status: 'active', online: 1 };
   if (q.id) d = await api('/devices/' + q.id);
+  if (!q.id) { // prefill from a ZeroTier member ("Add to site")
+    if (q.zt) { d.zt_node_id = q.zt; d.mgmt_overlay = 'ZeroTier'; }
+    if (q.name) d.name = q.name;
+    if (q.ip) d.mgmt_address = q.ip;
+  }
   const modelOpts = (await api('/models')).map(m => ({ v: m.id, l: m.manufacturer + ' ' + m.model }));
   const siteOpts = (await api('/sites')).map(s => ({ v: s.id, l: s.name }));
   const popOpts = META.pops.map(p => ({ v: p.id, l: 'POP · ' + p.name }));
@@ -688,6 +695,44 @@ async function regenWg() {
 async function ztSync() {
   try { const r = await api('/zerotier/sync', { method: 'POST' }); toast(`ZeroTier: updated ${r.updated} of ${r.members} members`); } catch (e) { toast(e.message); }
 }
+// ---------- ZeroTier status page ----------
+let _ztMembers = [];
+async function renderZeroTier() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  let data;
+  try { data = await api('/zerotier/members'); }
+  catch (e) { view().innerHTML = `<h1>ZeroTier</h1><div class="card" style="padding:20px">Couldn't load members: ${esc(e.message)}<div class="help" style="margin-top:8px">Set your network ID + API token under Settings.</div></div>`; return; }
+  _ztMembers = data.members;
+  view().innerHTML = `<div class="head"><h1 style="flex:1">ZeroTier</h1><button class="btn" onclick="ztSyncAll()"><i class="ti ti-refresh"></i> Sync IPs</button></div>
+    <div class="grid3" style="margin:16px 0">
+      <div class="metric"><div class="l">Members</div><div class="v">${data.count}</div></div>
+      <div class="metric"><div class="l">Online</div><div class="v" style="color:var(--success)">${data.online}</div></div>
+      <div class="metric"><div class="l">Linked to a device</div><div class="v">${_ztMembers.filter(m => m.device).length}</div></div>
+    </div>
+    <input id="ztq" placeholder="Search name, node ID, or IP…" oninput="drawZt()" style="margin-bottom:12px"/>
+    <div class="card" id="ztlist"></div>`;
+  drawZt();
+}
+function drawZt() {
+  const q = ($('#ztq') ? $('#ztq').value : '').toLowerCase();
+  const rows = _ztMembers.filter(m => !q || (m.name + m.nodeId + (m.ip || '')).toLowerCase().includes(q)).map(m => {
+    const dotc = m.online ? 'var(--success)' : 'var(--text3)';
+    const action = m.device
+      ? `<a class="btn sm" href="#/device/${m.device.id}">View device</a>`
+      : `<button class="btn sm" onclick="ztAdd('${esc(m.nodeId)}','${encodeURIComponent(m.name)}','${esc(m.ip || '')}')"><i class="ti ti-plus"></i> Add to site</button>`;
+    return `<div class="row">
+      <span class="dot" style="background:${dotc};flex:none"></span>
+      <div style="flex:1;min-width:0"><div>${esc(m.name || '(unnamed)')} ${m.authorized ? '' : '<span class="badge" style="background:var(--warning-bg);color:var(--warning)">unauthorized</span>'}</div>
+        <div class="small mono sec-muted">${esc(m.nodeId)} · ${esc(m.ip || 'no IP')}</div></div>
+      <span class="small muted">${m.online ? 'online' : timeAgo(m.lastSeen)}</span>
+      ${action}</div>`;
+  }).join('');
+  $('#ztlist').innerHTML = rows || '<div class="row muted">No matches</div>';
+}
+function ztAdd(nodeId, nameEnc, ip) { location.hash = `#/device/new?zt=${encodeURIComponent(nodeId)}&name=${nameEnc}&ip=${encodeURIComponent(ip)}`; }
+async function ztSyncAll() { try { const r = await api('/zerotier/sync', { method: 'POST' }); toast(`Synced ${r.updated} of ${r.members}`); renderZeroTier(); } catch (e) { toast(e.message); } }
+function timeAgo(ms) { if (!ms) return 'never'; const s = Math.floor((Date.now() - ms) / 1000); if (s < 60) return s + 's ago'; if (s < 3600) return Math.floor(s / 60) + 'm ago'; if (s < 86400) return Math.floor(s / 3600) + 'h ago'; return Math.floor(s / 86400) + 'd ago'; }
+
 async function dlHub() {
   try {
     const r = await api('/settings/wg/hub-config');
