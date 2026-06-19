@@ -304,8 +304,20 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
       ips: ipByIf[i.name] || [], speed: rateByName[i.name] || ''
     }));
     const publicIp = addresses.map(a => (a.address || '').split('/')[0]).find(isPublicV4) || null;
+    // Port-1 MAC (ether1, else first ethernet/interface with a MAC) + serial from routerboard
+    const firstEth = ifaces.find(i => i.name === 'ether1') || ifaces.find(i => i.type === 'ether' && i.mac) || ifaces.find(i => i.mac);
+    const macVal = firstEth ? firstEth.mac : null;
+    let serialVal = null;
+    try {
+      const rb = await restReq(d.mgmt_address, '/rest/system/routerboard', { headers: H, timeoutMs: 7000 });
+      if (rb.status < 400) { const j = JSON.parse(rb.body); const o = Array.isArray(j) ? j[0] : j; serialVal = (o && (o['serial-number'] || o['serial'])) || null; }
+    } catch {}
     const polled = new Date().toISOString();
-    db.prepare('UPDATE devices SET interfaces_json=?, last_polled=? WHERE id=?').run(JSON.stringify(ifaces), polled, d.id);
+    const sets = ['interfaces_json=?', 'last_polled=?']; const vals = [JSON.stringify(ifaces), polled];
+    if (macVal) { sets.push('mac=?'); vals.push(macVal); }
+    if (serialVal) { sets.push('serial=?'); vals.push(serialVal); }
+    vals.push(d.id);
+    db.prepare(`UPDATE devices SET ${sets.join(', ')} WHERE id=?`).run(...vals);
     let setPublic = null;
     if (d.assigned_type === 'site' && d.assigned_site_id) {
       if (d.mgmt_address) db.prepare('UPDATE sites SET current_mgmt_ip=? WHERE id=?').run(d.mgmt_address, d.assigned_site_id);
@@ -692,6 +704,18 @@ app.get('/api/devices/:id/traffic', (req, res) => {
 app.get('/api/devices/:id/latency', (req, res) => {
   const range = req.query.range || '1h';
   const rows = db.prepare('SELECT ts, ms FROM dev_latency WHERE device_id=? AND ts>=? ORDER BY ts').all(req.params.id, sinceIso(range));
+  res.json(rows);
+});
+// Aggregated traffic across interfaces tagged WAN1/WAN2
+app.get('/api/devices/:id/wan-traffic', (req, res) => {
+  const range = req.query.range || '1h';
+  const d = db.prepare('SELECT iface_roles_json FROM devices WHERE id=?').get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'not found' });
+  let roles = {}; try { roles = JSON.parse(d.iface_roles_json || '{}'); } catch {}
+  const wan = Object.keys(roles).filter(k => roles[k] === 'WAN1' || roles[k] === 'WAN2');
+  if (!wan.length) return res.json([]);
+  const ph = wan.map(() => '?').join(',');
+  const rows = db.prepare(`SELECT ts, SUM(rx_bps) AS rx_bps, SUM(tx_bps) AS tx_bps FROM iface_traffic WHERE device_id=? AND iface IN (${ph}) AND ts>=? GROUP BY ts ORDER BY ts`).all(req.params.id, ...wan, sinceIso(range));
   res.json(rows);
 });
 

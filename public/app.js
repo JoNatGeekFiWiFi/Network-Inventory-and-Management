@@ -478,6 +478,10 @@ async function renderDevice(id) {
       <a class="btn" href="#/device/${d.id}/edit"><i class="ti ti-edit"></i> Edit</a></div>
 
     ${d.management_mode === 'provider' ? '' : `
+    <div class="card"><div class="hd"><h2><i class="ti ti-arrows-up-down"></i> WAN traffic</h2><div class="seg" style="flex:none" id="wanrng">
+      <button class="segbtn on" data-r="1h" onclick="setWanRange('1h')">1h</button><button class="segbtn" data-r="24h" onclick="setWanRange('24h')">24h</button><button class="segbtn" data-r="7d" onclick="setWanRange('7d')">7d</button></div></div>
+      <div style="padding:0 14px 14px"><div style="position:relative;height:180px"><canvas id="wanchart"></canvas></div>
+      <div class="help" id="wanhelp">Sum of interfaces tagged WAN1/WAN2 · sampled every minute</div></div>
     <div class="card"><div class="hd"><h2><i class="ti ti-activity"></i> WAN latency</h2><div class="seg" style="flex:none" id="latrng">
       <button class="segbtn on" data-r="1h" onclick="setLatRange('1h')">1h</button><button class="segbtn" data-r="24h" onclick="setLatRange('24h')">24h</button><button class="segbtn" data-r="7d" onclick="setLatRange('7d')">7d</button></div></div>
       <div style="padding:0 14px 14px"><div style="position:relative;height:180px"><canvas id="latchart"></canvas></div>
@@ -492,7 +496,20 @@ async function renderDevice(id) {
     ${visibleCreds.length ? `<div class="card"><div class="hd"><h2><i class="ti ti-key"></i> Credentials</h2><button class="btn sm" onclick="revealCreds(${d.id})"><i class="ti ti-eye"></i> Reveal</button></div><div style="padding:0 14px 10px">${credRows}<div class="help"><i class="ti ti-lock"></i> Masked · reveal is logged${isPriv() ? '' : ' · NOC-only fields hidden for your role'}</div></div></div>` : ''}`;
 
   window._devId = d.id; window._devPorts = ifaces.map(i => i.name);
-  if (d.management_mode !== 'provider') setLatRange('1h');
+  if (d.management_mode !== 'provider') { setWanRange('1h'); setLatRange('1h'); }
+}
+let _wanChart = null;
+async function setWanRange(range) {
+  document.querySelectorAll('#wanrng .segbtn').forEach(b => b.classList.toggle('on', b.dataset.r === range));
+  let rows = []; try { rows = await api('/devices/' + window._devId + '/wan-traffic?range=' + range); } catch {}
+  const cv = $('#wanchart'); if (!cv) return;
+  const mbps = v => Math.round(v / 1e4) / 100;
+  if (_wanChart) _wanChart.destroy();
+  _wanChart = new Chart(cv, { type: 'line', data: { labels: rows.map(r => fmtTs(r.ts, range)), datasets: [
+    { label: 'Download', data: rows.map(r => mbps(r.rx_bps)), borderColor: '#378ADD', backgroundColor: 'rgba(55,138,221,.12)', fill: true, tension: .35, pointRadius: 0, borderWidth: 2 },
+    { label: 'Upload', data: rows.map(r => mbps(r.tx_bps)), borderColor: '#1D9E75', backgroundColor: 'rgba(29,158,117,.12)', fill: true, tension: .35, pointRadius: 0, borderWidth: 2 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.dataset.label + ': ' + c.parsed.y + ' Mbps' } } }, scales: { y: { beginAtZero: true, ticks: { callback: v => v + 'M' } } } } });
+  const h = $('#wanhelp'); if (h) h.textContent = rows.length ? 'Sum of interfaces tagged WAN1/WAN2 · sampled every minute' : 'No WAN traffic yet — tag a port as WAN1/WAN2 (expand a port → Role).';
 }
 function fmtTs(ts, range) { const d = new Date(ts); return (range === '7d' || range === '60d') ? (d.getMonth() + 1) + '/' + d.getDate() : ('' + d.getHours()).padStart(2, '0') + ':' + ('' + d.getMinutes()).padStart(2, '0'); }
 let _latChart = null;
