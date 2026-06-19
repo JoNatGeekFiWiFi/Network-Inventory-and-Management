@@ -44,6 +44,22 @@ Configure these under **Settings** (NOC/Admin only). Tokens and keys are stored 
 4. On each device, set its **ZeroTier node ID** (Device → Edit, or the Management overlay card).
 5. Click **Sync ZeroTier now** — the platform pulls each member's assigned IP into the device's management IP. ZeroTier owns the IP range ("let it decide").
 
+#### Joining the server to ZeroTier (required for live polling)
+
+Reading IPs from the ZeroTier cloud API doesn't route traffic — to actually **reach** devices (e.g. poll a MikroTik for its ports), the VPS must join the management network:
+
+```bash
+curl -s https://install.zerotier.com | sudo bash
+sudo zerotier-cli join <YOUR_NETWORK_ID>
+sudo zerotier-cli listnetworks      # note the status
+```
+
+Then in ZeroTier Central, **authorize** the server (check its box) so it gets an assigned IP. Re-run `listnetworks` — status should be `OK` with an IP. The VPS can now reach device overlay IPs, and **Device → Poll now** will pull live interfaces.
+
+### Live device polling (MikroTik RouterOS)
+
+On a platform-managed MikroTik device, set the **admin username/password** and a **management IP** (on the overlay), then open the device → **Ports / interfaces → Poll now**. The platform calls the device's RouterOS REST API (`/rest/interface`) over the overlay and lists its live interfaces. Requirements on the device: RouterOS v7 with the `www-ssl` service enabled (REST API), reachable at its management IP. (UniFi/UISP polling via controller is not built yet.)
+
 ### WireGuard (platform assigns IPs, you apply configs)
 
 1. In **Settings → WireGuard**, set the **Hub endpoint** (`your-vps-host:51820`) and a **managed subnet** (e.g. `10.200.0.0/16`), then Save — this generates the hub keypair.

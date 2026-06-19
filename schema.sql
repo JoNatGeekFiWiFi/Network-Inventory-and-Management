@@ -206,6 +206,10 @@ CREATE TABLE IF NOT EXISTS devices (
   zt_node_id TEXT,
   wg_public_key TEXT,
   wg_private_key TEXT,
+  -- live polling (RouterOS etc.)
+  admin_username TEXT,
+  interfaces_json TEXT,
+  last_polled TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

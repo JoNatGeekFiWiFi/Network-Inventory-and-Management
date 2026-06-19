@@ -6,6 +6,23 @@ import { db, initSchema, migrate, isEmpty, seed } from './db.js';
 import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie } from './auth.js';
 import { hashPassword, verifyPassword } from './hash.js';
 import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseCidr } from './wg.js';
+import https from 'node:https';
+
+// HTTPS GET that tolerates self-signed certs (RouterOS) with a timeout. Returns {status, body}.
+function httpsGetJson(urlStr, headers, timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try { u = new URL(urlStr); } catch (e) { return reject(e); }
+    const req = https.request({ hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search, method: 'GET', headers, rejectUnauthorized: false, timeout: timeoutMs }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => resolve({ status: res.statusCode, body: data }));
+    });
+    req.on('timeout', () => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
+    req.on('error', reject);
+    req.end();
+  });
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -198,6 +215,41 @@ app.get('/api/devices/:id/wireguard/config', requireNoc, (req, res) => {
   const peer = serverPeerStanza({ name: dvc.name, publicKey: dvc.wg_public_key, address: dvc.mgmt_address });
   audit(req, 'credential_read', 'device#' + req.params.id, 'WireGuard config');
   res.json({ config: cfg, server_peer: peer, address: dvc.mgmt_address });
+});
+
+// Poll a MikroTik RouterOS device over the management overlay for its live interfaces
+app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
+  const d = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'not found' });
+  if (!d.mgmt_address) return res.status(400).json({ error: 'No management IP — assign/provision the overlay first' });
+  if (!d.admin_password) return res.status(400).json({ error: 'Add an admin password (and username) for this device first' });
+  const user = d.admin_username || 'admin';
+  const auth = 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64');
+  try {
+    const r = await httpsGetJson(`https://${d.mgmt_address}/rest/interface`, { Authorization: auth, Accept: 'application/json' });
+    if (r.status >= 400) {
+      const hint = r.status === 401 ? ' (login rejected — check admin user/pass and that the www-ssl/REST service is enabled)' : '';
+      return res.status(502).json({ error: `Device returned ${r.status}${hint}` });
+    }
+    let data;
+    try { data = JSON.parse(r.body); } catch { return res.status(502).json({ error: 'Unexpected response from device (is REST enabled?)' }); }
+    const ifaces = (Array.isArray(data) ? data : []).map(i => ({
+      name: i.name, type: i.type || '',
+      running: i.running === 'true' || i.running === true,
+      disabled: i.disabled === 'true' || i.disabled === true,
+      mac: i['mac-address'] || '', comment: i.comment || ''
+    }));
+    const polled = new Date().toISOString();
+    db.prepare('UPDATE devices SET interfaces_json=?, last_polled=? WHERE id=?').run(JSON.stringify(ifaces), polled, d.id);
+    audit(req, 'poll', 'device#' + d.id, `RouterOS interfaces (${ifaces.length})`);
+    res.json({ count: ifaces.length, interfaces: ifaces, polled_at: polled });
+  } catch (e) {
+    const timedOut = e.code === 'ETIMEDOUT' || e.message === 'timeout';
+    const msg = timedOut
+      ? 'Device unreachable (timed out) — is the server on the management overlay and the IP correct?'
+      : ('Could not reach device: ' + e.message);
+    res.status(502).json({ error: msg });
+  }
 });
 
 // Fetch from ZeroTier Central with a timeout so a slow/hung call can't stall a request
@@ -519,7 +571,7 @@ app.post('/api/devices/:id/reveal', (req, res) => {
 
 app.post('/api/devices', (req, res) => {
   const b = req.body || {};
-  const cols = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','account_number','owner_account','owner_sub_account','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_password','admin_password','tech_username','tech_password','factory_wifi_ssid','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase','zt_node_id'];
+  const cols = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','account_number','owner_account','owner_sub_account','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_password','admin_password','tech_username','tech_password','factory_wifi_ssid','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase','zt_node_id','admin_username'];
   const vals = cols.map(c => b[c] === undefined ? null : b[c]);
   const info = db.prepare(`INSERT INTO devices (${cols.join(',')}) VALUES (${cols.map(()=>'?').join(',')})`).run(...vals);
   audit(req, 'create', 'device#' + info.lastInsertRowid, b.name);
@@ -530,7 +582,7 @@ app.put('/api/devices/:id', (req, res) => {
   const b = req.body || {};
   const existing = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'not found' });
-  const cols = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','account_number','owner_account','owner_sub_account','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_wifi_ssid','tech_username','zt_node_id'];
+  const cols = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','account_number','owner_account','owner_sub_account','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_wifi_ssid','tech_username','zt_node_id','admin_username'];
   // credentials only overwritten if provided (non-empty)
   const credCols = ['factory_password','admin_password','tech_password','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase'];
   const sets = [], vals = [];

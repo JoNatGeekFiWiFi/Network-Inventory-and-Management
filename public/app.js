@@ -428,6 +428,16 @@ async function renderDevice(id) {
   if (d.owner_sub_account) info.push(['Sub-account', d.owner_sub_account]);
   if (d.cell_carrier) { info.push(['Cellular carrier', d.cell_carrier]); info.push(['Phone', d.cell_phone || '—']); info.push(['IMEI', d.cell_imei || '—']); info.push(['SIM/ICCID', d.cell_sim || '—']); }
 
+  let ifaces = [];
+  try { ifaces = d.interfaces_json ? JSON.parse(d.interfaces_json) : []; } catch {}
+  const portsCard = (d.management_mode === 'provider') ? '' : `
+    <div class="card"><div class="hd"><h2><i class="ti ti-plug"></i> Ports / interfaces${ifaces.length ? ` · ${ifaces.length}` : ''}</h2>${isPriv() ? `<button class="btn sm" onclick="pollDevice(${d.id})"><i class="ti ti-refresh"></i> Poll now</button>` : ''}</div>
+      <div style="padding:0 14px 12px">
+        ${ifaces.length ? ifaces.map(i => `<div class="kv"><span><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${i.running ? 'var(--success)' : 'var(--text3)'};margin-right:8px"></span><span class="mono">${esc(i.name)}</span> ${i.type ? `<span class="tag">${esc(i.type)}</span>` : ''}${i.disabled ? ' <span class="small muted">(disabled)</span>' : ''}</span><span class="mono small sec-muted">${esc(i.mac || '')}</span></div>`).join('')
+        : '<div class="muted small" style="padding:8px 0">Not polled yet. Add the admin login + management IP, then Poll now. (MikroTik RouterOS)</div>'}
+        ${d.last_polled ? `<div class="help">Last polled ${esc(d.last_polled)}</div>` : ''}
+      </div></div>`;
+
   const overlayCard = (d.management_mode === 'provider') ? '' : `
     <div class="card"><div class="hd"><h2><i class="ti ti-router-2"></i> Management overlay</h2><span class="tag">${esc(d.mgmt_overlay || 'none')}</span></div>
       <div style="padding:0 14px 14px">
@@ -455,6 +465,8 @@ async function renderDevice(id) {
       <div class="help">Telemetry stubbed with sample data for this testing build · 1-min res / 60-day retention planned</div></div></div>`}
 
     <div class="card"><div class="hd"><h2>Details</h2></div><div style="padding:0 14px 10px">${info.map(([k, v]) => `<div class="kv"><span class="small sec-muted">${esc(k)}</span><span class="mono small">${v}</span></div>`).join('')}</div></div>
+
+    ${portsCard}
 
     ${overlayCard}
 
@@ -620,8 +632,10 @@ async function formDevice(q) {
         ${field('Management IP', 'mgmt_address', d.mgmt_address, { mono: true, ph: 'auto-set when provisioned' })}
         ${field('ZeroTier node ID (if using ZeroTier)', 'zt_node_id', d.zt_node_id, { mono: true, ph: '10-hex node id' })}
         <div class="box"><div class="small" style="font-weight:500;margin-bottom:8px"><i class="ti ti-key"></i> Credentials</div>
-        <div class="grid2">${field('Admin password', 'admin_password', '', { ph: q.id ? 'unchanged' : '' })}${field('Factory password', 'factory_password', '', { ph: q.id ? 'unchanged' : '' })}</div>
-        <div class="grid2">${field('Tech username', 'tech_username', d.tech_username)}${field('Tech password', 'tech_password', '', { ph: q.id ? 'unchanged' : '' })}</div></div>
+        <div class="grid2">${field('Admin username', 'admin_username', d.admin_username || 'admin', { mono: true })}${field('Admin password', 'admin_password', '', { ph: q.id ? 'unchanged' : '' })}</div>
+        <div class="grid2">${field('Tech username', 'tech_username', d.tech_username)}${field('Tech password', 'tech_password', '', { ph: q.id ? 'unchanged' : '' })}</div>
+        ${field('Factory password', 'factory_password', '', { ph: q.id ? 'unchanged' : '' })}
+        <div class="help">Admin login is used to poll the device for its live ports (MikroTik RouterOS).</div></div>
       </div>
 
       <div id="deployBox" class="box" style="display:${d.status === 'Deployed' ? 'block' : 'none'}">
@@ -857,6 +871,10 @@ async function provisionWg(id) {
 }
 async function ztSyncDevice(id) {
   try { const r = await api('/zerotier/sync', { method: 'POST' }); toast(`ZeroTier: updated ${r.updated} of ${r.members}`); renderDevice(id); } catch (e) { toast(e.message); }
+}
+async function pollDevice(id) {
+  toast('Polling device…');
+  try { const r = await api('/devices/' + id + '/poll', { method: 'POST' }); toast(`Found ${r.count} interfaces`); renderDevice(id); } catch (e) { toast(e.message); }
 }
 async function showWg(id) {
   try {
