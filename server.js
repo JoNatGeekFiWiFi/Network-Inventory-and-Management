@@ -294,12 +294,12 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
     const polled = new Date().toISOString();
     db.prepare('UPDATE devices SET interfaces_json=?, last_polled=? WHERE id=?').run(JSON.stringify(ifaces), polled, d.id);
     let setPublic = null;
-    if (publicIp && d.assigned_type === 'site' && d.assigned_site_id) {
-      db.prepare('UPDATE sites SET current_public_ip=? WHERE id=?').run(publicIp, d.assigned_site_id);
-      setPublic = publicIp;
-    } else if (publicIp && d.assigned_type === 'pop' && d.assigned_pop_id) {
-      db.prepare('UPDATE pops SET current_public_ip=? WHERE id=?').run(publicIp, d.assigned_pop_id);
-      setPublic = publicIp;
+    if (d.assigned_type === 'site' && d.assigned_site_id) {
+      if (d.mgmt_address) db.prepare('UPDATE sites SET current_mgmt_ip=? WHERE id=?').run(d.mgmt_address, d.assigned_site_id);
+      if (publicIp) { db.prepare('UPDATE sites SET current_public_ip=? WHERE id=?').run(publicIp, d.assigned_site_id); setPublic = publicIp; }
+    } else if (d.assigned_type === 'pop' && d.assigned_pop_id) {
+      if (d.mgmt_address) db.prepare('UPDATE pops SET current_mgmt_ip=? WHERE id=?').run(d.mgmt_address, d.assigned_pop_id);
+      if (publicIp) { db.prepare('UPDATE pops SET current_public_ip=? WHERE id=?').run(publicIp, d.assigned_pop_id); setPublic = publicIp; }
     }
     audit(req, 'poll', 'device#' + d.id, `RouterOS poll: ${ifaces.length} interfaces${publicIp ? ', public ' + publicIp : ''}`);
     res.json({ count: ifaces.length, interfaces: ifaces, polled_at: polled, public_ip: publicIp, set_public: setPublic });
