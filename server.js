@@ -366,17 +366,19 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
     if (serialVal) { sets.push('serial=?'); vals.push(serialVal); }
     vals.push(d.id);
     db.prepare(`UPDATE devices SET ${sets.join(', ')} WHERE id=?`).run(...vals);
-    let setPublic = null;
-    if (d.assigned_type === 'site' && d.assigned_site_id) {
-      if (d.mgmt_address) db.prepare('UPDATE sites SET current_mgmt_ip=? WHERE id=?').run(d.mgmt_address, d.assigned_site_id);
+    let setPublic = null, setMgmt = null, target = null;
+    if (d.assigned_site_id) {           // assigned to a customer site
+      if (d.mgmt_address) { db.prepare('UPDATE sites SET current_mgmt_ip=? WHERE id=?').run(d.mgmt_address, d.assigned_site_id); setMgmt = d.mgmt_address; }
       if (publicIp) { db.prepare('UPDATE sites SET current_public_ip=? WHERE id=?').run(publicIp, d.assigned_site_id); setPublic = publicIp; }
-    } else if (d.assigned_type === 'pop' && d.assigned_pop_id) {
-      if (d.mgmt_address) db.prepare('UPDATE pops SET current_mgmt_ip=? WHERE id=?').run(d.mgmt_address, d.assigned_pop_id);
+      target = 'site';
+    } else if (d.assigned_pop_id) {      // assigned to a POP
+      if (d.mgmt_address) { db.prepare('UPDATE pops SET current_mgmt_ip=? WHERE id=?').run(d.mgmt_address, d.assigned_pop_id); setMgmt = d.mgmt_address; }
       if (publicIp) { db.prepare('UPDATE pops SET current_public_ip=? WHERE id=?').run(publicIp, d.assigned_pop_id); setPublic = publicIp; }
+      target = 'pop';
     }
     let harvested = 0; try { harvested = await harvestThreats(d); } catch {}
     audit(req, 'poll', 'device#' + d.id, `RouterOS poll: ${ifaces.length} interfaces${publicIp ? ', public ' + publicIp : ''}`);
-    res.json({ count: ifaces.length, interfaces: ifaces, polled_at: polled, public_ip: publicIp, set_public: setPublic, harvested });
+    res.json({ count: ifaces.length, interfaces: ifaces, polled_at: polled, public_ip: publicIp, set_public: setPublic, set_mgmt: setMgmt, target, harvested });
   } catch (e) {
     const timedOut = e.code === 'ETIMEDOUT' || e.message === 'timeout';
     let msg;

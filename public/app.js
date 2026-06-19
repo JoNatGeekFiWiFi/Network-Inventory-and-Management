@@ -975,7 +975,9 @@ async function pollDevice(id) {
   try {
     const r = await api('/devices/' + id + '/poll', { method: 'POST' });
     let msg = `Found ${r.count} interfaces`;
-    if (r.public_ip) msg += ` · public ${r.public_ip}${r.set_public ? ' (set on site)' : ''}`;
+    if (r.set_mgmt) msg += ` · mgmt ${r.set_mgmt}→${r.target}`;
+    if (r.public_ip) msg += ` · public ${r.public_ip}${r.set_public ? ' set' : ''}`;
+    else if (r.target) msg += ' · no public IP found (CGNAT?)';
     toast(msg); renderDevice(id);
   } catch (e) { toast(e.message); }
 }
