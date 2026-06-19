@@ -40,6 +40,10 @@ export function migrate() {
   db.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
   db.exec('CREATE TABLE IF NOT EXISTS pop_access (pop_id INTEGER PRIMARY KEY, body TEXT)');
   db.exec('CREATE TABLE IF NOT EXISTS pop_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, pop_id INTEGER NOT NULL, author TEXT, author_role TEXT, body TEXT, created_at TEXT NOT NULL DEFAULT (datetime(\'now\')))');
+  db.exec('CREATE TABLE IF NOT EXISTS iface_traffic (device_id INTEGER, iface TEXT, ts TEXT, rx_bps INTEGER, tx_bps INTEGER)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_iftr ON iface_traffic(device_id, iface, ts)');
+  db.exec('CREATE TABLE IF NOT EXISTS dev_latency (device_id INTEGER, ts TEXT, ms REAL)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_lat ON dev_latency(device_id, ts)');
 }
 
 export function seed() {

@@ -666,6 +666,79 @@ app.get('/api/audit', (req, res) => {
   res.json(db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 200').all());
 });
 
+// ---- telemetry: per-port traffic + device latency ----
+const RANGE_SEC = { '1h': 3600, '24h': 86400, '7d': 604800, '60d': 5184000 };
+function sinceIso(range) { return new Date(Date.now() - (RANGE_SEC[range] || 3600) * 1000).toISOString(); }
+
+app.get('/api/devices/:id/traffic', (req, res) => {
+  const iface = req.query.iface, range = req.query.range || '1h';
+  if (!iface) return res.status(400).json({ error: 'iface required' });
+  const rows = db.prepare('SELECT ts, rx_bps, tx_bps FROM iface_traffic WHERE device_id=? AND iface=? AND ts>=? ORDER BY ts').all(req.params.id, iface, sinceIso(range));
+  res.json(rows);
+});
+app.get('/api/devices/:id/latency', (req, res) => {
+  const range = req.query.range || '1h';
+  const rows = db.prepare('SELECT ts, ms FROM dev_latency WHERE device_id=? AND ts>=? ORDER BY ts').all(req.params.id, sinceIso(range));
+  res.json(rows);
+});
+
+// RTT string -> ms (RouterOS ping 'time' like "12ms", "1ms200us")
+function parseRtt(s) {
+  if (s == null) return null;
+  if (typeof s === 'number') return s;
+  const str = String(s); let ms = 0, matched = false;
+  const m = str.match(/(\d+(?:\.\d+)?)ms/); if (m) { ms += parseFloat(m[1]); matched = true; }
+  const u = str.match(/(\d+(?:\.\d+)?)us/); if (u) { ms += parseFloat(u[1]) / 1000; matched = true; }
+  const sec = str.match(/(\d+(?:\.\d+)?)s(?![a-z])/); if (sec) { ms += parseFloat(sec[1]) * 1000; matched = true; }
+  return matched ? Math.round(ms * 100) / 100 : null;
+}
+
+const _lastCtr = new Map(); // device:iface -> {rx,tx,t}
+async function sampleDevice(d) {
+  const user = d.admin_username || 'admin';
+  const H = { Authorization: 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64'), Accept: 'application/json' };
+  const now = Date.now(), ts = new Date(now).toISOString();
+  // traffic from interface byte counters
+  const r = await restReq(d.mgmt_address, '/rest/interface', { headers: H, timeoutMs: 7000 });
+  if (r.status < 400) {
+    let arr; try { arr = JSON.parse(r.body); } catch { arr = null; }
+    if (Array.isArray(arr)) for (const i of arr) {
+      const rx = Number(i['rx-byte'] ?? i['rx-bytes']), tx = Number(i['tx-byte'] ?? i['tx-bytes']);
+      if (!isFinite(rx) || !isFinite(tx)) continue;
+      const key = d.id + ':' + i.name, prev = _lastCtr.get(key);
+      _lastCtr.set(key, { rx, tx, t: now });
+      if (prev) { const dt = (now - prev.t) / 1000; if (dt > 0 && rx >= prev.rx && tx >= prev.tx) {
+        db.prepare('INSERT INTO iface_traffic (device_id,iface,ts,rx_bps,tx_bps) VALUES (?,?,?,?,?)')
+          .run(d.id, i.name, ts, Math.round((rx - prev.rx) * 8 / dt), Math.round((tx - prev.tx) * 8 / dt));
+      } }
+    }
+  }
+  // WAN latency via router ping
+  try {
+    const rp = await restReq(d.mgmt_address, '/rest/ping', { headers: H, method: 'POST', body: { address: '8.8.8.8', count: '3' }, timeoutMs: 7000 });
+    if (rp.status < 400) {
+      const p = JSON.parse(rp.body);
+      const times = (Array.isArray(p) ? p : []).map(x => parseRtt(x.time)).filter(v => v != null);
+      if (times.length) db.prepare('INSERT INTO dev_latency (device_id,ts,ms) VALUES (?,?,?)').run(d.id, ts, Math.round(times.reduce((a, b) => a + b, 0) / times.length * 100) / 100);
+    }
+  } catch {}
+}
+let _sampling = false;
+async function sampleTick() {
+  if (_sampling) return; _sampling = true;
+  try {
+    const devs = db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
+    for (const d of devs) { try { await sampleDevice(d); } catch {} }
+    const cutoff = new Date(Date.now() - 5184000 * 1000).toISOString();
+    db.prepare('DELETE FROM iface_traffic WHERE ts<?').run(cutoff);
+    db.prepare('DELETE FROM dev_latency WHERE ts<?').run(cutoff);
+  } finally { _sampling = false; }
+}
+if (process.env.SAMPLER !== 'off') {
+  setInterval(() => { sampleTick().catch(() => {}); }, 60000);
+  console.log('Telemetry sampler enabled (every 60s; set SAMPLER=off to disable)');
+}
+
 // ---- static frontend ----
 app.use(express.static(join(__dirname, 'public')));
 app.get('*', (req, res) => res.sendFile(join(__dirname, 'public', 'index.html')));

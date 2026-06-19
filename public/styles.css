@@ -88,3 +88,5 @@ label.fl{display:block;font-size:13px;color:var(--text2);margin-bottom:5px}
 .ss-list{position:absolute;left:0;right:0;top:calc(100% + 2px);z-index:40;background:var(--surface);border:.5px solid var(--border2);border-radius:var(--radius);max-height:240px;overflow:auto;box-shadow:0 6px 20px rgba(0,0,0,.22)}
 .ss-opt{padding:8px 11px;cursor:pointer;font-size:14px}
 .ss-opt:hover{background:var(--surface2)}
+.chev{transition:transform .15s;color:var(--text3);flex:none}
+.chev.open{transform:rotate(180deg)}

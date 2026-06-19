@@ -437,12 +437,22 @@ async function renderDevice(id) {
   let ifaces = [];
   try { ifaces = d.interfaces_json ? JSON.parse(d.interfaces_json) : []; } catch {}
   const portsCard = (d.management_mode === 'provider') ? '' : `
-    <div class="card"><div class="hd"><h2><i class="ti ti-plug"></i> Ports / interfaces${ifaces.length ? ` · ${ifaces.length}` : ''}</h2>${isPriv() ? `<button class="btn sm" onclick="pollDevice(${d.id})"><i class="ti ti-refresh"></i> Poll now</button>` : ''}</div>
-      <div style="padding:0 14px 12px">
-        ${ifaces.length ? ifaces.map(i => `<div class="kv"><span><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${i.running ? 'var(--success)' : 'var(--text3)'};margin-right:8px"></span><span class="mono">${esc(i.name)}</span> ${i.type ? `<span class="tag">${esc(i.type)}</span>` : ''}${i.speed ? ` <span class="tag" style="background:var(--info-bg);color:var(--info)">${esc(i.speed)}</span>` : ''}${i.disabled ? ' <span class="small muted">(disabled)</span>' : ''}</span><span class="mono small sec-muted">${(i.ips && i.ips.length) ? esc(i.ips.join(', ')) : ''}${i.mac ? (i.ips && i.ips.length ? ' · ' : '') + esc(i.mac) : ''}</span></div>`).join('')
-        : '<div class="muted small" style="padding:8px 0">Not polled yet. Add the admin login + management IP, then Poll now. (MikroTik RouterOS)</div>'}
-        ${d.last_polled ? `<div class="help">Last polled ${esc(d.last_polled)}</div>` : ''}
-      </div></div>`;
+    <div class="card"><div class="hd"><h2><i class="ti ti-plug"></i> Ports / interfaces${ifaces.length ? ` · ${ifaces.length}` : ''} <span class="small muted" style="font-weight:400">· tap to graph</span></h2>${isPriv() ? `<button class="btn sm" onclick="pollDevice(${d.id})"><i class="ti ti-refresh"></i> Poll now</button>` : ''}</div>
+      ${ifaces.length ? ifaces.map((i, idx) => `
+        <div class="row rowlink" onclick="togglePort(${idx})">
+          <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${i.running ? 'var(--success)' : 'var(--text3)'};flex:none"></span>
+          <div style="flex:1;min-width:0"><div><span class="mono">${esc(i.name)}</span> ${i.type ? `<span class="tag">${esc(i.type)}</span>` : ''}${i.speed ? ` <span class="tag" style="background:var(--info-bg);color:var(--info)">${esc(i.speed)}</span>` : ''}${i.disabled ? ' <span class="small muted">(disabled)</span>' : ''}</div>
+            <div class="small mono sec-muted">${(i.ips && i.ips.length) ? esc(i.ips.join(', ')) : ''}${i.mac ? ((i.ips && i.ips.length) ? ' · ' : '') + esc(i.mac) : ''}</div></div>
+          <i class="ti ti-chevron-down chev" id="cv${idx}"></i></div>
+        <div id="pp${idx}" style="display:none;padding:8px 14px 14px;background:var(--surface2)">
+          <div class="seg" id="prng${idx}" style="max-width:260px;margin-bottom:8px">
+            <button class="segbtn on" data-r="1h" onclick="setPortRange(${idx},'1h')">1h</button>
+            <button class="segbtn" data-r="24h" onclick="setPortRange(${idx},'24h')">24h</button>
+            <button class="segbtn" data-r="7d" onclick="setPortRange(${idx},'7d')">7d</button></div>
+          <div style="position:relative;height:160px"><canvas id="pc${idx}"></canvas></div></div>`).join('')
+        : '<div class="row muted">Not polled yet. Add admin login + management IP, then Poll now. (MikroTik RouterOS)</div>'}
+      ${d.last_polled ? `<div class="help" style="padding:8px 14px">Last polled ${esc(d.last_polled)} · traffic sampled every minute</div>` : ''}
+    </div>`;
 
   const overlayCard = (d.management_mode === 'provider') ? '' : `
     <div class="card"><div class="hd"><h2><i class="ti ti-router-2"></i> Management overlay</h2><span class="tag">${esc(d.mgmt_overlay || 'none')}</span></div>
@@ -465,10 +475,10 @@ async function renderDevice(id) {
       <a class="btn" href="#/device/${d.id}/edit"><i class="ti ti-edit"></i> Edit</a></div>
 
     ${d.management_mode === 'provider' ? '' : `
-    <div class="card"><div class="hd"><h2>Traffic</h2><div class="seg" style="flex:none" id="rng">
-      <button class="segbtn on" data-r="1h" onclick="setRng('1h')">1h</button><button class="segbtn" data-r="24h" onclick="setRng('24h')">24h</button><button class="segbtn" data-r="7d" onclick="setRng('7d')">7d</button></div></div>
-      <div style="padding:0 14px 14px"><div style="position:relative;height:200px"><canvas id="tchart"></canvas></div>
-      <div class="help">Telemetry stubbed with sample data for this testing build · 1-min res / 60-day retention planned</div></div></div>`}
+    <div class="card"><div class="hd"><h2><i class="ti ti-activity"></i> WAN latency</h2><div class="seg" style="flex:none" id="latrng">
+      <button class="segbtn on" data-r="1h" onclick="setLatRange('1h')">1h</button><button class="segbtn" data-r="24h" onclick="setLatRange('24h')">24h</button><button class="segbtn" data-r="7d" onclick="setLatRange('7d')">7d</button></div></div>
+      <div style="padding:0 14px 14px"><div style="position:relative;height:180px"><canvas id="latchart"></canvas></div>
+      <div class="help">Ping to 8.8.8.8 from the device · sampled every minute</div></div></div>`}
 
     <div class="card"><div class="hd"><h2>Details</h2></div><div style="padding:0 14px 10px">${info.map(([k, v]) => `<div class="kv"><span class="small sec-muted">${esc(k)}</span><span class="mono small">${v}</span></div>`).join('')}</div></div>
 
@@ -478,21 +488,38 @@ async function renderDevice(id) {
 
     ${visibleCreds.length ? `<div class="card"><div class="hd"><h2><i class="ti ti-key"></i> Credentials</h2><button class="btn sm" onclick="revealCreds(${d.id})"><i class="ti ti-eye"></i> Reveal</button></div><div style="padding:0 14px 10px">${credRows}<div class="help"><i class="ti ti-lock"></i> Masked · reveal is logged${isPriv() ? '' : ' · NOC-only fields hidden for your role'}</div></div></div>` : ''}`;
 
-  if (d.management_mode !== 'provider') drawTraffic('24h');
+  window._devId = d.id; window._devPorts = ifaces.map(i => i.name);
+  if (d.management_mode !== 'provider') setLatRange('1h');
 }
-let _tchart = null;
-function genSeries(n, base, vary) { const a = []; for (let i = 0; i < n; i++) a.push(Math.max(0, Math.round(base + Math.sin(i / 2) * vary * 0.5 + (Math.random() - 0.5) * vary))); return a; }
-function drawTraffic(r) {
-  const n = r === '1h' ? 12 : r === '24h' ? 24 : 7;
-  const labels = Array.from({ length: n }, (_, i) => r === '7d' ? 'D' + (i + 1) : i + (r === '1h' ? 'm' : ':00'));
-  const cv = $('#tchart'); if (!cv) return;
-  if (_tchart) _tchart.destroy();
-  _tchart = new Chart(cv, { type: 'line', data: { labels, datasets: [
-    { label: 'Download', data: genSeries(n, 180, 260), borderColor: '#378ADD', backgroundColor: 'rgba(55,138,221,.12)', fill: true, tension: .35, pointRadius: 0, borderWidth: 2 },
-    { label: 'Upload', data: genSeries(n, 50, 90), borderColor: '#1D9E75', backgroundColor: 'rgba(29,158,117,.12)', fill: true, tension: .35, pointRadius: 0, borderWidth: 2 }] },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } } });
+function fmtTs(ts, range) { const d = new Date(ts); return (range === '7d' || range === '60d') ? (d.getMonth() + 1) + '/' + d.getDate() : ('' + d.getHours()).padStart(2, '0') + ':' + ('' + d.getMinutes()).padStart(2, '0'); }
+let _latChart = null;
+async function setLatRange(range) {
+  document.querySelectorAll('#latrng .segbtn').forEach(b => b.classList.toggle('on', b.dataset.r === range));
+  let rows = []; try { rows = await api('/devices/' + window._devId + '/latency?range=' + range); } catch {}
+  const cv = $('#latchart'); if (!cv) return;
+  if (_latChart) _latChart.destroy();
+  _latChart = new Chart(cv, { type: 'line', data: { labels: rows.map(r => fmtTs(r.ts, range)), datasets: [{ label: 'ms', data: rows.map(r => r.ms), borderColor: '#7F77DD', backgroundColor: 'rgba(127,119,221,.12)', fill: true, tension: .35, pointRadius: 0, borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.parsed.y + ' ms' } } }, scales: { y: { beginAtZero: true, ticks: { callback: v => v + 'ms' } } } } });
 }
-function setRng(r) { document.querySelectorAll('#rng .segbtn').forEach(b => b.classList.toggle('on', b.dataset.r === r)); drawTraffic(r); }
+const _portCharts = {};
+async function togglePort(idx) {
+  const panel = $('#pp' + idx), cv = $('#cv' + idx);
+  const open = panel.style.display !== 'block';
+  panel.style.display = open ? 'block' : 'none';
+  if (cv) cv.classList.toggle('open', open);
+  if (open && !panel.dataset.loaded) { panel.dataset.loaded = '1'; setPortRange(idx, '1h'); }
+}
+async function setPortRange(idx, range) {
+  const name = window._devPorts[idx];
+  document.querySelectorAll('#prng' + idx + ' .segbtn').forEach(b => b.classList.toggle('on', b.dataset.r === range));
+  let rows = []; try { rows = await api('/devices/' + window._devId + '/traffic?iface=' + encodeURIComponent(name) + '&range=' + range); } catch {}
+  const cv = $('#pc' + idx); if (!cv) return;
+  const mbps = v => Math.round(v / 1e4) / 100;
+  if (_portCharts[idx]) _portCharts[idx].destroy();
+  _portCharts[idx] = new Chart(cv, { type: 'line', data: { labels: rows.map(r => fmtTs(r.ts, range)), datasets: [
+    { label: 'Download', data: rows.map(r => mbps(r.rx_bps)), borderColor: '#378ADD', backgroundColor: 'rgba(55,138,221,.12)', fill: true, tension: .35, pointRadius: 0, borderWidth: 2 },
+    { label: 'Upload', data: rows.map(r => mbps(r.tx_bps)), borderColor: '#1D9E75', backgroundColor: 'rgba(29,158,117,.12)', fill: true, tension: .35, pointRadius: 0, borderWidth: 2 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.dataset.label + ': ' + c.parsed.y + ' Mbps' } } }, scales: { y: { beginAtZero: true, ticks: { callback: v => v + 'M' } } } } });
+}
 async function revealCreds(id) {
   const res = await api('/devices/' + id + '/reveal', { method: 'POST' });
   for (const [k, v] of Object.entries(res.credentials)) { const el = $('#cred-' + k); if (el) el.textContent = v; }
