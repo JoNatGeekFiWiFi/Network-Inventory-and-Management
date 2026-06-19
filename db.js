@@ -45,6 +45,7 @@ export function migrate() {
   db.exec('CREATE INDEX IF NOT EXISTS idx_iftr ON iface_traffic(device_id, iface, ts)');
   db.exec('CREATE TABLE IF NOT EXISTS dev_latency (device_id INTEGER, ts TEXT, ms REAL)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_lat ON dev_latency(device_id, ts)');
+  db.exec("CREATE TABLE IF NOT EXISTS blocklist (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT UNIQUE NOT NULL, reason TEXT, hits INTEGER DEFAULT 1, source TEXT, active INTEGER DEFAULT 1, first_seen TEXT DEFAULT (datetime('now')), last_seen TEXT DEFAULT (datetime('now')))");
 }
 
 export function seed() {

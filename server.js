@@ -51,6 +51,49 @@ function isPublicV4(ip) {
   if (a === 100 && b >= 64 && b <= 127) return false; // CGNAT
   return true;
 }
+function extractIp(msg) {
+  const m = String(msg).match(/from (\d{1,3}(?:\.\d{1,3}){3})/i) || String(msg).match(/(\d{1,3}(?:\.\d{1,3}){3})/);
+  return m ? m[1] : null;
+}
+// Read a device's log, pull failed-login source IPs into the central blocklist. Returns # IPs seen.
+async function harvestThreats(d) {
+  const user = d.admin_username || 'admin';
+  const H = { Authorization: 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64'), Accept: 'application/json' };
+  const r = await restReq(d.mgmt_address, '/rest/log', { headers: H, timeoutMs: 7000 });
+  if (r.status >= 400) return 0;
+  let logs; try { logs = JSON.parse(r.body); } catch { return 0; }
+  if (!Array.isArray(logs)) return 0;
+  const counts = {};
+  for (const e of logs) {
+    const msg = e.message || '';
+    if (/login failure|authentication failed|invalid user/i.test(msg)) {
+      const ip = extractIp(msg);
+      if (ip && isPublicV4(ip)) counts[ip] = (counts[ip] || 0) + 1;
+    }
+  }
+  const upsert = db.prepare("INSERT INTO blocklist (ip,reason,hits,source) VALUES (?,?,?,?) ON CONFLICT(ip) DO UPDATE SET hits=MAX(hits,?), last_seen=datetime('now'), source=excluded.source");
+  for (const [ip, c] of Object.entries(counts)) upsert.run(ip, 'failed login', c, d.name, c);
+  return Object.keys(counts).length;
+}
+// Push the active blocklist to one device: reconcile its netinv-blocklist address-list + ensure an input drop rule.
+async function pushBlocklistToDevice(d) {
+  const user = d.admin_username || 'admin';
+  const H = { Authorization: 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64'), Accept: 'application/json' };
+  const ips = db.prepare('SELECT ip FROM blocklist WHERE active=1').all().map(r => r.ip);
+  const want = new Set(ips);
+  const cur = await restReq(d.mgmt_address, '/rest/ip/firewall/address-list?list=netinv-blocklist', { headers: H });
+  let existing = []; if (cur.status < 400) { try { const a = JSON.parse(cur.body); if (Array.isArray(a)) existing = a; } catch {} }
+  const have = new Set(existing.map(e => e.address));
+  let added = 0, removed = 0;
+  for (const ip of ips) if (!have.has(ip)) { const ar = await restReq(d.mgmt_address, '/rest/ip/firewall/address-list', { headers: H, method: 'POST', body: { list: 'netinv-blocklist', address: ip } }); if (ar.status < 400) added++; }
+  for (const e of existing) if (!want.has(e.address)) { await restReq(d.mgmt_address, '/rest/ip/firewall/address-list/' + encodeURIComponent(e['.id']), { headers: H, method: 'DELETE' }); removed++; }
+  // ensure an input drop rule referencing the list
+  let ruleAdded = false;
+  const fr = await restReq(d.mgmt_address, '/rest/ip/firewall/filter', { headers: H });
+  let hasRule = false; if (fr.status < 400) { try { const rules = JSON.parse(fr.body); if (Array.isArray(rules)) hasRule = rules.some(x => x['src-address-list'] === 'netinv-blocklist' && x.action === 'drop'); } catch {} }
+  if (!hasRule) { const rr = await restReq(d.mgmt_address, '/rest/ip/firewall/filter', { headers: H, method: 'POST', body: { chain: 'input', 'src-address-list': 'netinv-blocklist', action: 'drop', comment: 'netinv auto-block', 'place-before': '0' } }); if (rr.status < 400) ruleAdded = true; }
+  return { added, removed, total: ips.length, ruleAdded };
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -326,8 +369,9 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
       if (d.mgmt_address) db.prepare('UPDATE pops SET current_mgmt_ip=? WHERE id=?').run(d.mgmt_address, d.assigned_pop_id);
       if (publicIp) { db.prepare('UPDATE pops SET current_public_ip=? WHERE id=?').run(publicIp, d.assigned_pop_id); setPublic = publicIp; }
     }
+    let harvested = 0; try { harvested = await harvestThreats(d); } catch {}
     audit(req, 'poll', 'device#' + d.id, `RouterOS poll: ${ifaces.length} interfaces${publicIp ? ', public ' + publicIp : ''}`);
-    res.json({ count: ifaces.length, interfaces: ifaces, polled_at: polled, public_ip: publicIp, set_public: setPublic });
+    res.json({ count: ifaces.length, interfaces: ifaces, polled_at: polled, public_ip: publicIp, set_public: setPublic, harvested });
   } catch (e) {
     const timedOut = e.code === 'ETIMEDOUT' || e.message === 'timeout';
     let msg;
@@ -760,12 +804,22 @@ async function sampleDevice(d) {
     }
   } catch {}
 }
-let _sampling = false;
+let _sampling = false, _tickN = 0, _lastPushedSig = null;
+const blocklistSig = () => db.prepare("SELECT ip FROM blocklist WHERE active=1 ORDER BY ip").all().map(r => r.ip).join(',');
 async function sampleTick() {
-  if (_sampling) return; _sampling = true;
+  if (_sampling) return; _sampling = true; _tickN++;
   try {
     const devs = db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
-    for (const d of devs) { try { await sampleDevice(d); } catch {} }
+    // every minute: sample traffic/latency + harvest failed-login IPs
+    for (const d of devs) { try { await sampleDevice(d); await harvestThreats(d); } catch {} }
+    // auto-push the blocklist when it changed (or every 10 min to repair drift)
+    if (process.env.AUTO_PUSH !== 'off') {
+      const sig = blocklistSig();
+      if (sig && (sig !== _lastPushedSig || _tickN % 10 === 0)) {
+        for (const d of devs) { try { await pushBlocklistToDevice(d); } catch {} }
+        _lastPushedSig = sig;
+      }
+    }
     const cutoff = new Date(Date.now() - 5184000 * 1000).toISOString();
     db.prepare('DELETE FROM iface_traffic WHERE ts<?').run(cutoff);
     db.prepare('DELETE FROM dev_latency WHERE ts<?').run(cutoff);
@@ -773,8 +827,48 @@ async function sampleTick() {
 }
 if (process.env.SAMPLER !== 'off') {
   setInterval(() => { sampleTick().catch(() => {}); }, 60000);
-  console.log('Telemetry sampler enabled (every 60s; set SAMPLER=off to disable)');
+  console.log('Sampler enabled every 60s: traffic, latency, threat harvest + blocklist auto-push (SAMPLER=off / AUTO_PUSH=off to disable)');
 }
+
+// ---- threat blocklist ----
+app.get('/api/blocklist', requireNoc, (req, res) => {
+  res.json(db.prepare('SELECT * FROM blocklist ORDER BY active DESC, hits DESC, datetime(last_seen) DESC').all());
+});
+app.post('/api/blocklist', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!b.ip) return res.status(400).json({ error: 'IP required' });
+  db.prepare("INSERT INTO blocklist (ip,reason,hits,source,active) VALUES (?,?,?,?,1) ON CONFLICT(ip) DO UPDATE SET active=1, reason=excluded.reason").run(String(b.ip).trim(), N(b.reason, 'manual'), 1, 'manual');
+  audit(req, 'create', 'blocklist', b.ip);
+  res.json({ ok: true });
+});
+app.put('/api/blocklist/:id', requireNoc, (req, res) => {
+  const b = req.body || {};
+  db.prepare('UPDATE blocklist SET active=? WHERE id=?').run(b.active ? 1 : 0, req.params.id);
+  audit(req, 'edit', 'blocklist#' + req.params.id, b.active ? 'active' : 'inactive');
+  res.json({ ok: true });
+});
+app.delete('/api/blocklist/:id', requireNoc, (req, res) => {
+  db.prepare('DELETE FROM blocklist WHERE id=?').run(req.params.id);
+  audit(req, 'delete', 'blocklist#' + req.params.id);
+  res.json({ ok: true });
+});
+app.post('/api/blocklist/scan', requireNoc, async (req, res) => {
+  const devs = db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
+  let scanned = 0, found = 0;
+  for (const d of devs) { try { found += await harvestThreats(d); scanned++; } catch {} }
+  audit(req, 'edit', 'blocklist', `scanned ${scanned} device(s)`);
+  res.json({ scanned, found, total: db.prepare('SELECT COUNT(*) AS n FROM blocklist').get().n });
+});
+app.post('/api/blocklist/push', requireNoc, async (req, res) => {
+  const b = req.body || {};
+  const devs = b.device_id
+    ? db.prepare('SELECT * FROM devices WHERE id=?').all(b.device_id)
+    : db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
+  const results = [];
+  for (const d of devs) { try { const r = await pushBlocklistToDevice(d); results.push({ device: d.name, ...r }); } catch (e) { results.push({ device: d.name, error: e.code || e.message }); } }
+  audit(req, 'config_push', 'blocklist', `pushed to ${results.length} device(s)`);
+  res.json({ results });
+});
 
 // ---- static frontend ----
 app.use(express.static(join(__dirname, 'public')));

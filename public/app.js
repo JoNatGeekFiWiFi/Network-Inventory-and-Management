@@ -45,6 +45,7 @@ function setupHeader() {
   $('#navModels').style.display = isPriv() ? '' : 'none';
   $('#navSettings').style.display = isPriv() ? '' : 'none';
   $('#navZt').style.display = isPriv() ? '' : 'none';
+  $('#navBlock').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
 }
 function toast(msg) {
@@ -117,6 +118,7 @@ async function route() {
     if (p[0] === 'models') { setNav('models'); return await renderModels(); }
     if (p[0] === 'settings') { setNav('settings'); return await renderSettings(); }
     if (p[0] === 'zerotier') { setNav('zerotier'); return await renderZeroTier(); }
+    if (p[0] === 'blocklist') { setNav('blocklist'); return await renderBlocklist(); }
     view().innerHTML = '<div class="card" style="padding:20px">Not found</div>';
   } catch (e) { if (e.message === 'auth') return; view().innerHTML = `<div class="card" style="padding:20px">Error: ${esc(e.message)}</div>`; }
 }
@@ -901,6 +903,39 @@ function drawZt() {
 function ztAdd(nodeId, nameEnc, ip) { location.hash = `#/device/new?zt=${encodeURIComponent(nodeId)}&name=${nameEnc}&ip=${encodeURIComponent(ip)}`; }
 async function ztSyncAll() { try { const r = await api('/zerotier/sync', { method: 'POST' }); toast(`Synced ${r.updated} of ${r.members}`); renderZeroTier(); } catch (e) { toast(e.message); } }
 function timeAgo(ms) { if (!ms) return 'never'; const s = Math.floor((Date.now() - ms) / 1000); if (s < 60) return s + 's ago'; if (s < 3600) return Math.floor(s / 60) + 'm ago'; if (s < 86400) return Math.floor(s / 3600) + 'h ago'; return Math.floor(s / 86400) + 'd ago'; }
+
+// ---------- Threat blocklist ----------
+async function renderBlocklist() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const list = await api('/blocklist');
+  const active = list.filter(b => b.active).length;
+  const rows = list.map(b => `<div class="row">
+    <span class="dot" style="flex:none;background:${b.active ? 'var(--danger)' : 'var(--text3)'}"></span>
+    <div style="flex:1;min-width:0"><div class="mono">${esc(b.ip)} ${b.active ? '' : '<span class="small muted">(inactive)</span>'}</div>
+      <div class="small sec-muted">${esc(b.reason || '')}${b.source ? ' · ' + esc(b.source) : ''} · ${b.hits} hit${b.hits == 1 ? '' : 's'} · ${esc(b.last_seen || '')}</div></div>
+    <button class="btn sm" onclick="toggleBlock(${b.id},${b.active ? 0 : 1})">${b.active ? 'Disable' : 'Enable'}</button>
+    <button class="btn sm" onclick="delBlock(${b.id})"><i class="ti ti-trash"></i></button></div>`).join('');
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Blocklist</h1>
+    <button class="btn" onclick="scanBlock()"><i class="ti ti-search"></i> Scan logs</button>
+    <button class="btn primary" onclick="pushBlock()"><i class="ti ti-upload"></i> Push to routers</button></div>
+    <div class="grid3" style="margin:16px 0">
+      <div class="metric"><div class="l">Active blocks</div><div class="v" style="color:var(--danger)">${active}</div></div>
+      <div class="metric"><div class="l">Total tracked</div><div class="v">${list.length}</div></div>
+      <div class="metric"><div class="l">Top hits</div><div class="v">${list[0] ? list[0].hits : 0}</div></div>
+    </div>
+    <div class="box"><div style="display:flex;gap:8px"><input id="newip" placeholder="Add IP manually (e.g. 1.2.3.4)" style="flex:1;font-family:var(--mono)"/><button class="btn" onclick="addBlock()"><i class="ti ti-plus"></i> Add</button></div></div>
+    <div class="card">${rows || '<div class="row muted">No blocked IPs yet — Scan logs to harvest failed-login attempts.</div>'}</div>
+    <div class="help">Auto-harvested from RouterOS logs (failed logins) every minute, and auto-pushed to all reachable routers whenever the list changes — writing to each router's <span class="mono">netinv-blocklist</span> address-list and ensuring an input-chain drop rule. Use <b>Push to routers</b> to force a sync now.</div>`;
+}
+async function addBlock() { const ip = $('#newip').value.trim(); if (!ip) return; try { await api('/blocklist', { method: 'POST', body: JSON.stringify({ ip }) }); toast('Added'); renderBlocklist(); } catch (e) { toast(e.message); } }
+async function toggleBlock(id, active) { try { await api('/blocklist/' + id, { method: 'PUT', body: JSON.stringify({ active }) }); renderBlocklist(); } catch (e) { toast(e.message); } }
+async function delBlock(id) { try { await api('/blocklist/' + id, { method: 'DELETE' }); renderBlocklist(); } catch (e) { toast(e.message); } }
+async function scanBlock() { toast('Scanning device logs…'); try { const r = await api('/blocklist/scan', { method: 'POST' }); toast(`Scanned ${r.scanned} device(s) · ${r.total} IPs tracked`); renderBlocklist(); } catch (e) { toast(e.message); } }
+async function pushBlock() {
+  if (!confirm('Push the active blocklist to all reachable routers? Updates their netinv-blocklist address-list and ensures a drop rule.')) return;
+  toast('Pushing to routers…');
+  try { const r = await api('/blocklist/push', { method: 'POST', body: JSON.stringify({}) }); const ok = r.results.filter(x => !x.error).length; toast(`Pushed to ${ok}/${r.results.length} router(s)`); } catch (e) { toast(e.message); }
+}
 
 async function dlHub() {
   try {
