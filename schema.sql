@@ -103,6 +103,20 @@ CREATE TABLE IF NOT EXISTS site_notes (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- POP access notes (sensitive, NOC/Admin) + POP notes timeline
+CREATE TABLE IF NOT EXISTS pop_access (
+  pop_id INTEGER PRIMARY KEY REFERENCES pops(id) ON DELETE CASCADE,
+  body TEXT
+);
+CREATE TABLE IF NOT EXISTS pop_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pop_id INTEGER NOT NULL REFERENCES pops(id) ON DELETE CASCADE,
+  author TEXT,
+  author_role TEXT,
+  body TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Connections (primary/failover) served by a POP or a brokered carrier
 CREATE TABLE IF NOT EXISTS connections (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

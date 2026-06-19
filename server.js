@@ -421,7 +421,25 @@ app.get('/api/pops/:id', (req, res) => {
   const out = withPopSummary(p);
   out.devices = db.prepare("SELECT d.*, m.manufacturer, m.model, m.device_type FROM devices d LEFT JOIN device_models m ON m.id=d.model_id WHERE d.assigned_type='pop' AND d.assigned_pop_id=? ORDER BY d.name").all(p.id).map(publicDevice);
   out.served_sites = db.prepare(`SELECT DISTINCT s.id, s.name FROM sites s JOIN connections c ON c.site_id=s.id WHERE c.served_type='pop' AND c.served_pop_id=? ORDER BY s.name`).all(p.id);
+  out.notes = db.prepare('SELECT * FROM pop_notes WHERE pop_id=? ORDER BY datetime(created_at) DESC').all(p.id);
   res.json(out);
+});
+app.post('/api/pops/:id/notes', (req, res) => {
+  const b = req.body || {};
+  db.prepare('INSERT INTO pop_notes (pop_id, author, author_role, body) VALUES (?,?,?,?)').run(req.params.id, b.author || 'tester', role(req), N(b.body));
+  audit(req, 'note', 'pop#' + req.params.id);
+  res.json({ ok: true });
+});
+app.get('/api/pops/:id/access', requireNoc, (req, res) => {
+  const r = db.prepare('SELECT body FROM pop_access WHERE pop_id=?').get(req.params.id);
+  audit(req, 'access_read', 'pop#' + req.params.id, 'pop access');
+  res.json({ body: r ? r.body : '' });
+});
+app.put('/api/pops/:id/access', requireNoc, (req, res) => {
+  const b = req.body || {};
+  db.prepare('INSERT INTO pop_access (pop_id, body) VALUES (?,?) ON CONFLICT(pop_id) DO UPDATE SET body=excluded.body').run(req.params.id, N(b.body));
+  audit(req, 'edit', 'pop#' + req.params.id, 'pop access');
+  res.json({ ok: true });
 });
 app.post('/api/pops', requireNoc, (req, res) => {
   const b = req.body || {};

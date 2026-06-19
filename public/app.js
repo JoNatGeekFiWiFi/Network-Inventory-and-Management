@@ -98,6 +98,7 @@ async function route() {
     if (p[0] === 'pops') { setNav('sites'); return await renderPops(); }
     if (p[0] === 'pop' && p[1] === 'new') { setNav('sites'); return await formPop({}); }
     if (p[0] === 'pop' && p[2] === 'edit') { setNav('sites'); return await formPop({ id: p[1] }); }
+    if (p[0] === 'pop' && p[2] === 'notes') { setNav('sites'); return await renderPopNotes(p[1]); }
     if (p[0] === 'pop') { setNav('sites'); return await renderPop(p[1]); }
     if (p[0] === 'customers') { setNav('customers'); return await renderCustomers(); }
     if (p[0] === 'customer' && p[1] === 'new') { setNav('customers'); return await formCustomer({}); }
@@ -236,7 +237,44 @@ async function renderPop(id) {
       <div class="small sec-muted" style="margin-top:3px"><i class="ti ti-map-pin"></i> ${where}</div></div>
       ${isPriv() ? `<a class="btn" href="#/pop/${p.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}</div>
     <div class="card"><div class="hd"><h2>Hardware · ${p.devices.length}</h2><a class="btn sm" href="#/device/new?pop=${p.id}"><i class="ti ti-plus"></i> Add hardware</a></div>${hw}</div>
-    <div class="card"><div class="hd"><h2>Customer sites served</h2></div><div style="padding:0 14px 12px">${served}</div></div>`;
+    <div class="card"><div class="hd"><h2>Customer sites served</h2></div><div style="padding:0 14px 12px">${served}</div></div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-notes"></i> Notes · ${p.notes.length}</h2><a class="btn sm" href="#/pop/${p.id}/notes"><i class="ti ti-arrows-diagonal"></i> Expand</a></div>
+      ${p.notes[0] ? `<div class="note"><div class="av">${initials(p.notes[0].author)}</div><div><div class="small"><b>${esc(p.notes[0].author)}</b> <span class="muted">· ${esc(p.notes[0].created_at)}</span></div><div class="small sec-muted" style="margin-top:2px">${esc(p.notes[0].body)}</div></div></div>` : '<div class="row muted">No notes yet</div>'}</div>`;
+}
+async function renderPopNotes(id) {
+  const p = await api('/pops/' + id);
+  let accessBody = null;
+  if (isPriv()) { try { accessBody = (await api('/pops/' + id + '/access')).body || ''; } catch {} }
+  const accessCard = isPriv() ? `
+    <div class="card" style="border:2px solid var(--info)">
+      <div class="hd"><h2><i class="ti ti-pin" style="color:var(--info)"></i> Access notes <span class="badge noc">NOC / Admin only</span></h2><button class="btn sm" onclick="editPopAccess(${id})"><i class="ti ti-edit"></i> Edit</button></div>
+      <div style="padding:0 14px 12px" id="popacc">${accessBody ? `<pre style="white-space:pre-wrap;font-family:var(--mono);font-size:13px;margin:0;color:var(--text2)">${esc(accessBody)}</pre>` : '<span class="muted small">No access notes — click Edit to add gate codes, contacts, etc.</span>'}</div>
+    </div>` : '<div class="card" style="padding:14px"><span class="muted">Access notes are NOC/Admin only.</span></div>';
+  const notes = p.notes.map(n => `<div class="card" style="margin-bottom:12px"><div class="note" style="border:0">
+    <div class="av">${initials(n.author)}</div>
+    <div style="flex:1"><div class="small"><b>${esc(n.author)}</b> <span class="muted">· ${esc(n.created_at)} · ${esc(n.author_role || '')}</span></div>
+    <div class="sec-muted" style="margin-top:4px">${esc(n.body)}</div></div></div>`).join('');
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/pop/${id}'"><i class="ti ti-chevron-left"></i> ${esc(p.name)}</div>
+    <h1>POP notes</h1><div class="small sec-muted" style="margin-bottom:14px">${esc(p.name)}${p.code ? ' · ' + esc(p.code) : ''}</div>
+    ${accessCard}
+    <div class="box"><textarea id="popNoteBody" rows="2" placeholder="Add a note about this POP…"></textarea>
+      <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn primary" onclick="postPopNote(${id})"><i class="ti ti-send"></i> Post note</button></div></div>
+    ${notes || '<div class="muted">No notes yet</div>'}`;
+  window._popAccessBody = accessBody || '';
+}
+function editPopAccess(id) {
+  const el = $('#popacc');
+  el.innerHTML = `<textarea id="popaccedit" rows="6" style="font-family:var(--mono);font-size:13px">${esc(window._popAccessBody || '')}</textarea>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn sm" onclick="renderPopNotes(${id})">Cancel</button>
+    <button class="btn primary sm" onclick="savePopAccess(${id})"><i class="ti ti-check"></i> Save</button></div>`;
+}
+async function savePopAccess(id) {
+  const body = $('#popaccedit').value;
+  try { await api('/pops/' + id + '/access', { method: 'PUT', body: JSON.stringify({ body }) }); toast('Saved'); renderPopNotes(id); } catch (e) { toast(e.message); }
+}
+async function postPopNote(id) {
+  const body = $('#popNoteBody').value.trim(); if (!body) return;
+  try { await api('/pops/' + id + '/notes', { method: 'POST', body: JSON.stringify({ body }) }); toast('Note posted'); renderPopNotes(id); } catch (e) { toast(e.message); }
 }
 async function formPop(q) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
