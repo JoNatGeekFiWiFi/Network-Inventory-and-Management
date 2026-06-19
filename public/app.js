@@ -95,6 +95,10 @@ async function route() {
     if (p[0] === 'site' && p[2] === 'notes') { setNav('sites'); return await renderNotes(p[1]); }
     if (p[0] === 'site' && p[2] === 'edit') { setNav('sites'); return await formSite({ id: p[1] }); }
     if (p[0] === 'site') { setNav('sites'); return await renderSite(p[1]); }
+    if (p[0] === 'pops') { setNav('sites'); return await renderPops(); }
+    if (p[0] === 'pop' && p[1] === 'new') { setNav('sites'); return await formPop({}); }
+    if (p[0] === 'pop' && p[2] === 'edit') { setNav('sites'); return await formPop({ id: p[1] }); }
+    if (p[0] === 'pop') { setNav('sites'); return await renderPop(p[1]); }
     if (p[0] === 'customers') { setNav('customers'); return await renderCustomers(); }
     if (p[0] === 'customer' && p[1] === 'new') { setNav('customers'); return await formCustomer({}); }
     if (p[0] === 'customer' && p[2] === 'edit') { setNav('customers'); return await formCustomer({ id: p[1] }); }
@@ -117,6 +121,10 @@ async function route() {
 }
 
 // ---------- Sites ----------
+const sitesToggle = (active) => `<div class="seg" style="max-width:340px;margin-bottom:14px">
+  <a class="segbtn ${active === 'customer' ? 'on' : ''}" href="#/sites"><i class="ti ti-home"></i> Customer sites</a>
+  <a class="segbtn ${active === 'pop' ? 'on' : ''}" href="#/pops"><i class="ti ti-server-2"></i> POP sites</a></div>`;
+
 async function renderSites() {
   const sites = await api('/sites');
   const total = sites.length;
@@ -137,6 +145,7 @@ async function renderSites() {
   }).join('');
   view().innerHTML = `
     <div class="head"><h1 style="flex:1">Sites</h1><a class="btn" href="#/site/new"><i class="ti ti-plus"></i> Add site</a></div>
+    ${sitesToggle('customer')}
     <div class="grid3" style="margin:16px 0">
       <div class="metric"><div class="l">Total sites</div><div class="v">${total}</div></div>
       <div class="metric"><div class="l">Needs attention</div><div class="v" style="color:var(--warning)">${attention}</div></div>
@@ -197,6 +206,61 @@ async function renderSite(id) {
 
 function iconFor(t) { t = (t || '').toLowerCase(); if (t.includes('router')) return 'router'; if (t.includes('switch')) return 'switch-3'; if (t.includes('access')) return 'access-point'; if (t.includes('modem')) return 'device-desktop-analytics'; return 'device-desktop'; }
 function initials(n) { return (n || '?').split(' ').map(x => x[0]).join('').slice(0, 2).toUpperCase(); }
+
+// ---------- POP sites ----------
+async function renderPops() {
+  const pops = await api('/pops');
+  const rows = pops.map(p => `<div class="row rowlink" onclick="location.hash='#/pop/${p.id}'">
+    <i class="ti ti-server-2 sec-muted"></i>
+    <div style="flex:1;min-width:0"><div>${esc(p.name)} ${p.code ? `<span class="tag">${esc(p.code)}</span>` : ''}</div>
+      <div class="small sec-muted">${p.address ? esc(p.address) : (p.lat != null ? `${p.lat}, ${p.lng} · GPS` : '—')}</div></div>
+    ${statusPill(p.status)}<span class="small mono">${p.device_online}/${p.device_total} online</span>
+    <i class="ti ti-chevron-right muted"></i></div>`).join('');
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Sites</h1>${isPriv() ? '<a class="btn" href="#/pop/new"><i class="ti ti-plus"></i> Add POP</a>' : ''}</div>
+    ${sitesToggle('pop')}
+    <div class="card">${rows || '<div class="row muted">No POP sites yet</div>'}</div>`;
+}
+async function renderPop(id) {
+  const p = await api('/pops/' + id);
+  const where = p.address ? `<a class="iplink" href="https://maps.google.com/?q=${encodeURIComponent(p.address)}" target="_blank">${esc(p.address)} <i class="ti ti-external-link" style="font-size:11px"></i></a>`
+    : (p.lat != null ? `<a class="iplink mono" href="https://maps.google.com/?q=${p.lat},${p.lng}" target="_blank">${p.lat}, ${p.lng}</a> <span class="muted small">· GPS</span>` : '—');
+  const hw = p.devices.map(d => `<div class="row rowlink" onclick="location.hash='#/device/${d.id}'">
+    <i class="ti ti-${iconFor(d.device_type)} sec-muted"></i>
+    <div style="flex:1;min-width:0"><div>${esc(d.name)} · ${esc(d.manufacturer || '')} ${esc(d.model || '')}</div>
+      <div class="small mono sec-muted">${esc(d.mac || '')}${d.mgmt_address ? ' · ' + esc(d.mgmt_address) : ''}</div></div>
+    ${statusPill(d.online ? 'Online' : 'Offline')}<i class="ti ti-chevron-right muted"></i></div>`).join('') || '<div class="row muted">No hardware</div>';
+  const served = p.served_sites.map(s => `<a class="tag" href="#/site/${s.id}" style="margin:2px 4px 2px 0;display:inline-block">${esc(s.name)}</a>`).join('') || '<span class="muted small">No customer sites served</span>';
+  view().innerHTML = `
+    <div class="crumb" onclick="location.hash='#/pops'"><i class="ti ti-chevron-left"></i> POP sites</div>
+    <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(p.name)}</h1>${p.code ? `<span class="tag">${esc(p.code)}</span>` : ''}${statusPill(p.status)}</div>
+      <div class="small sec-muted" style="margin-top:3px"><i class="ti ti-map-pin"></i> ${where}</div></div>
+      ${isPriv() ? `<a class="btn" href="#/pop/${p.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}</div>
+    <div class="card"><div class="hd"><h2>Hardware · ${p.devices.length}</h2><a class="btn sm" href="#/device/new?pop=${p.id}"><i class="ti ti-plus"></i> Add hardware</a></div>${hw}</div>
+    <div class="card"><div class="hd"><h2>Customer sites served</h2></div><div style="padding:0 14px 12px">${served}</div></div>`;
+}
+async function formPop(q) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  let p = { name: '', code: '', address: '', lat: '', lng: '', status: 'Active' };
+  if (q.id) p = await api('/pops/' + q.id);
+  view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
+    <h1>${q.id ? 'Edit' : 'Add'} POP site</h1>
+    <div class="card" style="margin-top:14px;padding:16px" id="f">
+      <div class="grid2">${field('POP name', 'name', p.name, { ph: 'e.g. Dallas 01' })}${field('Code', 'code', p.code, { mono: true, ph: 'e.g. POP-DAL01' })}</div>
+      ${field('Address', 'address', p.address, { ph: 'Street, city, state (optional if GPS)' })}
+      <div class="grid2">${field('Latitude', 'lat', p.lat || '', { mono: true })}${field('Longitude', 'lng', p.lng || '', { mono: true })}</div>
+      ${field('Status', 'status', p.status, { type: 'select', options: ['Active', 'Planned', 'Decommissioned'] })}
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
+      <button class="btn primary" onclick="savePop(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
+}
+async function savePop(id) {
+  const d = collect('#f');
+  if (!d.name) { toast('Enter a POP name'); return; }
+  try {
+    if (id) { await api('/pops/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/pop/' + id; }
+    else { const r = await api('/pops', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/pop/' + r.id; }
+    toast('Saved');
+  } catch (e) { toast(e.message); }
+}
 
 // ---------- Notes ----------
 async function renderNotes(id) {
@@ -484,7 +548,7 @@ async function formDevice(q) {
   }
   const modelOpts = (await api('/models')).map(m => ({ v: m.id, l: m.manufacturer + ' ' + m.model }));
   const siteOpts = (await api('/sites')).map(s => ({ v: s.id, l: s.name }));
-  const popOpts = META.pops.map(p => ({ v: p.id, l: 'POP · ' + p.name }));
+  const popOpts = (await api('/pops')).map(p => ({ v: p.id, l: 'POP · ' + p.name }));
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${q.id ? 'Edit' : 'Add'} hardware</h1>
     <div class="card" style="margin-top:14px;padding:16px;overflow:visible" id="f">

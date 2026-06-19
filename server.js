@@ -407,6 +407,46 @@ app.delete('/api/sites/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---- POP sites (owned infrastructure; NOC/Admin manage) ----
+function withPopSummary(p) {
+  const devs = db.prepare("SELECT online FROM devices WHERE assigned_type='pop' AND assigned_pop_id=?").all(p.id);
+  return { ...p, device_online: devs.filter(d => d.online).length, device_total: devs.length };
+}
+app.get('/api/pops', (req, res) => {
+  res.json(db.prepare('SELECT * FROM pops ORDER BY name').all().map(withPopSummary));
+});
+app.get('/api/pops/:id', (req, res) => {
+  const p = db.prepare('SELECT * FROM pops WHERE id=?').get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'not found' });
+  const out = withPopSummary(p);
+  out.devices = db.prepare("SELECT d.*, m.manufacturer, m.model, m.device_type FROM devices d LEFT JOIN device_models m ON m.id=d.model_id WHERE d.assigned_type='pop' AND d.assigned_pop_id=? ORDER BY d.name").all(p.id).map(publicDevice);
+  out.served_sites = db.prepare(`SELECT DISTINCT s.id, s.name FROM sites s JOIN connections c ON c.site_id=s.id WHERE c.served_type='pop' AND c.served_pop_id=? ORDER BY s.name`).all(p.id);
+  res.json(out);
+});
+app.post('/api/pops', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!b.name) return res.status(400).json({ error: 'Name required' });
+  const info = db.prepare('INSERT INTO pops (name, code, address, lat, lng, status) VALUES (?,?,?,?,?,?)')
+    .run(N(b.name), N(b.code), N(b.address), N(b.lat || null), N(b.lng || null), b.status || 'Active');
+  audit(req, 'create', 'pop#' + info.lastInsertRowid, b.name);
+  res.json({ id: info.lastInsertRowid });
+});
+app.put('/api/pops/:id', requireNoc, (req, res) => {
+  const b = req.body || {};
+  db.prepare('UPDATE pops SET name=?, code=?, address=?, lat=?, lng=?, status=? WHERE id=?')
+    .run(N(b.name), N(b.code), N(b.address), N(b.lat || null), N(b.lng || null), N(b.status, 'Active'), req.params.id);
+  audit(req, 'edit', 'pop#' + req.params.id, b.name);
+  res.json({ ok: true });
+});
+app.delete('/api/pops/:id', requireNoc, (req, res) => {
+  const d = db.prepare("SELECT COUNT(*) AS n FROM devices WHERE assigned_type='pop' AND assigned_pop_id=?").get(req.params.id);
+  const c = db.prepare("SELECT COUNT(*) AS n FROM connections WHERE served_type='pop' AND served_pop_id=?").get(req.params.id);
+  if (d.n + c.n > 0) return res.status(409).json({ error: `In use by ${d.n} device(s) and ${c.n} connection(s)` });
+  db.prepare('DELETE FROM pops WHERE id=?').run(req.params.id);
+  audit(req, 'delete', 'pop#' + req.params.id);
+  res.json({ ok: true });
+});
+
 // site notes
 app.post('/api/sites/:id/notes', (req, res) => {
   const b = req.body || {};
