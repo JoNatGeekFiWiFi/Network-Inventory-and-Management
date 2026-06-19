@@ -214,8 +214,9 @@ async function renderPops() {
   const rows = pops.map(p => `<div class="row rowlink" onclick="location.hash='#/pop/${p.id}'">
     <i class="ti ti-server-2 sec-muted"></i>
     <div style="flex:1;min-width:0"><div>${esc(p.name)} ${p.code ? `<span class="tag">${esc(p.code)}</span>` : ''}</div>
-      <div class="small sec-muted">${p.address ? esc(p.address) : (p.lat != null ? `${p.lat}, ${p.lng} · GPS` : '—')}</div></div>
-    ${statusPill(p.status)}<span class="small mono">${p.device_online}/${p.device_total} online</span>
+      <div class="small sec-muted">${p.address ? esc(p.address) : (p.lat != null ? `${p.lat}, ${p.lng} · GPS` : '—')}</div>
+      <div class="small mono sec-muted">mgmt ${esc(p.current_mgmt_ip || '—')} · pub ${esc(p.current_public_ip || '—')}</div></div>
+    <div class="stat">${statusPill(p.status)}<span class="small mono">${p.device_online}/${p.device_total} online</span></div>
     <i class="ti ti-chevron-right muted"></i></div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Sites</h1>${isPriv() ? '<a class="btn" href="#/pop/new"><i class="ti ti-plus"></i> Add POP</a>' : ''}</div>
     ${sitesToggle('pop')}
@@ -236,6 +237,10 @@ async function renderPop(id) {
     <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(p.name)}</h1>${p.code ? `<span class="tag">${esc(p.code)}</span>` : ''}${statusPill(p.status)}</div>
       <div class="small sec-muted" style="margin-top:3px"><i class="ti ti-map-pin"></i> ${where}</div></div>
       ${isPriv() ? `<a class="btn" href="#/pop/${p.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}</div>
+    <div class="grid2" style="margin:16px 0">
+      <div class="metric"><div class="l"><i class="ti ti-shield-lock"></i> Management IP</div><div class="mono" style="font-size:15px;font-weight:500">${p.current_mgmt_ip ? `<a class="iplink" href="https://${esc(p.current_mgmt_ip)}" target="_blank">${esc(p.current_mgmt_ip)} <i class="ti ti-external-link" style="font-size:11px"></i></a>` : '—'}</div></div>
+      <div class="metric"><div class="l"><i class="ti ti-world"></i> Public IP</div><div class="mono" style="font-size:15px;font-weight:500">${esc(p.current_public_ip || '—')}</div></div>
+    </div>
     <div class="card"><div class="hd"><h2>Hardware · ${p.devices.length}</h2><a class="btn sm" href="#/device/new?pop=${p.id}"><i class="ti ti-plus"></i> Add hardware</a></div>${hw}</div>
     <div class="card"><div class="hd"><h2>Customer sites served</h2></div><div style="padding:0 14px 12px">${served}</div></div>
     <div class="card"><div class="hd"><h2><i class="ti ti-notes"></i> Notes · ${p.notes.length}</h2><a class="btn sm" href="#/pop/${p.id}/notes"><i class="ti ti-arrows-diagonal"></i> Expand</a></div>
@@ -287,6 +292,7 @@ async function formPop(q) {
       ${field('Address', 'address', p.address, { ph: 'Street, city, state (optional if GPS)' })}
       <div class="grid2">${field('Latitude', 'lat', p.lat || '', { mono: true })}${field('Longitude', 'lng', p.lng || '', { mono: true })}</div>
       ${field('Status', 'status', p.status, { type: 'select', options: ['Active', 'Planned', 'Decommissioned'] })}
+      <div class="grid2">${field('Current management IP', 'current_mgmt_ip', p.current_mgmt_ip, { mono: true })}${field('Current public IP', 'current_public_ip', p.current_public_ip, { mono: true })}</div>
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
       <button class="btn primary" onclick="savePop(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
 }

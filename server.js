@@ -297,6 +297,9 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
     if (publicIp && d.assigned_type === 'site' && d.assigned_site_id) {
       db.prepare('UPDATE sites SET current_public_ip=? WHERE id=?').run(publicIp, d.assigned_site_id);
       setPublic = publicIp;
+    } else if (publicIp && d.assigned_type === 'pop' && d.assigned_pop_id) {
+      db.prepare('UPDATE pops SET current_public_ip=? WHERE id=?').run(publicIp, d.assigned_pop_id);
+      setPublic = publicIp;
     }
     audit(req, 'poll', 'device#' + d.id, `RouterOS poll: ${ifaces.length} interfaces${publicIp ? ', public ' + publicIp : ''}`);
     res.json({ count: ifaces.length, interfaces: ifaces, polled_at: polled, public_ip: publicIp, set_public: setPublic });
@@ -554,15 +557,15 @@ app.put('/api/pops/:id/access', requireNoc, (req, res) => {
 app.post('/api/pops', requireNoc, (req, res) => {
   const b = req.body || {};
   if (!b.name) return res.status(400).json({ error: 'Name required' });
-  const info = db.prepare('INSERT INTO pops (name, code, address, lat, lng, status) VALUES (?,?,?,?,?,?)')
-    .run(N(b.name), N(b.code), N(b.address), N(b.lat || null), N(b.lng || null), b.status || 'Active');
+  const info = db.prepare('INSERT INTO pops (name, code, address, lat, lng, status, current_mgmt_ip, current_public_ip) VALUES (?,?,?,?,?,?,?,?)')
+    .run(N(b.name), N(b.code), N(b.address), N(b.lat || null), N(b.lng || null), b.status || 'Active', N(b.current_mgmt_ip), N(b.current_public_ip));
   audit(req, 'create', 'pop#' + info.lastInsertRowid, b.name);
   res.json({ id: info.lastInsertRowid });
 });
 app.put('/api/pops/:id', requireNoc, (req, res) => {
   const b = req.body || {};
-  db.prepare('UPDATE pops SET name=?, code=?, address=?, lat=?, lng=?, status=? WHERE id=?')
-    .run(N(b.name), N(b.code), N(b.address), N(b.lat || null), N(b.lng || null), N(b.status, 'Active'), req.params.id);
+  db.prepare('UPDATE pops SET name=?, code=?, address=?, lat=?, lng=?, status=?, current_mgmt_ip=?, current_public_ip=? WHERE id=?')
+    .run(N(b.name), N(b.code), N(b.address), N(b.lat || null), N(b.lng || null), N(b.status, 'Active'), N(b.current_mgmt_ip), N(b.current_public_ip), req.params.id);
   audit(req, 'edit', 'pop#' + req.params.id, b.name);
   res.json({ ok: true });
 });

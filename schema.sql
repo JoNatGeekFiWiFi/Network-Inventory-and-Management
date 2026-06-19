@@ -63,7 +63,9 @@ CREATE TABLE IF NOT EXISTS pops (
   address TEXT,
   lat REAL,
   lng REAL,
-  status TEXT NOT NULL DEFAULT 'Active'
+  status TEXT NOT NULL DEFAULT 'Active',
+  current_mgmt_ip TEXT,
+  current_public_ip TEXT
 );
 
 -- Upstream providers (carriers / transit / wholesale)

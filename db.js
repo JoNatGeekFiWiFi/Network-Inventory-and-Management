@@ -35,6 +35,8 @@ export function migrate() {
   ensure('devices', 'admin_username', 'TEXT');
   ensure('devices', 'interfaces_json', 'TEXT');
   ensure('devices', 'last_polled', 'TEXT');
+  ensure('pops', 'current_mgmt_ip', 'TEXT');
+  ensure('pops', 'current_public_ip', 'TEXT');
   db.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');
   db.exec('CREATE TABLE IF NOT EXISTS pop_access (pop_id INTEGER PRIMARY KEY, body TEXT)');
   db.exec('CREATE TABLE IF NOT EXISTS pop_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, pop_id INTEGER NOT NULL, author TEXT, author_role TEXT, body TEXT, created_at TEXT NOT NULL DEFAULT (datetime(\'now\')))');
