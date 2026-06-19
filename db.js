@@ -34,6 +34,7 @@ export function migrate() {
   ensure('devices', 'wg_private_key', 'TEXT');
   ensure('devices', 'admin_username', 'TEXT');
   ensure('devices', 'interfaces_json', 'TEXT');
+  ensure('devices', 'iface_roles_json', 'TEXT');
   ensure('devices', 'last_polled', 'TEXT');
   ensure('pops', 'current_mgmt_ip', 'TEXT');
   ensure('pops', 'current_public_ip', 'TEXT');

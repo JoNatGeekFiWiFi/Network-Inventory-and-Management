@@ -436,20 +436,23 @@ async function renderDevice(id) {
 
   let ifaces = [];
   try { ifaces = d.interfaces_json ? JSON.parse(d.interfaces_json) : []; } catch {}
+  let roles = {};
+  try { roles = d.iface_roles_json ? JSON.parse(d.iface_roles_json) : {}; } catch {}
   const portsCard = (d.management_mode === 'provider') ? '' : `
     <div class="card"><div class="hd"><h2><i class="ti ti-plug"></i> Ports / interfaces${ifaces.length ? ` · ${ifaces.length}` : ''} <span class="small muted" style="font-weight:400">· tap to graph</span></h2>${isPriv() ? `<button class="btn sm" onclick="pollDevice(${d.id})"><i class="ti ti-refresh"></i> Poll now</button>` : ''}</div>
-      ${ifaces.length ? ifaces.map((i, idx) => `
+      ${ifaces.length ? ifaces.map((i, idx) => { const role = roles[i.name] || ''; return `
         <div class="row rowlink" onclick="togglePort(${idx})">
           <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${i.running ? 'var(--success)' : 'var(--text3)'};flex:none"></span>
-          <div style="flex:1;min-width:0"><div><span class="mono">${esc(i.name)}</span> ${i.type ? `<span class="tag">${esc(i.type)}</span>` : ''}${i.speed ? ` <span class="tag" style="background:var(--info-bg);color:var(--info)">${esc(i.speed)}</span>` : ''}${i.disabled ? ' <span class="small muted">(disabled)</span>' : ''}</div>
+          <div style="flex:1;min-width:0"><div><span class="mono">${esc(i.name)}</span> ${role ? `<span class="tag" style="background:var(--info-bg);color:var(--info)">${esc(role)}</span>` : ''} ${i.type ? `<span class="tag">${esc(i.type)}</span>` : ''}${i.speed ? ` <span class="tag" style="background:var(--info-bg);color:var(--info)">${esc(i.speed)}</span>` : ''}${i.disabled ? ' <span class="small muted">(disabled)</span>' : ''}</div>
             <div class="small mono sec-muted">${(i.ips && i.ips.length) ? esc(i.ips.join(', ')) : ''}${i.mac ? ((i.ips && i.ips.length) ? ' · ' : '') + esc(i.mac) : ''}</div></div>
           <i class="ti ti-chevron-down chev" id="cv${idx}"></i></div>
         <div id="pp${idx}" style="display:none;padding:8px 14px 14px;background:var(--surface2)">
+          ${isPriv() ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><span class="small sec-muted">Role</span><select onchange="setIfaceRole(${idx},this.value)" style="width:auto">${['', 'WAN1', 'WAN2', 'LAN', 'MGMT'].map(o => `<option value="${o}" ${o === role ? 'selected' : ''}>${o || '—'}</option>`).join('')}</select></div>` : ''}
           <div class="seg" id="prng${idx}" style="max-width:260px;margin-bottom:8px">
             <button class="segbtn on" data-r="1h" onclick="setPortRange(${idx},'1h')">1h</button>
             <button class="segbtn" data-r="24h" onclick="setPortRange(${idx},'24h')">24h</button>
             <button class="segbtn" data-r="7d" onclick="setPortRange(${idx},'7d')">7d</button></div>
-          <div style="position:relative;height:160px"><canvas id="pc${idx}"></canvas></div></div>`).join('')
+          <div style="position:relative;height:160px"><canvas id="pc${idx}"></canvas></div></div>`; }).join('')
         : '<div class="row muted">Not polled yet. Add admin login + management IP, then Poll now. (MikroTik RouterOS)</div>'}
       ${d.last_polled ? `<div class="help" style="padding:8px 14px">Last polled ${esc(d.last_polled)} · traffic sampled every minute</div>` : ''}
     </div>`;
@@ -904,6 +907,10 @@ async function provisionWg(id) {
 }
 async function ztSyncDevice(id) {
   try { const r = await api('/zerotier/sync', { method: 'POST' }); toast(`ZeroTier: updated ${r.updated} of ${r.members}`); renderDevice(id); } catch (e) { toast(e.message); }
+}
+async function setIfaceRole(idx, role) {
+  const name = window._devPorts[idx];
+  try { await api('/devices/' + window._devId + '/iface-role', { method: 'PUT', body: JSON.stringify({ iface: name, role }) }); toast(role ? `${name} → ${role}` : `${name} role cleared`); renderDevice(window._devId); } catch (e) { toast(e.message); }
 }
 async function pollDevice(id) {
   toast('Polling device…');

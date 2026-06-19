@@ -245,6 +245,19 @@ app.get('/api/devices/:id/wireguard/config', requireNoc, (req, res) => {
   res.json({ config: cfg, server_peer: peer, address: dvc.mgmt_address });
 });
 
+// Tag a device interface with a role (WAN1/WAN2/LAN/MGMT) — persists across polls
+app.put('/api/devices/:id/iface-role', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!b.iface) return res.status(400).json({ error: 'iface required' });
+  const d = db.prepare('SELECT iface_roles_json FROM devices WHERE id=?').get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'not found' });
+  let roles = {}; try { roles = JSON.parse(d.iface_roles_json || '{}'); } catch {}
+  if (b.role) roles[b.iface] = b.role; else delete roles[b.iface];
+  db.prepare('UPDATE devices SET iface_roles_json=? WHERE id=?').run(JSON.stringify(roles), req.params.id);
+  audit(req, 'edit', 'device#' + req.params.id, `interface ${b.iface} → ${b.role || '(none)'}`);
+  res.json({ ok: true });
+});
+
 // Poll a MikroTik RouterOS device over the management overlay for its live interfaces
 app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
   const d = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
