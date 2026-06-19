@@ -934,7 +934,13 @@ async function scanBlock() { toast('Scanning device logs…'); try { const r = a
 async function pushBlock() {
   if (!confirm('Push the active blocklist to all reachable routers? Updates their netinv-blocklist address-list and ensures a drop rule.')) return;
   toast('Pushing to routers…');
-  try { const r = await api('/blocklist/push', { method: 'POST', body: JSON.stringify({}) }); const ok = r.results.filter(x => !x.error).length; toast(`Pushed to ${ok}/${r.results.length} router(s)`); } catch (e) { toast(e.message); }
+  try {
+    const r = await api('/blocklist/push', { method: 'POST', body: JSON.stringify({}) });
+    const ok = r.results.filter(x => !x.error).length;
+    const added = r.results.reduce((a, x) => a + (x.added || 0), 0);
+    const err = r.results.find(x => x.error);
+    toast(err ? ('Push error: ' + err.error) : `Pushed to ${ok}/${r.results.length} router(s) · ${added} IP(s) added`);
+  } catch (e) { toast(e.message); }
 }
 
 async function dlHub() {

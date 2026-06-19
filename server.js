@@ -81,18 +81,23 @@ async function pushBlocklistToDevice(d) {
   const H = { Authorization: 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64'), Accept: 'application/json' };
   const ips = db.prepare('SELECT ip FROM blocklist WHERE active=1').all().map(r => r.ip);
   const want = new Set(ips);
-  const cur = await restReq(d.mgmt_address, '/rest/ip/firewall/address-list?list=netinv-blocklist', { headers: H });
-  let existing = []; if (cur.status < 400) { try { const a = JSON.parse(cur.body); if (Array.isArray(a)) existing = a; } catch {} }
+  const cur = await restReq(d.mgmt_address, '/rest/ip/firewall/address-list', { headers: H });
+  let all = []; if (cur.status < 400) { try { const a = JSON.parse(cur.body); if (Array.isArray(a)) all = a; } catch {} }
+  const existing = all.filter(e => e.list === 'netinv-blocklist'); // only touch our list
   const have = new Set(existing.map(e => e.address));
-  let added = 0, removed = 0;
-  for (const ip of ips) if (!have.has(ip)) { const ar = await restReq(d.mgmt_address, '/rest/ip/firewall/address-list', { headers: H, method: 'POST', body: { list: 'netinv-blocklist', address: ip } }); if (ar.status < 400) added++; }
+  let added = 0, removed = 0, lastErr = null;
+  // RouterOS REST: add = PUT (POST is for command endpoints only)
+  for (const ip of ips) if (!have.has(ip)) {
+    const ar = await restReq(d.mgmt_address, '/rest/ip/firewall/address-list', { headers: H, method: 'PUT', body: { list: 'netinv-blocklist', address: ip } });
+    if (ar.status < 400) added++; else lastErr = ar.status + ': ' + (ar.body || '').slice(0, 120);
+  }
   for (const e of existing) if (!want.has(e.address)) { await restReq(d.mgmt_address, '/rest/ip/firewall/address-list/' + encodeURIComponent(e['.id']), { headers: H, method: 'DELETE' }); removed++; }
   // ensure an input drop rule referencing the list
   let ruleAdded = false;
   const fr = await restReq(d.mgmt_address, '/rest/ip/firewall/filter', { headers: H });
   let hasRule = false; if (fr.status < 400) { try { const rules = JSON.parse(fr.body); if (Array.isArray(rules)) hasRule = rules.some(x => x['src-address-list'] === 'netinv-blocklist' && x.action === 'drop'); } catch {} }
-  if (!hasRule) { const rr = await restReq(d.mgmt_address, '/rest/ip/firewall/filter', { headers: H, method: 'POST', body: { chain: 'input', 'src-address-list': 'netinv-blocklist', action: 'drop', comment: 'netinv auto-block', 'place-before': '0' } }); if (rr.status < 400) ruleAdded = true; }
-  return { added, removed, total: ips.length, ruleAdded };
+  if (!hasRule) { const rr = await restReq(d.mgmt_address, '/rest/ip/firewall/filter', { headers: H, method: 'PUT', body: { chain: 'input', 'src-address-list': 'netinv-blocklist', action: 'drop', comment: 'netinv auto-block' } }); if (rr.status < 400) ruleAdded = true; else lastErr = lastErr || (rr.status + ': ' + (rr.body || '').slice(0, 120)); }
+  return { added, removed, total: ips.length, ruleAdded, error: lastErr || undefined };
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
