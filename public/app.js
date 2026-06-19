@@ -880,20 +880,25 @@ async function renderZeroTier() {
       <div class="metric"><div class="l">Online</div><div class="v" style="color:var(--success)">${data.online}</div></div>
       <div class="metric"><div class="l">Linked to a device</div><div class="v">${_ztMembers.filter(m => m.device).length}</div></div>
     </div>
-    <input id="ztq" placeholder="Search name, node ID, or IP…" oninput="drawZt()" style="margin-bottom:12px"/>
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+      <input id="ztq" placeholder="Search name, node ID, or IP…" oninput="drawZt()" style="flex:1"/>
+      <label class="small sec-muted" style="display:flex;align-items:center;gap:6px;white-space:nowrap;cursor:pointer"><input type="checkbox" id="ztUnassigned" onchange="drawZt()" style="width:auto"/> Unassigned only</label>
+    </div>
     <div class="card" id="ztlist"></div>`;
   drawZt();
 }
 function drawZt() {
   const q = ($('#ztq') ? $('#ztq').value : '').toLowerCase();
-  const rows = _ztMembers.filter(m => !q || (m.name + m.nodeId + (m.ip || '')).toLowerCase().includes(q)).map(m => {
+  const unassignedOnly = $('#ztUnassigned') && $('#ztUnassigned').checked;
+  const rows = _ztMembers.filter(m => (!q || (m.name + m.nodeId + (m.ip || '')).toLowerCase().includes(q)) && (!unassignedOnly || !m.device)).map(m => {
     const dotc = m.online ? 'var(--success)' : 'var(--text3)';
+    const assigned = m.device ? `<span class="tag" style="background:var(--success-bg);color:var(--success)"><i class="ti ti-circle-check" style="font-size:11px"></i> ${esc(m.device.site || m.device.name)}</span>` : '';
     const action = m.device
       ? `<a class="btn sm" href="#/device/${m.device.id}">View device</a>`
       : `<button class="btn sm" onclick="ztAdd('${esc(m.nodeId)}','${encodeURIComponent(m.name)}','${esc(m.ip || '')}')"><i class="ti ti-plus"></i> Add to site</button>`;
     return `<div class="row">
       <span class="dot" style="background:${dotc};flex:none"></span>
-      <div style="flex:1;min-width:0"><div>${esc(m.name || '(unnamed)')} ${m.authorized ? '' : '<span class="badge" style="background:var(--warning-bg);color:var(--warning)">unauthorized</span>'}</div>
+      <div style="flex:1;min-width:0"><div>${esc(m.name || '(unnamed)')} ${assigned} ${m.authorized ? '' : '<span class="badge" style="background:var(--warning-bg);color:var(--warning)">unauthorized</span>'}</div>
         <div class="small mono sec-muted">${esc(m.nodeId)} · ${esc(m.ip || 'no IP')}</div></div>
       <span class="small muted">${m.online ? 'online' : timeAgo(m.lastSeen)}</span>
       ${action}</div>`;

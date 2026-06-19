@@ -407,8 +407,14 @@ app.get('/api/zerotier/members', requireNoc, async (req, res) => {
     if (!r.ok) { const t = await r.text().catch(() => ''); return res.status(502).json({ error: `ZeroTier API ${r.status}${t ? ': ' + t.slice(0, 160) : ''}` }); }
     let members = await r.json();
     if (!Array.isArray(members)) members = (members && Array.isArray(members.data)) ? members.data : [];
-    const devs = db.prepare("SELECT id, name, zt_node_id FROM devices WHERE zt_node_id IS NOT NULL AND zt_node_id<>''").all();
-    const map = {}; devs.forEach(d => { map[d.zt_node_id] = { id: d.id, name: d.name }; });
+    const devs = db.prepare("SELECT id, name, zt_node_id, assigned_site_id, assigned_pop_id FROM devices WHERE zt_node_id IS NOT NULL AND zt_node_id<>''").all();
+    const map = {};
+    for (const dv of devs) {
+      let where = null;
+      if (dv.assigned_site_id) { const s = db.prepare('SELECT name FROM sites WHERE id=?').get(dv.assigned_site_id); if (s) where = s.name; }
+      else if (dv.assigned_pop_id) { const p = db.prepare('SELECT name FROM pops WHERE id=?').get(dv.assigned_pop_id); if (p) where = 'POP · ' + p.name; }
+      map[dv.zt_node_id] = { id: dv.id, name: dv.name, site: where };
+    }
     const now = Date.now();
     const out = members.map(m => {
       const nodeId = m.nodeId || (m.config && m.config.nodeId) || m.id || '';
