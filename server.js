@@ -7,13 +7,16 @@ import { createSession, destroySession, userForToken, parseCookies, setSessionCo
 import { hashPassword, verifyPassword } from './hash.js';
 import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseCidr } from './wg.js';
 import https from 'node:https';
+import http from 'node:http';
 
-// HTTPS GET that tolerates self-signed certs (RouterOS) with a timeout. Returns {status, body}.
-function httpsGetJson(urlStr, headers, timeoutMs = 12000) {
+// GET JSON with a timeout; https tolerates self-signed certs (RouterOS). Returns {status, body}.
+function reqJson(mod, urlStr, headers, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
     let u;
     try { u = new URL(urlStr); } catch (e) { return reject(e); }
-    const req = https.request({ hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search, method: 'GET', headers, rejectUnauthorized: false, timeout: timeoutMs }, (res) => {
+    const opts = { hostname: u.hostname, port: u.port || (mod === https ? 443 : 80), path: u.pathname + u.search, method: 'GET', headers, timeout: timeoutMs };
+    if (mod === https) opts.rejectUnauthorized = false;
+    const req = mod.request(opts, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => resolve({ status: res.statusCode, body: data }));
@@ -22,6 +25,14 @@ function httpsGetJson(urlStr, headers, timeoutMs = 12000) {
     req.on('error', reject);
     req.end();
   });
+}
+// RouterOS REST: try HTTPS (www-ssl), fall back to HTTP (www) if the TLS port refuses.
+async function restGet(addr, path, headers) {
+  try { return await reqJson(https, `https://${addr}${path}`, headers); }
+  catch (e) {
+    if (['ECONNREFUSED', 'EPROTO', 'ECONNRESET'].includes(e.code)) return await reqJson(http, `http://${addr}${path}`, headers);
+    throw e;
+  }
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -226,9 +237,9 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
   const user = d.admin_username || 'admin';
   const auth = 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64');
   try {
-    const r = await httpsGetJson(`https://${d.mgmt_address}/rest/interface`, { Authorization: auth, Accept: 'application/json' });
+    const r = await restGet(d.mgmt_address, '/rest/interface', { Authorization: auth, Accept: 'application/json' });
     if (r.status >= 400) {
-      const hint = r.status === 401 ? ' (login rejected — check admin user/pass and that the www-ssl/REST service is enabled)' : '';
+      const hint = r.status === 401 ? ' (login rejected — check admin user/pass and that the REST service has access)' : '';
       return res.status(502).json({ error: `Device returned ${r.status}${hint}` });
     }
     let data;
@@ -245,9 +256,10 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
     res.json({ count: ifaces.length, interfaces: ifaces, polled_at: polled });
   } catch (e) {
     const timedOut = e.code === 'ETIMEDOUT' || e.message === 'timeout';
-    const msg = timedOut
-      ? 'Device unreachable (timed out) — is the server on the management overlay and the IP correct?'
-      : ('Could not reach device: ' + e.message);
+    let msg;
+    if (timedOut) msg = 'Device unreachable (timed out) — is the server on the management overlay and the IP correct?';
+    else if (e.code === 'ECONNREFUSED') msg = 'Device refused on ports 443 and 80 — enable the RouterOS web service (www or www-ssl) so the REST API is reachable.';
+    else msg = 'Could not reach device: ' + e.message;
     res.status(502).json({ error: msg });
   }
 });
