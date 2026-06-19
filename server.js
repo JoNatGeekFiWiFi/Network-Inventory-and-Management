@@ -9,30 +9,47 @@ import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseC
 import https from 'node:https';
 import http from 'node:http';
 
-// GET JSON with a timeout; https tolerates self-signed certs (RouterOS). Returns {status, body}.
-function reqJson(mod, urlStr, headers, timeoutMs = 12000) {
+// HTTP(S) JSON request with a timeout; https tolerates self-signed certs (RouterOS). Returns {status, body}.
+function reqJson(mod, urlStr, opts = {}) {
+  const { headers = {}, method = 'GET', body = null, timeoutMs = 12000 } = opts;
   return new Promise((resolve, reject) => {
     let u;
     try { u = new URL(urlStr); } catch (e) { return reject(e); }
-    const opts = { hostname: u.hostname, port: u.port || (mod === https ? 443 : 80), path: u.pathname + u.search, method: 'GET', headers, timeout: timeoutMs };
-    if (mod === https) opts.rejectUnauthorized = false;
-    const req = mod.request(opts, (res) => {
+    const payload = body ? JSON.stringify(body) : null;
+    const h = Object.assign({}, headers);
+    if (payload) { h['Content-Type'] = 'application/json'; h['Content-Length'] = Buffer.byteLength(payload); }
+    const o = { hostname: u.hostname, port: u.port || (mod === https ? 443 : 80), path: u.pathname + u.search, method, headers: h, timeout: timeoutMs };
+    if (mod === https) o.rejectUnauthorized = false;
+    const req = mod.request(o, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => resolve({ status: res.statusCode, body: data }));
     });
     req.on('timeout', () => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
     req.on('error', reject);
+    if (payload) req.write(payload);
     req.end();
   });
 }
 // RouterOS REST: try HTTPS (www-ssl), fall back to HTTP (www) if the TLS port refuses.
-async function restGet(addr, path, headers) {
-  try { return await reqJson(https, `https://${addr}${path}`, headers); }
+async function restReq(addr, path, opts = {}) {
+  try { return await reqJson(https, `https://${addr}${path}`, opts); }
   catch (e) {
-    if (['ECONNREFUSED', 'EPROTO', 'ECONNRESET'].includes(e.code)) return await reqJson(http, `http://${addr}${path}`, headers);
+    if (['ECONNREFUSED', 'EPROTO', 'ECONNRESET'].includes(e.code)) return await reqJson(http, `http://${addr}${path}`, opts);
     throw e;
   }
+}
+// Is an IPv4 address public (not private / CGNAT / loopback / link-local / multicast)?
+function isPublicV4(ip) {
+  const o = String(ip).split('.').map(Number);
+  if (o.length !== 4 || o.some(n => isNaN(n) || n < 0 || n > 255)) return false;
+  const [a, b] = o;
+  if (a === 10 || a === 127 || a === 0 || a >= 224) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  if (a === 100 && b >= 64 && b <= 127) return false; // CGNAT
+  return true;
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -236,24 +253,53 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
   if (!d.admin_password) return res.status(400).json({ error: 'Add an admin password (and username) for this device first' });
   const user = d.admin_username || 'admin';
   const auth = 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64');
+  const H = { Authorization: auth, Accept: 'application/json' };
   try {
-    const r = await restGet(d.mgmt_address, '/rest/interface', { Authorization: auth, Accept: 'application/json' });
+    const r = await restReq(d.mgmt_address, '/rest/interface', { headers: H });
     if (r.status >= 400) {
       const hint = r.status === 401 ? ' (login rejected — check admin user/pass and that the REST service has access)' : '';
       return res.status(502).json({ error: `Device returned ${r.status}${hint}` });
     }
     let data;
     try { data = JSON.parse(r.body); } catch { return res.status(502).json({ error: 'Unexpected response from device (is REST enabled?)' }); }
+    // Also pull IP addresses (best-effort) to show active IPs per interface + detect public IP
+    let addresses = [];
+    try {
+      const r2 = await restReq(d.mgmt_address, '/rest/ip/address', { headers: H });
+      if (r2.status < 400) { const a = JSON.parse(r2.body); if (Array.isArray(a)) addresses = a; }
+    } catch {}
+    const ipByIf = {};
+    for (const a of addresses) { const ifn = a.interface, ip = (a.address || '').split('/')[0]; if (ifn && ip) (ipByIf[ifn] = ipByIf[ifn] || []).push(ip); }
+    // Negotiated link speed via the ethernet monitor command (best-effort)
+    const rateByName = {};
+    try {
+      const re = await restReq(d.mgmt_address, '/rest/interface/ethernet', { headers: H });
+      if (re.status < 400) {
+        const eth = JSON.parse(re.body);
+        if (Array.isArray(eth) && eth.length) {
+          const names = eth.map(e => e.name).filter(Boolean).join(',');
+          const rm = await restReq(d.mgmt_address, '/rest/interface/ethernet/monitor', { headers: H, method: 'POST', body: { numbers: names, once: 'true' } });
+          if (rm.status < 400) { const mon = JSON.parse(rm.body); if (Array.isArray(mon)) for (const m of mon) { if (m.name) rateByName[m.name] = m.rate || ''; } }
+        }
+      }
+    } catch {}
     const ifaces = (Array.isArray(data) ? data : []).map(i => ({
       name: i.name, type: i.type || '',
       running: i.running === 'true' || i.running === true,
       disabled: i.disabled === 'true' || i.disabled === true,
-      mac: i['mac-address'] || '', comment: i.comment || ''
+      mac: i['mac-address'] || '', comment: i.comment || '',
+      ips: ipByIf[i.name] || [], speed: rateByName[i.name] || ''
     }));
+    const publicIp = addresses.map(a => (a.address || '').split('/')[0]).find(isPublicV4) || null;
     const polled = new Date().toISOString();
     db.prepare('UPDATE devices SET interfaces_json=?, last_polled=? WHERE id=?').run(JSON.stringify(ifaces), polled, d.id);
-    audit(req, 'poll', 'device#' + d.id, `RouterOS interfaces (${ifaces.length})`);
-    res.json({ count: ifaces.length, interfaces: ifaces, polled_at: polled });
+    let setPublic = null;
+    if (publicIp && d.assigned_type === 'site' && d.assigned_site_id) {
+      db.prepare('UPDATE sites SET current_public_ip=? WHERE id=?').run(publicIp, d.assigned_site_id);
+      setPublic = publicIp;
+    }
+    audit(req, 'poll', 'device#' + d.id, `RouterOS poll: ${ifaces.length} interfaces${publicIp ? ', public ' + publicIp : ''}`);
+    res.json({ count: ifaces.length, interfaces: ifaces, polled_at: polled, public_ip: publicIp, set_public: setPublic });
   } catch (e) {
     const timedOut = e.code === 'ETIMEDOUT' || e.message === 'timeout';
     let msg;
