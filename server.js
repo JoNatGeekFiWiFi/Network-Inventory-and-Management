@@ -479,6 +479,47 @@ app.get('/api/meta', (req, res) => {
   });
 });
 
+// ---- address autocomplete (OpenStreetMap / Nominatim) ----
+const _geoCache = new Map(); // key -> { t, results }
+const GEO_TTL = 60 * 60 * 1000;
+function geoFmt(a, display) {
+  if (!a) return display || '';
+  const line1 = [a.house_number, a.road].filter(Boolean).join(' ');
+  const city = a.city || a.town || a.village || a.hamlet || a.suburb || a.municipality || a.county;
+  const region = [a.state, a.postcode].filter(Boolean).join(' ');
+  const parts = [line1, city, region].filter(Boolean);
+  return parts.length ? parts.join(', ') : (display || '');
+}
+app.get('/api/geocode', async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (q.length < 3) return res.json([]);
+  const key = q.toLowerCase();
+  const hit = _geoCache.get(key);
+  if (hit && Date.now() - hit.t < GEO_TTL) return res.json(hit.results);
+  try {
+    const cc = (db.prepare("SELECT value FROM settings WHERE key='geocode_countrycodes'").get() || {}).value;
+    let url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=6&q=' + encodeURIComponent(q);
+    if (cc !== '') url += '&countrycodes=' + encodeURIComponent(cc || 'us');
+    const r = await reqJson(https, url, {
+      headers: { 'User-Agent': 'NetInv/1.0 (network inventory; +https://management.geekitek.com)', 'Accept-Language': 'en' },
+      timeoutMs: 8000
+    });
+    if (r.status !== 200) return res.status(502).json({ error: 'geocoder ' + r.status });
+    let arr = [];
+    try { arr = JSON.parse(r.body); } catch { arr = []; }
+    const results = (Array.isArray(arr) ? arr : []).map(x => ({
+      label: geoFmt(x.address, x.display_name),
+      display: x.display_name,
+      lat: x.lat, lon: x.lon
+    })).filter(x => x.label);
+    _geoCache.set(key, { t: Date.now(), results });
+    if (_geoCache.size > 400) _geoCache.delete(_geoCache.keys().next().value);
+    res.json(results);
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
 // ---- accounts ----
 app.get('/api/accounts', (req, res) => {
   const rows = db.prepare(`

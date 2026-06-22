@@ -294,12 +294,13 @@ async function formPop(q) {
     <h1>${q.id ? 'Edit' : 'Add'} POP site</h1>
     <div class="card" style="margin-top:14px;padding:16px" id="f">
       <div class="grid2">${field('POP name', 'name', p.name, { ph: 'e.g. Dallas 01' })}${field('Code', 'code', p.code, { mono: true, ph: 'e.g. POP-DAL01' })}</div>
-      ${field('Address', 'address', p.address, { ph: 'Street, city, state (optional if GPS)' })}
+      <div class="fld"><label class="fl">Address</label><div id="ss-paddr"></div></div>
       <div class="grid2">${field('Latitude', 'lat', p.lat || '', { mono: true })}${field('Longitude', 'lng', p.lng || '', { mono: true })}</div>
       ${field('Status', 'status', p.status, { type: 'select', options: ['Active', 'Planned', 'Decommissioned'] })}
       <div class="grid2">${field('Current management IP', 'current_mgmt_ip', p.current_mgmt_ip, { mono: true })}${field('Current public IP', 'current_public_ip', p.current_public_ip, { mono: true })}</div>
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
       <button class="btn primary" onclick="savePop(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
+  attachAddressSearch($('#ss-paddr'), { name: 'address', value: p.address || '', latName: 'lat', lngName: 'lng', placeholder: 'Street, city, state (optional if GPS)' });
 }
 async function savePop(id) {
   const d = collect('#f');
@@ -648,6 +649,43 @@ function attachSearch(host, items, name, value, placeholder) {
   input.addEventListener('blur', () => setTimeout(() => { list.style.display = 'none'; }, 150));
 }
 
+// Address autocomplete (OpenStreetMap via /api/geocode). Fills the address input + optional lat/lng fields.
+function attachAddressSearch(host, opts) {
+  if (!host) return;
+  const { name, value = '', placeholder = 'Start typing an address…', latName, lngName } = opts;
+  host.classList.add('ss');
+  host.innerHTML = `<input type="text" class="ss-input" name="${name}" placeholder="${esc(placeholder)}" value="${esc(value)}" autocomplete="off"/>
+    <div class="ss-list" style="display:none"></div>`;
+  const input = host.querySelector('.ss-input'), list = host.querySelector('.ss-list');
+  let timer = null, seq = 0;
+  const setField = (n, v) => { if (!n) return; const el = view().querySelector('#f [name="' + n + '"]'); if (el && v != null) el.value = v; };
+  const run = async (q) => {
+    const my = ++seq;
+    try {
+      const r = await api('/geocode?q=' + encodeURIComponent(q));
+      if (my !== seq) return;
+      list._data = r;
+      list.innerHTML = r.length ? r.map((i, idx) => `<div class="ss-opt" data-idx="${idx}">${esc(i.label)}</div>`).join('') : '<div class="ss-opt muted">No matches</div>';
+      list.style.display = 'block';
+    } catch { if (my === seq) { list.innerHTML = '<div class="ss-opt muted">Lookup failed</div>'; list.style.display = 'block'; } }
+  };
+  input.addEventListener('input', () => {
+    const q = input.value.trim();
+    clearTimeout(timer);
+    if (q.length < 3) { list.style.display = 'none'; return; }
+    list.innerHTML = '<div class="ss-opt muted">Searching…</div>'; list.style.display = 'block';
+    timer = setTimeout(() => run(q), 350);
+  });
+  list.addEventListener('mousedown', (e) => {
+    const o = e.target.closest('.ss-opt'); if (!o || o.dataset.idx == null) return;
+    const item = (list._data || [])[+o.dataset.idx]; if (!item) return;
+    input.value = item.label;
+    setField(latName, item.lat); setField(lngName, item.lon);
+    list.style.display = 'none';
+  });
+  input.addEventListener('blur', () => setTimeout(() => { list.style.display = 'none'; }, 150));
+}
+
 async function formCustomer(q) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
   let a = { name: '', account_number: '', status: 'Active', billing_address: '', notes: '' };
@@ -660,10 +698,11 @@ async function formCustomer(q) {
       ${field('Status', 'status', a.status, { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}</div>
       <div class="grid2">${field('Sub-account (optional)', 'sub_account', a.sub_account, { mono: true })}
       ${field('Account PIN', 'pin', '', { mono: true, ph: q.id ? 'unchanged' : 'NOC/Admin only' })}</div>
-      ${field('Billing address', 'billing_address', a.billing_address)}
+      <div class="fld"><label class="fl">Billing address</label><div id="ss-baddr"></div></div>
       ${field('Notes', 'notes', a.notes, { type: 'textarea' })}
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
       <button class="btn primary" onclick="saveCustomer(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
+  attachAddressSearch($('#ss-baddr'), { name: 'billing_address', value: a.billing_address || '', placeholder: 'Start typing an address…' });
 }
 async function saveCustomer(id) {
   const d = collect('#f');
@@ -700,7 +739,7 @@ async function formSite(q) {
         </div>
       </div>
       ${field('Site name', 'name', s.name, { ph: 'e.g. Riverside Office' })}
-      ${field('Service address', 'service_address', s.service_address, { ph: 'Street, city, state (optional if GPS)' })}
+      <div class="fld"><label class="fl">Service address</label><div id="ss-saddr"></div></div>
       <div class="grid2">${field('Latitude', 'lat', s.lat || '', { mono: true })}${field('Longitude', 'lng', s.lng || '', { mono: true })}</div>
       <div class="grid2">${field('Status', 'status', s.status, { type: 'select', options: ['Active', 'Provisioning', 'Suspended', 'Cancelled'] })}
       ${field('Current public IP', 'current_public_ip', s.current_public_ip, { mono: true })}</div>
@@ -709,6 +748,7 @@ async function formSite(q) {
       <button class="btn primary" onclick="saveSite(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
   attachSearch($('#ss-customer'), custOpts, 'customer_id', preCust, 'Search customer…');
   attachSearch($('#ss-account'), accOpts, 'account_id', '', 'Search account…');
+  attachAddressSearch($('#ss-saddr'), { name: 'service_address', value: s.service_address || '', latName: 'lat', lngName: 'lng', placeholder: 'Street, city, state (optional if GPS)' });
 }
 function toggleNewCust() {
   const on = $('#newCust').checked;
