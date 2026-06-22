@@ -621,7 +621,15 @@ async function formSite(q) {
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${q.id ? 'Edit' : 'Add'} site</h1>
     <div class="card" style="margin-top:14px;padding:16px;overflow:visible" id="f">
-      <div class="fld"><label class="fl">Customer / account</label><div id="ss-account"></div></div>
+      <div class="fld">
+        <label class="fl" style="display:flex;justify-content:space-between;align-items:center">Customer / account
+          ${isPriv() && !q.id ? `<label class="small sec-muted" style="font-weight:400;cursor:pointer"><input type="checkbox" id="newAcct" onchange="toggleNewAccount()" style="width:auto"> New account</label>` : ''}</label>
+        <div id="ss-account"></div>
+        <div id="newAcctBox" style="display:none">
+          ${field('Account name', 'na_name', '', { ph: 'e.g. Acme Logistics' })}
+          <div class="grid2">${field('Account number', 'na_account_number', '', { mono: true })}${field('Status', 'na_status', 'Active', { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}</div>
+        </div>
+      </div>
       ${field('Site name', 'name', s.name, { ph: 'e.g. Riverside Office' })}
       ${field('Service address', 'service_address', s.service_address, { ph: 'Street, city, state (optional if GPS)' })}
       <div class="grid2">${field('Latitude', 'lat', s.lat || '', { mono: true })}${field('Longitude', 'lng', s.lng || '', { mono: true })}</div>
@@ -632,10 +640,22 @@ async function formSite(q) {
       <button class="btn primary" onclick="saveSite(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
   attachSearch($('#ss-account'), accOpts, 'account_id', s.account_id || (s.account && s.account.id), 'Search customer…');
 }
+function toggleNewAccount() {
+  const on = $('#newAcct').checked;
+  $('#newAcctBox').style.display = on ? 'block' : 'none';
+  $('#ss-account').style.display = on ? 'none' : 'block';
+}
 async function saveSite(id) {
   const d = collect('#f');
+  const newAcct = $('#newAcct') && $('#newAcct').checked;
+  if (newAcct) {
+    if (!d.na_name) { toast('Enter the new account name'); return; }
+    try { const a = await api('/accounts', { method: 'POST', body: JSON.stringify({ name: d.na_name, account_number: d.na_account_number, status: d.na_status }) }); d.account_id = a.id; }
+    catch (e) { toast('Account: ' + e.message); return; }
+  }
   if (!d.account_id) { toast('Pick a customer/account'); return; }
   if (!d.name) { toast('Enter a site name'); return; }
+  delete d.na_name; delete d.na_account_number; delete d.na_status;
   try {
     if (id) { await api('/sites/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/site/' + id; }
     else { const r = await api('/sites', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/site/' + r.id; }
