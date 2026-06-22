@@ -223,6 +223,7 @@ CREATE TABLE IF NOT EXISTS devices (
   admin_username TEXT,
   interfaces_json TEXT,
   iface_roles_json TEXT,
+  wifi_json TEXT,
   last_polled TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

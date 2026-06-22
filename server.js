@@ -361,8 +361,14 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
       const rb = await restReq(d.mgmt_address, '/rest/system/routerboard', { headers: H, timeoutMs: 7000 });
       if (rb.status < 400) { const j = JSON.parse(rb.body); const o = Array.isArray(j) ? j[0] : j; serialVal = (o && (o['serial-number'] || o['serial'])) || null; }
     } catch {}
+    // WiFi presence (best-effort) — store SSIDs only, never passwords
+    let wifiSummary = null;
+    try {
+      const wf = await readWifi(d);
+      if (wf.system) wifiSummary = { system: wf.system, radios: wf.radios.map(r => ({ iface: r.iface, ssid: r.ssid, disabled: r.disabled, band: r.band, hasPassword: !!r.password })) };
+    } catch {}
     const polled = new Date().toISOString();
-    const sets = ['interfaces_json=?', 'last_polled=?']; const vals = [JSON.stringify(ifaces), polled];
+    const sets = ['interfaces_json=?', 'wifi_json=?', 'last_polled=?']; const vals = [JSON.stringify(ifaces), wifiSummary ? JSON.stringify(wifiSummary) : null, polled];
     if (macVal) { sets.push('mac=?'); vals.push(macVal); }
     if (serialVal) { sets.push('serial=?'); vals.push(serialVal); }
     vals.push(d.id);
@@ -379,7 +385,7 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
     }
     let harvested = 0; try { harvested = await harvestThreats(d); } catch {}
     audit(req, 'poll', 'device#' + d.id, `RouterOS poll: ${ifaces.length} interfaces${publicIp ? ', public ' + publicIp : ''}`);
-    res.json({ count: ifaces.length, interfaces: ifaces, polled_at: polled, public_ip: publicIp, set_public: setPublic, set_mgmt: setMgmt, target, harvested });
+    res.json({ count: ifaces.length, interfaces: ifaces, polled_at: polled, public_ip: publicIp, set_public: setPublic, set_mgmt: setMgmt, target, harvested, wifi: wifiSummary ? wifiSummary.radios.length : 0 });
   } catch (e) {
     const timedOut = e.code === 'ETIMEDOUT' || e.message === 'timeout';
     let msg;
@@ -472,6 +478,98 @@ app.post('/api/devices/:id/dhcp-leases/action', requireNoc, async (req, res) => 
     if (r && r.status >= 400) return res.status(502).json({ error: `Device returned ${r.status}` });
     audit(req, 'dhcp', 'device#' + d.id, `${action} lease ${mac || id}`);
     res.json({ ok: true, action });
+  } catch (e) { res.status(502).json({ error: e.http ? ('Device returned ' + e.http) : rosErr(e) }); }
+});
+
+// ---- RouterOS WiFi (legacy /interface/wireless + v7 /interface/wifi) ----
+async function rosGet(d, path) {
+  const r = await restReq(d.mgmt_address, path, { headers: rosHeaders(d) });
+  if (r.status >= 400) return { err: r.status };
+  try { return { data: JSON.parse(r.body) }; } catch { return { data: null }; }
+}
+// Returns { system: 'wifi'|'wireless'|null, radios:[{id,iface,ssid,password,disabled,band,profile?,profileId?,configRef?}] }
+async function readWifi(d) {
+  // v7 wifi (wifiwave2) first
+  const w = await rosGet(d, '/rest/interface/wifi');
+  if (!w.err && Array.isArray(w.data) && w.data.length) {
+    const cfg = await rosGet(d, '/rest/interface/wifi/configuration');
+    const cfgs = (!cfg.err && Array.isArray(cfg.data)) ? cfg.data : [];
+    const byName = {}; for (const c of cfgs) if (c.name) byName[c.name] = c;
+    const radios = w.data.map(i => {
+      const cref = i.configuration || i['configuration.name'] || '';
+      const c = cref ? byName[cref] : null;
+      const ssid = i['configuration.ssid'] || (c && (c.ssid || c['ssid'])) || '';
+      const password = i['security.passphrase'] || (c && c['security.passphrase']) || '';
+      return { id: i['.id'], iface: i.name, ssid, password, disabled: i.disabled === 'true' || i.disabled === true, band: i['configuration.band'] || (c && c.band) || '', configRef: cref };
+    });
+    return { system: 'wifi', radios };
+  }
+  // legacy wireless
+  const wl = await rosGet(d, '/rest/interface/wireless');
+  if (!wl.err && Array.isArray(wl.data) && wl.data.length) {
+    const sp = await rosGet(d, '/rest/interface/wireless/security-profiles');
+    const sps = (!sp.err && Array.isArray(sp.data)) ? sp.data : [];
+    const byName = {}; for (const s of sps) if (s.name) byName[s.name] = s;
+    const radios = wl.data.map(i => {
+      const prof = i['security-profile'] || 'default';
+      const s = byName[prof];
+      const password = s ? (s['wpa2-pre-shared-key'] || s['wpa-pre-shared-key'] || '') : '';
+      return { id: i['.id'], iface: i.name, ssid: i.ssid || '', password, disabled: i.disabled === 'true' || i.disabled === true, band: i.band || '', profile: prof, profileId: s ? s['.id'] : null };
+    });
+    return { system: 'wireless', radios };
+  }
+  return { system: null, radios: [] };
+}
+async function writeWifi(d, b) {
+  const H = rosHeaders(d);
+  const ros = (method, path, body) => restReq(d.mgmt_address, path, { headers: H, method, body });
+  if (b.system === 'wifi') {
+    const body = {};
+    if (b.ssid != null && b.ssid !== '') body['configuration.ssid'] = b.ssid;
+    if (b.password != null && b.password !== '') body['security.passphrase'] = b.password;
+    if (!Object.keys(body).length) return;
+    const r = await ros('PATCH', '/rest/interface/wifi/' + b.id, body);
+    if (r.status >= 400) throw Object.assign(new Error('set failed'), { http: r.status });
+    return;
+  }
+  if (b.system === 'wireless') {
+    if (b.ssid != null && b.ssid !== '') {
+      const r = await ros('PATCH', '/rest/interface/wireless/' + b.id, { ssid: b.ssid });
+      if (r.status >= 400) throw Object.assign(new Error('ssid set failed'), { http: r.status });
+    }
+    if (b.password != null && b.password !== '') {
+      let pid = b.profileId;
+      if (!pid) {
+        const sp = await rosGet(d, '/rest/interface/wireless/security-profiles');
+        const sps = (!sp.err && Array.isArray(sp.data)) ? sp.data : [];
+        const s = sps.find(x => x.name === (b.profile || 'default'));
+        pid = s ? s['.id'] : null;
+      }
+      if (!pid) throw Object.assign(new Error('no security profile to update'), { http: 400 });
+      const r = await ros('PATCH', '/rest/interface/wireless/security-profiles/' + pid, { 'wpa2-pre-shared-key': b.password, 'wpa-pre-shared-key': b.password });
+      if (r.status >= 400) throw Object.assign(new Error('passphrase set failed'), { http: r.status });
+    }
+    return;
+  }
+  throw Object.assign(new Error('unknown wifi system'), { http: 400 });
+}
+
+app.get('/api/devices/:id/wifi', requireNoc, async (req, res) => {
+  const d = dhcpDevice(req, res); if (!d) return;
+  try {
+    const wf = await readWifi(d);
+    audit(req, 'credential_read', 'device#' + d.id, 'wifi (' + (wf.system || 'none') + ')');
+    res.json(wf);
+  } catch (e) { res.status(502).json({ error: e.http ? ('Device returned ' + e.http) : rosErr(e) }); }
+});
+app.post('/api/devices/:id/wifi', requireNoc, async (req, res) => {
+  const d = dhcpDevice(req, res); if (!d) return;
+  const b = req.body || {};
+  if (!b.id || !b.system) return res.status(400).json({ error: 'id and system required' });
+  try {
+    await writeWifi(d, b);
+    audit(req, 'edit', 'device#' + d.id, `wifi ${b.iface || b.id}: ssid${b.ssid ? '=' + b.ssid : ' unchanged'}${b.password ? ', password changed' : ''}`);
+    res.json({ ok: true });
   } catch (e) { res.status(502).json({ error: e.http ? ('Device returned ' + e.http) : rosErr(e) }); }
 });
 

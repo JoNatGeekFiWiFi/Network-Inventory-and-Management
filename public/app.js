@@ -536,6 +536,15 @@ async function renderDevice(id) {
       <button class="btn sm" onclick="loadLeases(${d.id})"><i class="ti ti-list-search"></i> View leases</button></div>
       <div id="dhcpBody"><div class="row muted">Query the router live for current DHCP leases. (MikroTik RouterOS)</div></div></div>`;
 
+  let wifi = null; try { wifi = d.wifi_json ? JSON.parse(d.wifi_json) : null; } catch {}
+  const wifiCard = (d.management_mode === 'provider' || !wifi || !wifi.radios || !wifi.radios.length) ? '' : `
+    <div class="card"><div class="hd"><h2><i class="ti ti-wifi"></i> WiFi${wifi.radios.length > 1 ? ' · ' + wifi.radios.length : ''}</h2>
+      ${isPriv() ? `<button class="btn sm" onclick="manageWifi(${d.id})"><i class="ti ti-eye"></i> Reveal &amp; edit</button>` : ''}</div>
+      <div id="wifiBody">${wifi.radios.map(r => `<div class="row"><i class="ti ti-wifi sec-muted"></i>
+        <div style="flex:1;min-width:0"><div><span class="mono">${esc(r.ssid || '(no SSID)')}</span> ${r.band ? `<span class="tag">${esc(r.band)}</span>` : ''}${r.disabled ? ' <span class="small muted">(disabled)</span>' : ''}</div>
+        <div class="small mono sec-muted">${esc(r.iface)} · password ${r.hasPassword ? '••••••' : '—'}</div></div></div>`).join('')}</div>
+      <div class="help" style="padding:8px 14px"><i class="ti ti-lock"></i> Passwords hidden · reveal is logged · ${esc(wifi.system)}</div></div>`;
+
   view().innerHTML = `
     <div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(d.name)}</h1>${statusPill(d.online ? 'Online' : 'Offline')}</div>
@@ -556,6 +565,8 @@ async function renderDevice(id) {
     <div class="card"><div class="hd"><h2>Details</h2></div><div style="padding:0 14px 10px">${info.map(([k, v]) => `<div class="kv"><span class="small sec-muted">${esc(k)}</span><span class="mono small">${v}</span></div>`).join('')}</div></div>
 
     ${portsCard}
+
+    ${wifiCard}
 
     ${dhcpCard}
 
@@ -1177,6 +1188,34 @@ async function leaseAction(idx, sel) {
     toast('Done · ' + action.replace('-', ' '));
     await loadLeases(window._dhcpDevId);
   } catch (e) { toast(e.message); sel.disabled = false; sel.value = ''; }
+}
+async function manageWifi(id) {
+  const body = $('#wifiBody'); if (!body) return;
+  body.innerHTML = '<div class="row muted">Reading WiFi from the router…</div>';
+  try {
+    const r = await api('/devices/' + id + '/wifi');
+    window._wifi = { id, system: r.system, radios: r.radios || [] };
+    body.innerHTML = (r.radios || []).map((w, idx) => `<div style="padding:10px 14px;border-top:.5px solid var(--border)">
+      <div class="small sec-muted" style="margin-bottom:6px"><span class="mono">${esc(w.iface)}</span>${w.band ? ' · ' + esc(w.band) : ''}${w.disabled ? ' · (disabled)' : ''}</div>
+      <div class="grid2">
+        <div class="fld" style="margin:0"><label class="fl">SSID (network name)</label><input id="wssid${idx}" value="${esc(w.ssid || '')}"/></div>
+        <div class="fld" style="margin:0"><label class="fl">Password</label><input id="wpass${idx}" class="mono" value="${esc(w.password || '')}"/></div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn sm primary" onclick="saveWifi(${idx})"><i class="ti ti-check"></i> Save to router</button></div></div>`).join('')
+      || '<div class="row muted">No WiFi radios found.</div>';
+  } catch (e) { body.innerHTML = '<div class="row muted">' + esc(e.message) + '</div>'; }
+}
+async function saveWifi(idx) {
+  const w = ((window._wifi || {}).radios || [])[idx]; if (!w) return;
+  const ssid = $('#wssid' + idx).value, password = $('#wpass' + idx).value;
+  if (!ssid && !password) { toast('Nothing to change'); return; }
+  toast('Saving WiFi to router…');
+  try {
+    await api('/devices/' + window._wifi.id + '/wifi', { method: 'POST', body: JSON.stringify({
+      system: window._wifi.system, id: w.id, iface: w.iface, profile: w.profile, profileId: w.profileId, configRef: w.configRef, ssid, password
+    }) });
+    toast('WiFi updated · Poll now to confirm');
+  } catch (e) { toast(e.message); }
 }
 async function showWg(id) {
   try {
