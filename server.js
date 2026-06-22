@@ -390,6 +390,91 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
   }
 });
 
+// ---- RouterOS DHCP lease management (NOC/Admin) ----
+function rosHeaders(d) {
+  const user = d.admin_username || 'admin';
+  return { Authorization: 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64'), Accept: 'application/json' };
+}
+function rosErr(e) {
+  if (e.code === 'ETIMEDOUT' || e.message === 'timeout') return 'Device unreachable (timed out) — is the server on the management overlay and the IP correct?';
+  if (e.code === 'ECONNREFUSED') return 'Device refused on ports 443 and 80 — enable the RouterOS web service (www or www-ssl).';
+  return 'Could not reach device: ' + e.message;
+}
+function mapLease(l) {
+  return {
+    id: l['.id'],
+    address: l.address || l['active-address'] || '',
+    mac: l['mac-address'] || l['active-mac-address'] || '',
+    host: l['host-name'] || '',
+    server: l.server || '',
+    status: l.status || '',
+    dynamic: l.dynamic === 'true' || l.dynamic === true,
+    blocked: l['block-access'] === 'true' || l['block-access'] === true,
+    disabled: l.disabled === 'true' || l.disabled === true,
+    expires: l['expires-after'] || '',
+    lastSeen: l['last-seen'] || '',
+    comment: l.comment || ''
+  };
+}
+function dhcpDevice(req, res) {
+  const d = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
+  if (!d) { res.status(404).json({ error: 'not found' }); return null; }
+  if (!d.mgmt_address) { res.status(400).json({ error: 'No management IP — assign/provision the overlay first' }); return null; }
+  if (!d.admin_password) { res.status(400).json({ error: 'Add an admin password (and username) for this device first' }); return null; }
+  return d;
+}
+
+app.get('/api/devices/:id/dhcp-leases', requireNoc, async (req, res) => {
+  const d = dhcpDevice(req, res); if (!d) return;
+  try {
+    const r = await restReq(d.mgmt_address, '/rest/ip/dhcp-server/lease', { headers: rosHeaders(d) });
+    if (r.status >= 400) { const hint = r.status === 401 ? ' (login rejected — check admin user/pass)' : ''; return res.status(502).json({ error: `Device returned ${r.status}${hint}` }); }
+    let data; try { data = JSON.parse(r.body); } catch { return res.status(502).json({ error: 'Unexpected response (is REST enabled?)' }); }
+    const leases = (Array.isArray(data) ? data : []).map(mapLease)
+      .sort((a, b) => String(a.address).localeCompare(String(b.address), undefined, { numeric: true }));
+    res.json({ leases });
+  } catch (e) { res.status(502).json({ error: rosErr(e) }); }
+});
+
+// action: make-static | block | unblock | disable | enable | remove
+app.post('/api/devices/:id/dhcp-leases/action', requireNoc, async (req, res) => {
+  const d = dhcpDevice(req, res); if (!d) return;
+  const { id, mac, action } = req.body || {};
+  let dynamic = (req.body || {}).dynamic === true || (req.body || {}).dynamic === 'true';
+  if (!id || !action) return res.status(400).json({ error: 'id and action required' });
+  const H = rosHeaders(d);
+  const ros = (method, path, body) => restReq(d.mgmt_address, path, { headers: H, method, body });
+  const findStaticIdByMac = async (m) => {
+    const r = await ros('GET', '/rest/ip/dhcp-server/lease');
+    if (r.status >= 400) return null;
+    let arr = []; try { arr = JSON.parse(r.body); } catch {}
+    const hit = (Array.isArray(arr) ? arr : []).find(l => (l['mac-address'] || '').toLowerCase() === String(m || '').toLowerCase() && !(l.dynamic === 'true' || l.dynamic === true));
+    return hit ? hit['.id'] : null;
+  };
+  let curId = id;
+  const ensureStatic = async () => {
+    if (!dynamic) return;
+    const mk = await ros('POST', '/rest/ip/dhcp-server/lease/make-static', { numbers: id });
+    if (mk.status >= 400) throw Object.assign(new Error('make-static failed'), { http: mk.status });
+    const sid = await findStaticIdByMac(mac); // .id changes when a dynamic lease becomes static
+    if (sid) { curId = sid; dynamic = false; }
+  };
+  try {
+    let r = null;
+    const path = () => '/rest/ip/dhcp-server/lease/' + curId;
+    if (action === 'make-static') { await ensureStatic(); }
+    else if (action === 'block') { await ensureStatic(); r = await ros('PATCH', path(), { 'block-access': 'yes' }); }
+    else if (action === 'unblock') { r = await ros('PATCH', path(), { 'block-access': 'no' }); }
+    else if (action === 'disable') { await ensureStatic(); r = await ros('PATCH', path(), { disabled: 'yes' }); }
+    else if (action === 'enable') { r = await ros('PATCH', path(), { disabled: 'no' }); }
+    else if (action === 'remove') { r = await ros('DELETE', path()); }
+    else return res.status(400).json({ error: 'unknown action' });
+    if (r && r.status >= 400) return res.status(502).json({ error: `Device returned ${r.status}` });
+    audit(req, 'dhcp', 'device#' + d.id, `${action} lease ${mac || id}`);
+    res.json({ ok: true, action });
+  } catch (e) { res.status(502).json({ error: e.http ? ('Device returned ' + e.http) : rosErr(e) }); }
+});
+
 // Fetch from ZeroTier Central with a timeout so a slow/hung call can't stall a request
 async function ztFetch(path, token, ms = 15000) {
   const ac = new AbortController();

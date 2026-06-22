@@ -531,6 +531,11 @@ async function renderDevice(id) {
         </div><div id="wgout"></div>` : '<div class="help">Overlay provisioning is NOC/Admin only.</div>'}
       </div></div>`;
 
+  const dhcpCard = (d.management_mode === 'provider' || !isPriv()) ? '' : `
+    <div class="card"><div class="hd"><h2><i class="ti ti-address-book"></i> DHCP leases</h2>
+      <button class="btn sm" onclick="loadLeases(${d.id})"><i class="ti ti-list-search"></i> View leases</button></div>
+      <div id="dhcpBody"><div class="row muted">Query the router live for current DHCP leases. (MikroTik RouterOS)</div></div></div>`;
+
   view().innerHTML = `
     <div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(d.name)}</h1>${statusPill(d.online ? 'Online' : 'Offline')}</div>
@@ -551,6 +556,8 @@ async function renderDevice(id) {
     <div class="card"><div class="hd"><h2>Details</h2></div><div style="padding:0 14px 10px">${info.map(([k, v]) => `<div class="kv"><span class="small sec-muted">${esc(k)}</span><span class="mono small">${v}</span></div>`).join('')}</div></div>
 
     ${portsCard}
+
+    ${dhcpCard}
 
     ${overlayCard}
 
@@ -1128,6 +1135,48 @@ async function pollDevice(id) {
     else if (r.target) msg += ' · no public IP found (CGNAT?)';
     toast(msg); renderDevice(id);
   } catch (e) { toast(e.message); }
+}
+async function loadLeases(id) {
+  const body = $('#dhcpBody'); if (!body) return;
+  body.innerHTML = '<div class="row muted">Loading leases from the router…</div>';
+  try {
+    const r = await api('/devices/' + id + '/dhcp-leases');
+    window._leases = r.leases || []; window._dhcpDevId = id;
+    renderLeases();
+  } catch (e) { body.innerHTML = '<div class="row muted">' + esc(e.message) + '</div>'; }
+}
+function renderLeases() {
+  const body = $('#dhcpBody'); if (!body) return;
+  const ls = window._leases || [];
+  if (!ls.length) { body.innerHTML = '<div class="row muted">No DHCP leases on this router.</div>'; return; }
+  body.innerHTML = ls.map((l, idx) => {
+    const tags = [`<span class="tag">${l.dynamic ? 'dynamic' : 'static'}</span>`];
+    if (l.blocked) tags.push('<span class="tag" style="background:rgba(220,53,69,.14);color:var(--danger)">blocked</span>');
+    if (l.disabled) tags.push('<span class="tag" style="background:rgba(245,166,35,.16);color:var(--warning)">disabled</span>');
+    const dot = l.status === 'bound' ? 'var(--success)' : 'var(--text3)';
+    const opts = ['<option value="">Actions…</option>'];
+    if (l.dynamic) opts.push('<option value="make-static">Make static</option>');
+    opts.push(l.blocked ? '<option value="unblock">Unblock</option>' : '<option value="block">Block</option>');
+    opts.push(l.disabled ? '<option value="enable">Enable</option>' : '<option value="disable">Disable</option>');
+    opts.push('<option value="remove">Remove lease</option>');
+    return `<div class="row">
+      <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${dot};flex:none"></span>
+      <div style="flex:1;min-width:0">
+        <div><span class="mono">${esc(l.address || '—')}</span> ${tags.join(' ')}</div>
+        <div class="small mono sec-muted">${esc(l.mac || '')}${l.host ? ' · ' + esc(l.host) : ''}${l.expires ? ' · expires ' + esc(l.expires) : ''}</div></div>
+      <select style="width:auto" onchange="leaseAction(${idx}, this)">${opts.join('')}</select></div>`;
+  }).join('');
+}
+async function leaseAction(idx, sel) {
+  const action = sel.value; if (!action) return;
+  const l = (window._leases || [])[idx]; if (!l) { sel.value = ''; return; }
+  if (action === 'remove' && !confirm('Remove this DHCP lease?\n' + (l.address || '') + ' ' + (l.mac || ''))) { sel.value = ''; return; }
+  sel.disabled = true; toast(action.replace('-', ' ') + '…');
+  try {
+    await api('/devices/' + window._dhcpDevId + '/dhcp-leases/action', { method: 'POST', body: JSON.stringify({ id: l.id, mac: l.mac, dynamic: l.dynamic, action }) });
+    toast('Done · ' + action.replace('-', ' '));
+    await loadLeases(window._dhcpDevId);
+  } catch (e) { toast(e.message); sel.disabled = false; sel.value = ''; }
 }
 async function showWg(id) {
   try {
