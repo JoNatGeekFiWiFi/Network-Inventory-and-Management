@@ -2,7 +2,7 @@
 import express from 'express';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { db, initSchema, migrate, isEmpty, seed } from './db.js';
+import { db, initSchema, migrate, isEmpty, seed, backfillCustomers } from './db.js';
 import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie } from './auth.js';
 import { hashPassword, verifyPassword } from './hash.js';
 import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseCidr } from './wg.js';
@@ -108,6 +108,7 @@ app.use(express.json());
 initSchema();
 migrate();
 if (isEmpty()) { seed(); console.log('Database seeded on first run.'); }
+backfillCustomers();
 
 // ---- helpers ----
 const N = (v, d = null) => (v === undefined ? d : v); // null-coalesce for SQLite binding
@@ -493,6 +494,7 @@ app.get('/api/accounts/:id', (req, res) => {
   if (!a) return res.status(404).json({ error: 'not found' });
   a.contacts = db.prepare('SELECT * FROM account_contacts WHERE account_id=?').all(a.id);
   a.previous_isps = db.prepare('SELECT * FROM previous_isps WHERE account_id=?').all(a.id);
+  a.customers = db.prepare('SELECT * FROM customers WHERE account_id=? ORDER BY name').all(a.id).map(c => ({ ...c, site_count: db.prepare('SELECT COUNT(*) AS n FROM sites WHERE customer_id=?').get(c.id).n }));
   a.sites = db.prepare('SELECT * FROM sites WHERE account_id=?').all(a.id).map(withSiteSummary);
   a.device_count = a.sites.reduce((n, s) => n + s.device_total, 0);
   a.needs_attention = a.sites.filter(s => s.needs_attention).length;
@@ -542,8 +544,9 @@ function withSiteSummary(s) {
   const onFailover = conns.length > 1 && conns.find(c => c.role === 'Primary' && c.status !== 'Up');
   const conn_status = anyDown ? 'Down' : (onFailover ? 'On failover' : 'Up');
   const account = db.prepare('SELECT name FROM accounts WHERE id=?').get(s.account_id);
+  const customer = s.customer_id ? db.prepare('SELECT name FROM customers WHERE id=?').get(s.customer_id) : null;
   return {
-    ...s, account_name: account ? account.name : null,
+    ...s, account_name: account ? account.name : null, customer_name: customer ? customer.name : null,
     device_online: online, device_total: devs.length,
     conn_status,
     needs_attention: anyDown || online < devs.length
@@ -560,6 +563,7 @@ app.get('/api/sites/:id', (req, res) => {
   if (!s) return res.status(404).json({ error: 'not found' });
   const out = withSiteSummary(s);
   out.account = db.prepare('SELECT id, name FROM accounts WHERE id=?').get(s.account_id);
+  out.customer = s.customer_id ? db.prepare('SELECT id, name FROM customers WHERE id=?').get(s.customer_id) : null;
   out.connections = db.prepare('SELECT * FROM connections WHERE site_id=? ORDER BY priority').all(s.id).map(resolveConn);
   out.devices = db.prepare('SELECT d.*, m.manufacturer, m.model, m.device_type FROM devices d LEFT JOIN device_models m ON m.id=d.model_id WHERE d.assigned_type=\'site\' AND d.assigned_site_id=? ORDER BY d.name').all(s.id).map(publicDevice);
   out.notes = db.prepare('SELECT * FROM site_notes WHERE site_id=? ORDER BY datetime(created_at) DESC').all(s.id);
@@ -580,19 +584,71 @@ function resolveConn(c) {
   return c;
 }
 
+// a site's account always follows its customer's account
+function accountForCustomer(customerId) {
+  if (!customerId) return null;
+  const c = db.prepare('SELECT account_id FROM customers WHERE id=?').get(customerId);
+  return c ? c.account_id : null;
+}
 app.post('/api/sites', (req, res) => {
   const b = req.body || {};
-  const info = db.prepare('INSERT INTO sites (account_id,name,service_address,lat,lng,status,current_mgmt_ip,current_public_ip,notes) VALUES (?,?,?,?,?,?,?,?,?)')
-    .run(N(b.account_id), N(b.name), N(b.service_address), N(b.lat || null), N(b.lng || null), b.status || 'Active', N(b.current_mgmt_ip), N(b.current_public_ip), N(b.notes));
+  const accountId = accountForCustomer(b.customer_id) || b.account_id;
+  if (!accountId) return res.status(400).json({ error: 'A customer (or account) is required' });
+  const info = db.prepare('INSERT INTO sites (account_id,customer_id,name,service_address,lat,lng,status,current_mgmt_ip,current_public_ip,notes) VALUES (?,?,?,?,?,?,?,?,?,?)')
+    .run(N(accountId), N(b.customer_id || null), N(b.name), N(b.service_address), N(b.lat || null), N(b.lng || null), b.status || 'Active', N(b.current_mgmt_ip), N(b.current_public_ip), N(b.notes));
   audit(req, 'create', 'site#' + info.lastInsertRowid, b.name);
   res.json({ id: info.lastInsertRowid });
 });
 
 app.put('/api/sites/:id', (req, res) => {
   const b = req.body || {};
-  db.prepare('UPDATE sites SET name=?, service_address=?, lat=?, lng=?, status=?, current_mgmt_ip=?, current_public_ip=?, notes=? WHERE id=?')
-    .run(N(b.name), N(b.service_address), N(b.lat || null), N(b.lng || null), N(b.status, 'Active'), N(b.current_mgmt_ip), N(b.current_public_ip), N(b.notes), req.params.id);
+  const ex = db.prepare('SELECT customer_id, account_id FROM sites WHERE id=?').get(req.params.id);
+  const customerId = b.customer_id !== undefined ? b.customer_id : (ex ? ex.customer_id : null);
+  const accountId = accountForCustomer(customerId) || (ex ? ex.account_id : null);
+  db.prepare('UPDATE sites SET account_id=?, customer_id=?, name=?, service_address=?, lat=?, lng=?, status=?, current_mgmt_ip=?, current_public_ip=?, notes=? WHERE id=?')
+    .run(N(accountId), N(customerId || null), N(b.name), N(b.service_address), N(b.lat || null), N(b.lng || null), N(b.status, 'Active'), N(b.current_mgmt_ip), N(b.current_public_ip), N(b.notes), req.params.id);
   audit(req, 'edit', 'site#' + req.params.id, b.name);
+  res.json({ ok: true });
+});
+
+// ---- customers (under an account; NOC/Admin manage) ----
+app.get('/api/customers', (req, res) => {
+  const where = req.query.account_id ? ' WHERE c.account_id=' + Number(req.query.account_id) : '';
+  const rows = db.prepare(`SELECT c.*, a.name AS account_name, (SELECT COUNT(*) FROM sites s WHERE s.customer_id=c.id) AS site_count FROM customers c LEFT JOIN accounts a ON a.id=c.account_id${where} ORDER BY c.name`).all();
+  res.json(rows);
+});
+app.get('/api/customers/:id', (req, res) => {
+  const c = db.prepare('SELECT * FROM customers WHERE id=?').get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'not found' });
+  c.account = db.prepare('SELECT id, name FROM accounts WHERE id=?').get(c.account_id);
+  c.sites = db.prepare('SELECT * FROM sites WHERE customer_id=?').all(c.id).map(withSiteSummary);
+  c.device_count = c.sites.reduce((n, s) => n + s.device_total, 0);
+  c.needs_attention = c.sites.filter(s => s.needs_attention).length;
+  res.json(c);
+});
+app.post('/api/customers', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!b.account_id) return res.status(400).json({ error: 'Account required' });
+  if (!b.name) return res.status(400).json({ error: 'Customer name required' });
+  const info = db.prepare('INSERT INTO customers (account_id,name,status,notes) VALUES (?,?,?,?)').run(N(b.account_id), N(b.name), b.status || 'Active', N(b.notes));
+  audit(req, 'create', 'customer#' + info.lastInsertRowid, b.name);
+  res.json({ id: info.lastInsertRowid });
+});
+app.put('/api/customers/:id', requireNoc, (req, res) => {
+  const b = req.body || {};
+  const ex = db.prepare('SELECT * FROM customers WHERE id=?').get(req.params.id);
+  if (!ex) return res.status(404).json({ error: 'not found' });
+  db.prepare('UPDATE customers SET name=?, status=?, notes=?, account_id=? WHERE id=?').run(N(b.name, ex.name), N(b.status, ex.status), N(b.notes), N(b.account_id, ex.account_id), req.params.id);
+  // keep sites' account_id in sync with the customer's account
+  db.prepare('UPDATE sites SET account_id=? WHERE customer_id=?').run(N(b.account_id, ex.account_id), req.params.id);
+  audit(req, 'edit', 'customer#' + req.params.id, b.name);
+  res.json({ ok: true });
+});
+app.delete('/api/customers/:id', requireNoc, (req, res) => {
+  const n = db.prepare('SELECT COUNT(*) AS n FROM sites WHERE customer_id=?').get(req.params.id).n;
+  if (n > 0) return res.status(409).json({ error: `Has ${n} site(s)` });
+  db.prepare('DELETE FROM customers WHERE id=?').run(req.params.id);
+  audit(req, 'delete', 'customer#' + req.params.id);
   res.json({ ok: true });
 });
 

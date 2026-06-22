@@ -105,6 +105,9 @@ async function route() {
     if (p[0] === 'customer' && p[1] === 'new') { setNav('customers'); return await formCustomer({}); }
     if (p[0] === 'customer' && p[2] === 'edit') { setNav('customers'); return await formCustomer({ id: p[1] }); }
     if (p[0] === 'customer') { setNav('customers'); return await renderCustomer(p[1]); }
+    if (p[0] === 'cust' && p[1] === 'new') { setNav('customers'); return await formCust(q); }
+    if (p[0] === 'cust' && p[2] === 'edit') { setNav('customers'); return await formCust({ id: p[1] }); }
+    if (p[0] === 'cust') { setNav('customers'); return await renderCust(p[1]); }
     if (p[0] === 'inventory') { setNav('inventory'); return await renderInventory(); }
     if (p[0] === 'device' && p[1] === 'new') { setNav('inventory'); return await formDevice(q); }
     if (p[0] === 'device' && p[2] === 'edit') { setNav('inventory'); return await formDevice({ id: p[1] }); }
@@ -140,7 +143,7 @@ async function renderSites() {
       <span class="dot" style="background:${statCol};flex:none"></span>
       <div style="flex:1;min-width:0">
         <div>${esc(s.name)}</div>
-        <div class="small sec-muted">${esc(s.account_name || '')}</div>
+        <div class="small sec-muted">${esc(s.customer_name || s.account_name || '')}${s.customer_name && s.account_name ? ' · <span class="sec-muted">' + esc(s.account_name) + '</span>' : ''}</div>
         <div class="small mono sec-muted">mgmt ${esc(s.current_mgmt_ip || '—')} · pub ${esc(s.current_public_ip || '—')}</div>
       </div>
       <div class="stat">${statusPill(s.conn_status)}<span class="small mono" style="${hwCol}">${s.device_online}/${s.device_total} online</span></div>
@@ -186,7 +189,7 @@ async function renderSite(id) {
     <div class="crumb" onclick="location.hash='#/sites'"><i class="ti ti-chevron-left"></i> Sites</div>
     <div class="head"><div class="t">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(s.name)}</h1>${statusPill(s.status)}</div>
-      <div class="small sec-muted" style="margin-top:3px"><i class="ti ti-building"></i> <a class="iplink" href="#/customer/${s.account.id}">${esc(s.account.name)}</a> &nbsp;·&nbsp; <i class="ti ti-map-pin"></i> ${loc(s)}</div>
+      <div class="small sec-muted" style="margin-top:3px">${s.customer ? `<i class="ti ti-user"></i> <a class="iplink" href="#/cust/${s.customer.id}">${esc(s.customer.name)}</a> &nbsp;·&nbsp; ` : ''}<i class="ti ti-building"></i> <a class="iplink" href="#/customer/${s.account.id}">${esc(s.account.name)}</a> &nbsp;·&nbsp; <i class="ti ti-map-pin"></i> ${loc(s)}</div>
     </div><a class="btn" href="#/site/${s.id}/edit"><i class="ti ti-edit"></i> Edit</a></div>
 
     <div class="grid2" style="margin:16px 0">
@@ -371,9 +374,13 @@ async function renderCustomer(id) {
   if (isPriv() && a.has_pin) det.push(`<div class="kv"><span class="small sec-muted">PIN <span class="badge noc">NOC</span></span><span class="mono" style="cursor:pointer;filter:blur(5px)" title="click to reveal" onclick="this.style.filter='none'">${esc(a.pin)}</span></div>`);
   if (a.billing_address) det.push(kv('Billing', esc(a.billing_address)));
   const detCard = det.length ? `<div class="card"><div class="hd"><h2>Account details</h2></div><div style="padding:0 14px 10px">${det.join('')}</div></div>` : '';
+  const custs = a.customers.map(c => `<div class="row rowlink" onclick="location.hash='#/cust/${c.id}'">
+    <div class="av">${initials(c.name)}</div>
+    <div style="flex:1;min-width:0"><div>${esc(c.name)}</div><div class="small sec-muted">${c.site_count} site${c.site_count == 1 ? '' : 's'}</div></div>
+    ${statusPill(c.status)}<i class="ti ti-chevron-right muted"></i></div>`).join('');
   const sites = a.sites.map(s => `<div class="row rowlink" onclick="location.hash='#/site/${s.id}'">
     <span class="dot" style="flex:none;background:${pillFor(s.needs_attention ? 'Standby' : 'Up')[1]}"></span>
-    <div style="flex:1;min-width:0"><div>${esc(s.name)}</div><div class="small mono sec-muted">mgmt ${esc(s.current_mgmt_ip || '—')} · pub ${esc(s.current_public_ip || '—')}</div></div>
+    <div style="flex:1;min-width:0"><div>${esc(s.name)}</div><div class="small sec-muted">${esc(s.customer_name || '')}</div></div>
     <div class="stat">${statusPill(s.conn_status)}<span class="small mono">${s.device_online}/${s.device_total} online</span></div>
     <i class="ti ti-chevron-right muted"></i></div>`).join('');
   view().innerHTML = `
@@ -383,6 +390,7 @@ async function renderCustomer(id) {
       <div class="small mono sec-muted" style="margin-top:3px">${esc(a.account_number || '')}</div></div>
       ${isPriv() ? `<a class="btn" href="#/customer/${a.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}</div>
     <div class="grid3" style="margin:16px 0">
+      <div class="metric"><div class="l">Customers</div><div class="v">${a.customers.length}</div></div>
       <div class="metric"><div class="l">Sites</div><div class="v">${a.sites.length}</div></div>
       <div class="metric"><div class="l">Devices</div><div class="v">${a.device_count}</div></div>
       <div class="metric"><div class="l">Needs attention</div><div class="v" style="color:var(--warning)">${a.needs_attention}</div></div>
@@ -390,7 +398,57 @@ async function renderCustomer(id) {
     ${detCard}
     ${contacts ? `<div class="card"><div class="hd"><h2>Contacts</h2></div><div style="padding:0 14px 10px">${contacts}</div></div>` : ''}
     ${prev ? `<div class="card"><div class="hd"><h2><i class="ti ti-history-toggle"></i> Previous ISP</h2></div><div style="padding:0 14px 10px">${prev}</div></div>` : ''}
-    <div class="card"><div class="hd"><h2>Sites · ${a.sites.length}</h2><a class="btn sm" href="#/site/new?account=${a.id}"><i class="ti ti-plus"></i> Add site</a></div>${sites || '<div class="row muted">No sites</div>'}</div>`;
+    <div class="card"><div class="hd"><h2>Customers · ${a.customers.length}</h2>${isPriv() ? `<a class="btn sm" href="#/cust/new?account=${a.id}"><i class="ti ti-plus"></i> Add customer</a>` : ''}</div>${custs || '<div class="row muted">No customers yet</div>'}</div>
+    ${a.sites.length ? `<div class="card"><div class="hd"><h2>All sites · ${a.sites.length}</h2></div>${sites}</div>` : ''}`;
+}
+
+// ---------- Customer (under an account; owns sites) ----------
+async function renderCust(id) {
+  const c = await api('/customers/' + id);
+  const sites = c.sites.map(s => `<div class="row rowlink" onclick="location.hash='#/site/${s.id}'">
+    <span class="dot" style="flex:none;background:${pillFor(s.needs_attention ? 'Standby' : 'Up')[1]}"></span>
+    <div style="flex:1;min-width:0"><div>${esc(s.name)}</div><div class="small mono sec-muted">mgmt ${esc(s.current_mgmt_ip || '—')} · pub ${esc(s.current_public_ip || '—')}</div></div>
+    <div class="stat">${statusPill(s.conn_status)}<span class="small mono">${s.device_online}/${s.device_total} online</span></div>
+    <i class="ti ti-chevron-right muted"></i></div>`).join('');
+  view().innerHTML = `
+    <div class="crumb" onclick="location.hash='#/customer/${c.account.id}'"><i class="ti ti-chevron-left"></i> ${esc(c.account.name)}</div>
+    <div class="head"><div class="av" style="width:46px;height:46px;border-radius:8px;font-size:16px">${initials(c.name)}</div>
+      <div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(c.name)}</h1>${statusPill(c.status)}</div>
+      <div class="small sec-muted" style="margin-top:3px">Account: <a class="iplink" href="#/customer/${c.account.id}">${esc(c.account.name)}</a></div></div>
+      ${isPriv() ? `<a class="btn" href="#/cust/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}</div>
+    <div class="grid3" style="margin:16px 0">
+      <div class="metric"><div class="l">Sites</div><div class="v">${c.sites.length}</div></div>
+      <div class="metric"><div class="l">Devices</div><div class="v">${c.device_count}</div></div>
+      <div class="metric"><div class="l">Needs attention</div><div class="v" style="color:var(--warning)">${c.needs_attention}</div></div>
+    </div>
+    ${c.notes ? `<div class="card" style="padding:12px 14px"><div class="small sec-muted">${esc(c.notes)}</div></div>` : ''}
+    <div class="card"><div class="hd"><h2>Sites · ${c.sites.length}</h2><a class="btn sm" href="#/site/new?customer=${c.id}"><i class="ti ti-plus"></i> Add site</a></div>${sites || '<div class="row muted">No sites yet</div>'}</div>`;
+}
+async function formCust(q) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  let c = { name: '', account_id: q.account || '', status: 'Active', notes: '' };
+  if (q.id) c = await api('/customers/' + q.id);
+  const accOpts = META.accounts.map(a => ({ v: a.id, l: a.name }));
+  view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
+    <h1>${q.id ? 'Edit' : 'Add'} customer</h1>
+    <div class="card" style="margin-top:14px;padding:16px;overflow:visible" id="f">
+      <div class="fld"><label class="fl">Account</label><div id="ss-cacct"></div></div>
+      ${field('Customer name', 'name', c.name, { ph: 'e.g. Unit 1072 / Acme West' })}
+      ${field('Status', 'status', c.status, { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}
+      ${field('Notes', 'notes', c.notes, { type: 'textarea' })}
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
+      <button class="btn primary" onclick="saveCust(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
+  attachSearch($('#ss-cacct'), accOpts, 'account_id', c.account_id || (c.account && c.account.id), 'Search account…');
+}
+async function saveCust(id) {
+  const d = collect('#f');
+  if (!d.account_id) { toast('Pick an account'); return; }
+  if (!d.name) { toast('Enter a customer name'); return; }
+  try {
+    if (id) { await api('/customers/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/cust/' + id; }
+    else { const r = await api('/customers', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/cust/' + r.id; }
+    toast('Saved');
+  } catch (e) { toast(e.message); }
 }
 
 // ---------- Inventory ----------
@@ -615,19 +673,30 @@ async function saveCustomer(id) {
 }
 
 async function formSite(q) {
-  let s = { name: '', service_address: '', status: 'Active', current_mgmt_ip: '', current_public_ip: '', account_id: q.account || '' };
+  let s = { name: '', service_address: '', status: 'Active', current_mgmt_ip: '', current_public_ip: '' };
   if (q.id) s = await api('/sites/' + q.id);
+  const custs = await api('/customers');
+  const custOpts = custs.map(c => ({ v: c.id, l: c.name + (c.account_name ? ' · ' + c.account_name : '') }));
   const accOpts = META.accounts.map(a => ({ v: a.id, l: a.name }));
+  const preCust = q.customer || (s.customer && s.customer.id) || s.customer_id || '';
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${q.id ? 'Edit' : 'Add'} site</h1>
     <div class="card" style="margin-top:14px;padding:16px;overflow:visible" id="f">
       <div class="fld">
-        <label class="fl" style="display:flex;justify-content:space-between;align-items:center">Customer / account
-          ${isPriv() && !q.id ? `<label class="small sec-muted" style="font-weight:400;cursor:pointer"><input type="checkbox" id="newAcct" onchange="toggleNewAccount()" style="width:auto"> New account</label>` : ''}</label>
-        <div id="ss-account"></div>
-        <div id="newAcctBox" style="display:none">
-          ${field('Account name', 'na_name', '', { ph: 'e.g. Acme Logistics' })}
-          <div class="grid2">${field('Account number', 'na_account_number', '', { mono: true })}${field('Status', 'na_status', 'Active', { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}</div>
+        <label class="fl" style="display:flex;justify-content:space-between;align-items:center">Customer
+          ${isPriv() && !q.id ? `<label class="small sec-muted" style="font-weight:400;cursor:pointer"><input type="checkbox" id="newCust" onchange="toggleNewCust()" style="width:auto"> New customer</label>` : ''}</label>
+        <div id="ss-customer"></div>
+        <div id="newCustBox" style="display:none;margin-top:10px;padding:12px;border:.5px solid var(--border);border-radius:8px;background:var(--surface)">
+          ${field('Customer name', 'nc_name', '', { ph: 'e.g. Riverside Logistics' })}
+          <div class="fld">
+            <label class="fl" style="display:flex;justify-content:space-between;align-items:center">Account
+              <label class="small sec-muted" style="font-weight:400;cursor:pointer"><input type="checkbox" id="newAcct" onchange="toggleNewAccount()" style="width:auto"> New account</label></label>
+            <div id="ss-account"></div>
+            <div id="newAcctBox" style="display:none">
+              ${field('Account name', 'na_name', '', { ph: 'e.g. Acme Brokerage' })}
+              <div class="grid2">${field('Account number', 'na_account_number', '', { mono: true })}${field('Status', 'na_status', 'Active', { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}</div>
+            </div>
+          </div>
         </div>
       </div>
       ${field('Site name', 'name', s.name, { ph: 'e.g. Riverside Office' })}
@@ -638,7 +707,13 @@ async function formSite(q) {
       ${field('Current management IP', 'current_mgmt_ip', s.current_mgmt_ip, { mono: true })}
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
       <button class="btn primary" onclick="saveSite(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
-  attachSearch($('#ss-account'), accOpts, 'account_id', s.account_id || (s.account && s.account.id), 'Search customer…');
+  attachSearch($('#ss-customer'), custOpts, 'customer_id', preCust, 'Search customer…');
+  attachSearch($('#ss-account'), accOpts, 'account_id', '', 'Search account…');
+}
+function toggleNewCust() {
+  const on = $('#newCust').checked;
+  $('#newCustBox').style.display = on ? 'block' : 'none';
+  $('#ss-customer').style.display = on ? 'none' : 'block';
 }
 function toggleNewAccount() {
   const on = $('#newAcct').checked;
@@ -647,15 +722,23 @@ function toggleNewAccount() {
 }
 async function saveSite(id) {
   const d = collect('#f');
-  const newAcct = $('#newAcct') && $('#newAcct').checked;
-  if (newAcct) {
-    if (!d.na_name) { toast('Enter the new account name'); return; }
-    try { const a = await api('/accounts', { method: 'POST', body: JSON.stringify({ name: d.na_name, account_number: d.na_account_number, status: d.na_status }) }); d.account_id = a.id; }
-    catch (e) { toast('Account: ' + e.message); return; }
+  const newCust = $('#newCust') && $('#newCust').checked;
+  if (newCust) {
+    if (!d.nc_name) { toast('Enter the new customer name'); return; }
+    let accountId = d.account_id;
+    const newAcct = $('#newAcct') && $('#newAcct').checked;
+    if (newAcct) {
+      if (!d.na_name) { toast('Enter the new account name'); return; }
+      try { const a = await api('/accounts', { method: 'POST', body: JSON.stringify({ name: d.na_name, account_number: d.na_account_number, status: d.na_status }) }); accountId = a.id; }
+      catch (e) { toast('Account: ' + e.message); return; }
+    }
+    if (!accountId) { toast('Pick an account for the new customer'); return; }
+    try { const c = await api('/customers', { method: 'POST', body: JSON.stringify({ account_id: accountId, name: d.nc_name }) }); d.customer_id = c.id; }
+    catch (e) { toast('Customer: ' + e.message); return; }
   }
-  if (!d.account_id) { toast('Pick a customer/account'); return; }
+  if (!d.customer_id) { toast('Pick a customer'); return; }
   if (!d.name) { toast('Enter a site name'); return; }
-  delete d.na_name; delete d.na_account_number; delete d.na_status;
+  ['nc_name', 'na_name', 'na_account_number', 'na_status', 'account_id'].forEach(k => delete d[k]);
   try {
     if (id) { await api('/sites/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/site/' + id; }
     else { const r = await api('/sites', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/site/' + r.id; }

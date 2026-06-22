@@ -46,6 +46,21 @@ export function migrate() {
   db.exec('CREATE TABLE IF NOT EXISTS dev_latency (device_id INTEGER, ts TEXT, ms REAL)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_lat ON dev_latency(device_id, ts)');
   db.exec("CREATE TABLE IF NOT EXISTS blocklist (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT UNIQUE NOT NULL, reason TEXT, hits INTEGER DEFAULT 1, source TEXT, active INTEGER DEFAULT 1, first_seen TEXT DEFAULT (datetime('now')), last_seen TEXT DEFAULT (datetime('now')))");
+  // Customer entity between Account and Site
+  db.exec("CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, name TEXT NOT NULL, status TEXT DEFAULT 'Active', notes TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  ensure('sites', 'customer_id', 'INTEGER');
+}
+
+// One-time data backfill: give each existing account a matching customer and attach its sites.
+// Idempotent: only runs while there are zero customers.
+export function backfillCustomers() {
+  const n = db.prepare('SELECT COUNT(*) AS n FROM customers').get().n;
+  if (n > 0) return;
+  const accts = db.prepare('SELECT id, name FROM accounts').all();
+  for (const a of accts) {
+    const cid = db.prepare('INSERT INTO customers (account_id, name) VALUES (?,?)').run(a.id, a.name).lastInsertRowid;
+    db.prepare('UPDATE sites SET customer_id=? WHERE account_id=? AND customer_id IS NULL').run(cid, a.id);
+  }
 }
 
 export function seed() {
