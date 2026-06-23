@@ -111,6 +111,7 @@ async function route() {
     if (p[0] === 'inventory') { setNav('inventory'); return await renderInventory(); }
     if (p[0] === 'device' && p[1] === 'new') { setNav('inventory'); return await formDevice(q); }
     if (p[0] === 'device' && p[2] === 'edit') { setNav('inventory'); return await formDevice({ id: p[1] }); }
+    if (p[0] === 'device' && p[2] === 'dhcp') { setNav('inventory'); return await renderDeviceDhcp(p[1]); }
     if (p[0] === 'device') { setNav('inventory'); return await renderDevice(p[1]); }
     if (p[0] === 'activity') { setNav('activity'); return await renderActivity(); }
     if (p[0] === 'users' && p[1] === 'new') { setNav('users'); return await formUser({}); }
@@ -532,9 +533,10 @@ async function renderDevice(id) {
       </div></div>`;
 
   const dhcpCard = (d.management_mode === 'provider' || !isPriv()) ? '' : `
-    <div class="card"><div class="hd"><h2><i class="ti ti-address-book"></i> DHCP leases</h2>
-      <button class="btn sm" onclick="loadLeases(${d.id})"><i class="ti ti-list-search"></i> View leases</button></div>
-      <div id="dhcpBody"><div class="row muted">Query the router live for current DHCP leases. (MikroTik RouterOS)</div></div></div>`;
+    <div class="card"><a class="row rowlink" href="#/device/${d.id}/dhcp">
+      <i class="ti ti-address-book sec-muted"></i>
+      <div style="flex:1;min-width:0"><div>DHCP leases</div><div class="small sec-muted">View and manage live DHCP leases on this router</div></div>
+      <i class="ti ti-chevron-right muted"></i></a></div>`;
 
   let wifi = null; try { wifi = d.wifi_json ? JSON.parse(d.wifi_json) : null; } catch {}
   const wifiCard = (d.management_mode === 'provider' || !wifi || !wifi.radios || !wifi.radios.length) ? '' : `
@@ -1146,6 +1148,17 @@ async function pollDevice(id) {
     else if (r.target) msg += ' · no public IP found (CGNAT?)';
     toast(msg); renderDevice(id);
   } catch (e) { toast(e.message); }
+}
+async function renderDeviceDhcp(id) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const d = await api('/devices/' + id);
+  view().innerHTML = `
+    <div class="crumb" onclick="location.hash='#/device/${id}'"><i class="ti ti-chevron-left"></i> ${esc(d.name)}</div>
+    <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1><i class="ti ti-address-book"></i> DHCP leases</h1></div>
+      <div class="small sec-muted" style="margin-top:3px">${esc(d.name)} · ${esc(d.mgmt_address || 'no management IP')}</div></div>
+      <button class="btn" onclick="loadLeases(${id})"><i class="ti ti-refresh"></i> Refresh</button></div>
+    <div class="card" style="margin-top:14px"><div id="dhcpBody"><div class="row muted">Loading leases…</div></div></div>`;
+  loadLeases(id);
 }
 async function loadLeases(id) {
   const body = $('#dhcpBody'); if (!body) return;
