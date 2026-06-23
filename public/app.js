@@ -1075,26 +1075,44 @@ function timeAgo(ms) { if (!ms) return 'never'; const s = Math.floor((Date.now()
 // ---------- Threat blocklist ----------
 async function renderBlocklist() {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
-  const list = await api('/blocklist');
-  const active = list.filter(b => b.active).length;
-  const rows = list.map(b => `<div class="row">
-    <span class="dot" style="flex:none;background:${b.active ? 'var(--danger)' : 'var(--text3)'}"></span>
-    <div style="flex:1;min-width:0"><div class="mono">${esc(b.ip)} ${b.active ? '' : '<span class="small muted">(inactive)</span>'}</div>
+  const data = await api('/blocklist');
+  const list = data.list || [];
+  const min = data.min_hits || 1;
+  const isBlocked = b => b.active && (b.source === 'manual' || b.hits >= min);
+  const blocked = list.filter(isBlocked).length;
+  const pending = list.filter(b => b.active && !isBlocked(b)).length;
+  const rows = list.map(b => {
+    const eff = isBlocked(b);
+    const dot = eff ? 'var(--danger)' : (b.active ? 'var(--warning)' : 'var(--text3)');
+    const label = !b.active ? ' <span class="small muted">(disabled)</span>'
+      : (eff ? '' : ' <span class="small" style="color:var(--warning)">(below threshold)</span>');
+    return `<div class="row">
+    <span class="dot" style="flex:none;background:${dot}"></span>
+    <div style="flex:1;min-width:0"><div class="mono">${esc(b.ip)}${label}</div>
       <div class="small sec-muted">${esc(b.reason || '')}${b.source ? ' · ' + esc(b.source) : ''} · ${b.hits} hit${b.hits == 1 ? '' : 's'} · ${esc(b.last_seen || '')}</div></div>
     <button class="btn sm" onclick="toggleBlock(${b.id},${b.active ? 0 : 1})">${b.active ? 'Disable' : 'Enable'}</button>
-    <button class="btn sm" onclick="delBlock(${b.id})"><i class="ti ti-trash"></i></button></div>`).join('');
+    <button class="btn sm" onclick="delBlock(${b.id})"><i class="ti ti-trash"></i></button></div>`;
+  }).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Blocklist</h1>
     <button class="btn" onclick="scanBlock()"><i class="ti ti-search"></i> Scan logs</button>
     <button class="btn primary" onclick="pushBlock()"><i class="ti ti-upload"></i> Push to routers</button></div>
     <div class="grid3" style="margin:16px 0">
-      <div class="metric"><div class="l">Active blocks</div><div class="v" style="color:var(--danger)">${active}</div></div>
+      <div class="metric"><div class="l">Blocked on routers</div><div class="v" style="color:var(--danger)">${blocked}</div></div>
+      <div class="metric"><div class="l">Below threshold</div><div class="v" style="color:var(--warning)">${pending}</div></div>
       <div class="metric"><div class="l">Total tracked</div><div class="v">${list.length}</div></div>
-      <div class="metric"><div class="l">Top hits</div><div class="v">${list[0] ? list[0].hits : 0}</div></div>
     </div>
+    <div class="box"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span class="small sec-muted">Only block IPs with at least</span>
+      <input id="minhits" type="number" min="1" value="${min}" style="width:72px;font-family:var(--mono)"/>
+      <span class="small sec-muted">failed-login hit(s)</span>
+      <button class="btn sm" onclick="saveMinHits()"><i class="ti ti-check"></i> Save</button>
+      <span class="small sec-muted">· manually-added IPs always block.</span>
+    </div></div>
     <div class="box"><div style="display:flex;gap:8px"><input id="newip" placeholder="Add IP manually (e.g. 1.2.3.4)" style="flex:1;font-family:var(--mono)"/><button class="btn" onclick="addBlock()"><i class="ti ti-plus"></i> Add</button></div></div>
     <div class="card">${rows || '<div class="row muted">No blocked IPs yet — Scan logs to harvest failed-login attempts.</div>'}</div>
     <div class="help">Auto-harvested from RouterOS logs (failed logins) every minute, and auto-pushed to all reachable routers whenever the list changes — writing to each router's <span class="mono">netinv-blocklist</span> address-list and ensuring an input-chain drop rule. Use <b>Push to routers</b> to force a sync now.</div>`;
 }
+async function saveMinHits() { const n = parseInt($('#minhits').value, 10); if (!Number.isFinite(n) || n < 1) { toast('Enter a whole number ≥ 1'); return; } try { const r = await api('/blocklist/settings', { method: 'PUT', body: JSON.stringify({ min_hits: n }) }); toast('Threshold saved · ' + r.min_hits + ' hit(s)'); renderBlocklist(); } catch (e) { toast(e.message); } }
 async function addBlock() { const ip = $('#newip').value.trim(); if (!ip) return; try { await api('/blocklist', { method: 'POST', body: JSON.stringify({ ip }) }); toast('Added'); renderBlocklist(); } catch (e) { toast(e.message); } }
 async function toggleBlock(id, active) { try { await api('/blocklist/' + id, { method: 'PUT', body: JSON.stringify({ active }) }); renderBlocklist(); } catch (e) { toast(e.message); } }
 async function delBlock(id) { try { await api('/blocklist/' + id, { method: 'DELETE' }); renderBlocklist(); } catch (e) { toast(e.message); } }

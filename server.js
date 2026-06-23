@@ -56,6 +56,16 @@ function extractIp(msg) {
   return m ? m[1] : null;
 }
 // Read a device's log, pull failed-login source IPs into the central blocklist. Returns # IPs seen.
+// Minimum failed-login hits before an auto-harvested IP is pushed to routers (manual adds always push)
+const blocklistMinHits = () => {
+  const v = (db.prepare("SELECT value FROM settings WHERE key='blocklist_min_hits'").get() || {}).value;
+  const n = parseInt(v, 10);
+  return (Number.isFinite(n) && n > 0) ? n : 1;
+};
+const activeBlockIps = () => {
+  const min = blocklistMinHits();
+  return db.prepare("SELECT ip FROM blocklist WHERE active=1 AND (source='manual' OR hits>=?) ORDER BY ip").all(min).map(r => r.ip);
+};
 async function harvestThreats(d) {
   const user = d.admin_username || 'admin';
   const H = { Authorization: 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64'), Accept: 'application/json' };
@@ -79,7 +89,7 @@ async function harvestThreats(d) {
 async function pushBlocklistToDevice(d) {
   const user = d.admin_username || 'admin';
   const H = { Authorization: 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64'), Accept: 'application/json' };
-  const ips = db.prepare('SELECT ip FROM blocklist WHERE active=1').all().map(r => r.ip);
+  const ips = activeBlockIps();
   const want = new Set(ips);
   const cur = await restReq(d.mgmt_address, '/rest/ip/firewall/address-list', { headers: H });
   let all = []; if (cur.status < 400) { try { const a = JSON.parse(cur.body); if (Array.isArray(a)) all = a; } catch {} }
@@ -1098,7 +1108,7 @@ async function sampleDevice(d) {
   } catch {}
 }
 let _sampling = false, _tickN = 0, _lastPushedSig = null;
-const blocklistSig = () => db.prepare("SELECT ip FROM blocklist WHERE active=1 ORDER BY ip").all().map(r => r.ip).join(',');
+const blocklistSig = () => activeBlockIps().join(',');
 async function sampleTick() {
   if (_sampling) return; _sampling = true; _tickN++;
   try {
@@ -1125,7 +1135,17 @@ if (process.env.SAMPLER !== 'off') {
 
 // ---- threat blocklist ----
 app.get('/api/blocklist', requireNoc, (req, res) => {
-  res.json(db.prepare('SELECT * FROM blocklist ORDER BY active DESC, hits DESC, datetime(last_seen) DESC').all());
+  res.json({
+    min_hits: blocklistMinHits(),
+    list: db.prepare('SELECT * FROM blocklist ORDER BY active DESC, hits DESC, datetime(last_seen) DESC').all()
+  });
+});
+app.put('/api/blocklist/settings', requireNoc, (req, res) => {
+  const n = parseInt((req.body || {}).min_hits, 10);
+  if (!Number.isFinite(n) || n < 1) return res.status(400).json({ error: 'min_hits must be a whole number ≥ 1' });
+  db.prepare("INSERT INTO settings (key,value) VALUES ('blocklist_min_hits',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(n));
+  audit(req, 'edit', 'blocklist', 'min_hits=' + n);
+  res.json({ ok: true, min_hits: n });
 });
 app.post('/api/blocklist', requireNoc, (req, res) => {
   const b = req.body || {};
