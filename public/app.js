@@ -112,6 +112,7 @@ async function route() {
     if (p[0] === 'device' && p[1] === 'new') { setNav('inventory'); return await formDevice(q); }
     if (p[0] === 'device' && p[2] === 'edit') { setNav('inventory'); return await formDevice({ id: p[1] }); }
     if (p[0] === 'device' && p[2] === 'dhcp') { setNav('inventory'); return await renderDeviceDhcp(p[1]); }
+    if (p[0] === 'device' && p[2] === 'wifi') { setNav('inventory'); return await renderDeviceWifi(p[1]); }
     if (p[0] === 'device') { setNav('inventory'); return await renderDevice(p[1]); }
     if (p[0] === 'activity') { setNav('activity'); return await renderActivity(); }
     if (p[0] === 'users' && p[1] === 'new') { setNav('users'); return await formUser({}); }
@@ -539,13 +540,12 @@ async function renderDevice(id) {
       <i class="ti ti-chevron-right muted"></i></a></div>`;
 
   let wifi = null; try { wifi = d.wifi_json ? JSON.parse(d.wifi_json) : null; } catch {}
-  const wifiCard = (d.management_mode === 'provider' || !wifi || !wifi.radios || !wifi.radios.length) ? '' : `
-    <div class="card"><div class="hd"><h2><i class="ti ti-wifi"></i> WiFi${wifi.radios.length > 1 ? ' · ' + wifi.radios.length : ''}</h2>
-      ${isPriv() ? `<button class="btn sm" onclick="manageWifi(${d.id})"><i class="ti ti-eye"></i> Reveal &amp; edit</button>` : ''}</div>
-      <div id="wifiBody">${wifi.radios.map(r => `<div class="row"><i class="ti ti-wifi sec-muted"></i>
-        <div style="flex:1;min-width:0"><div><span class="mono">${esc(r.ssid || '(no SSID)')}</span> ${r.band ? `<span class="tag">${esc(r.band)}</span>` : ''}${r.disabled ? ' <span class="small muted">(disabled)</span>' : ''}</div>
-        <div class="small mono sec-muted">${esc(r.iface)} · password ${r.hasPassword ? '••••••' : '—'}</div></div></div>`).join('')}</div>
-      <div class="help" style="padding:8px 14px"><i class="ti ti-lock"></i> Passwords hidden · reveal is logged · ${esc(wifi.system)}</div></div>`;
+  const wifiCard = (d.management_mode === 'provider' || !isPriv() || !wifi || !wifi.radios || !wifi.radios.length) ? '' : `
+    <div class="card"><a class="row rowlink" href="#/device/${d.id}/wifi">
+      <i class="ti ti-wifi sec-muted"></i>
+      <div style="flex:1;min-width:0"><div>WiFi${wifi.radios.length > 1 ? ' · ' + wifi.radios.length + ' SSIDs' : ''}</div>
+        <div class="small sec-muted">${esc(wifi.radios.map(r => r.ssid || '(no SSID)').join(', '))} · clients, signal &amp; settings</div></div>
+      <i class="ti ti-chevron-right muted"></i></a></div>`;
 
   view().innerHTML = `
     <div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
@@ -1219,6 +1219,51 @@ async function leaseAction(idx, sel) {
     toast('Done · ' + action.replace('-', ' '));
     await loadLeases(window._dhcpDevId);
   } catch (e) { toast(e.message); sel.disabled = false; sel.value = ''; }
+}
+async function renderDeviceWifi(id) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const d = await api('/devices/' + id);
+  let wifi = null; try { wifi = d.wifi_json ? JSON.parse(d.wifi_json) : null; } catch {}
+  const radios = (wifi && wifi.radios) || [];
+  view().innerHTML = `
+    <div class="crumb" onclick="location.hash='#/device/${id}'"><i class="ti ti-chevron-left"></i> ${esc(d.name)}</div>
+    <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1><i class="ti ti-wifi"></i> WiFi</h1></div>
+      <div class="small sec-muted" style="margin-top:3px">${esc(d.name)} · ${esc(d.mgmt_address || 'no management IP')}${wifi && wifi.system ? ' · ' + esc(wifi.system) : ''}</div></div>
+      <button class="btn" onclick="loadWifiClients(${id})"><i class="ti ti-refresh"></i> Refresh</button></div>
+
+    <div class="card" style="margin-top:14px"><div class="hd"><h2><i class="ti ti-access-point"></i> Networks</h2>
+      <button class="btn sm" onclick="manageWifi(${id})"><i class="ti ti-eye"></i> Reveal &amp; edit</button></div>
+      <div id="wifiBody">${radios.length ? radios.map(r => `<div class="row"><i class="ti ti-wifi sec-muted"></i>
+        <div style="flex:1;min-width:0"><div><span class="mono">${esc(r.ssid || '(no SSID)')}</span> ${r.band ? `<span class="tag">${esc(r.band)}</span>` : ''}${r.disabled ? ' <span class="small muted">(disabled)</span>' : ''}</div>
+        <div class="small mono sec-muted">${esc(r.iface)} · password ${r.hasPassword ? '••••••' : '—'}</div></div></div>`).join('') : '<div class="row muted">No WiFi radios found — Poll the device first.</div>'}</div>
+      <div class="help" style="padding:8px 14px"><i class="ti ti-lock"></i> Passwords hidden · reveal is logged</div></div>
+
+    <div class="card"><div class="hd"><h2><i class="ti ti-devices"></i> Connected clients</h2></div>
+      <div id="wifiClients"><div class="row muted">Loading clients…</div></div>
+      <div class="help" style="padding:8px 14px">Live association table · weakest signal first. Guide: <b style="color:var(--success)">≥ −60 dBm</b> good · <b style="color:var(--warning)">−60 to −72</b> fair · <b style="color:var(--danger)">&lt; −72</b> weak.</div></div>`;
+  loadWifiClients(id);
+}
+async function loadWifiClients(id) {
+  const body = $('#wifiClients'); if (!body) return;
+  body.innerHTML = '<div class="row muted">Reading clients from the router…</div>';
+  try {
+    const r = await api('/devices/' + id + '/wifi-clients');
+    const cs = r.clients || [];
+    if (!cs.length) { body.innerHTML = '<div class="row muted">No clients currently associated.</div>'; return; }
+    cs.sort((a, b) => (a.signal == null ? 999 : -a.signal) - (b.signal == null ? 999 : -b.signal)); // weakest first
+    body.innerHTML = cs.map(c => {
+      const dbm = c.signal;
+      const q = dbm == null ? 0 : Math.max(0, Math.min(100, Math.round(2 * (dbm + 100))));
+      const col = dbm == null ? 'var(--text3)' : (dbm >= -60 ? 'var(--success)' : (dbm >= -72 ? 'var(--warning)' : 'var(--danger)'));
+      return `<div class="row">
+        <div style="width:58px;flex:none;text-align:center"><div style="font-weight:600;color:${col}">${dbm == null ? '—' : dbm}</div><div class="small sec-muted">dBm</div></div>
+        <div style="flex:1;min-width:0">
+          <div class="mono">${esc(c.mac || '')}${c.lastIp ? ' · ' + esc(c.lastIp) : ''}</div>
+          <div class="small sec-muted">${esc(c.ssid || c.iface || '')}${c.txRate ? ' · tx ' + esc(c.txRate) : ''}${c.rxRate ? ' · rx ' + esc(c.rxRate) : ''}${c.uptime ? ' · up ' + esc(c.uptime) : ''}${c.snr != null ? ' · SNR ' + c.snr : ''}</div>
+          <div style="height:5px;border-radius:3px;background:var(--surface2);margin-top:5px;overflow:hidden"><div style="height:100%;width:${q}%;background:${col}"></div></div>
+        </div></div>`;
+    }).join('');
+  } catch (e) { body.innerHTML = '<div class="row muted">' + esc(e.message) + '</div>'; }
 }
 async function manageWifi(id) {
   const body = $('#wifiBody'); if (!body) return;

@@ -582,6 +582,33 @@ app.post('/api/devices/:id/wifi', requireNoc, async (req, res) => {
     res.json({ ok: true });
   } catch (e) { res.status(502).json({ error: e.http ? ('Device returned ' + e.http) : rosErr(e) }); }
 });
+// Associated WiFi clients + signal (registration table) for diagnostics
+function parseSignal(v) { if (v == null) return null; const m = String(v).match(/-?\d+/); return m ? parseInt(m[0], 10) : null; }
+async function readWifiClients(d, preferred) {
+  const tryWifi = async () => { const r = await rosGet(d, '/rest/interface/wifi/registration-table'); return (!r.err && Array.isArray(r.data)) ? { system: 'wifi', data: r.data } : null; };
+  const tryWl = async () => { const r = await rosGet(d, '/rest/interface/wireless/registration-table'); return (!r.err && Array.isArray(r.data)) ? { system: 'wireless', data: r.data } : null; };
+  const res = preferred === 'wireless' ? (await tryWl() || await tryWifi()) : (await tryWifi() || await tryWl());
+  if (!res) return { system: null, clients: [] };
+  const clients = res.data.map(r => ({
+    iface: r.interface || '',
+    ssid: r.ssid || '',
+    mac: r['mac-address'] || '',
+    signal: parseSignal(r.signal != null ? r.signal : r['signal-strength']),
+    snr: parseSignal(r['signal-to-noise']),
+    txRate: r['tx-rate'] || '',
+    rxRate: r['rx-rate'] || '',
+    uptime: r.uptime || '',
+    lastIp: r['last-ip'] || '',
+    comment: r.comment || ''
+  }));
+  return { system: res.system, clients };
+}
+app.get('/api/devices/:id/wifi-clients', requireNoc, async (req, res) => {
+  const d = dhcpDevice(req, res); if (!d) return;
+  let pref = null; try { pref = (JSON.parse(d.wifi_json || '{}')).system; } catch {}
+  try { res.json(await readWifiClients(d, pref)); }
+  catch (e) { res.status(502).json({ error: e.http ? ('Device returned ' + e.http) : rosErr(e) }); }
+});
 
 // Fetch from ZeroTier Central with a timeout so a slow/hung call can't stall a request
 async function ztFetch(path, token, ms = 15000) {
