@@ -375,6 +375,10 @@ async function renderCustomer(id) {
   const det = [];
   if (a.sub_account) det.push(kv('Sub-account', esc(a.sub_account)));
   if (isPriv() && a.has_pin) det.push(`<div class="kv"><span class="small sec-muted">PIN <span class="badge noc">NOC</span></span><span class="mono" style="cursor:pointer;filter:blur(5px)" title="click to reveal" onclick="this.style.filter='none'">${esc(a.pin)}</span></div>`);
+  if (a.email) det.push(`<div class="kv"><span class="small sec-muted">Email</span><a class="iplink" href="mailto:${esc(a.email)}">${esc(a.email)}</a></div>`);
+  if (a.portal_url) det.push(`<div class="kv"><span class="small sec-muted">Portal</span><a class="iplink" href="${esc(a.portal_url)}" target="_blank" rel="noopener">Open portal <i class="ti ti-external-link" style="font-size:11px"></i></a></div>`);
+  if (isPriv() && a.has_portal_password) det.push(`<div class="kv"><span class="small sec-muted">Account password <span class="badge noc">NOC</span></span><span class="mono" style="cursor:pointer;filter:blur(5px)" title="click to reveal" onclick="this.style.filter='none'">${esc(a.portal_password)}</span></div>`);
+  if (isPriv() && a.has_security_questions) det.push(`<div class="kv" style="display:block"><div class="small sec-muted" style="margin-bottom:4px">Security Q&amp;A <span class="badge noc">NOC</span></div><div style="cursor:pointer;filter:blur(5px);white-space:pre-wrap" title="click to reveal" onclick="this.style.filter='none'">${esc(a.security_questions)}</div></div>`);
   if (a.billing_address) det.push(kv('Billing', esc(a.billing_address)));
   const detCard = det.length ? `<div class="card"><div class="hd"><h2>Account details</h2></div><div style="padding:0 14px 10px">${det.join('')}</div></div>` : '';
   const custs = a.customers.map(c => `<div class="row rowlink" onclick="location.hash='#/cust/${c.id}'">
@@ -718,6 +722,10 @@ async function formCustomer(q) {
       ${field('Status', 'status', a.status, { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}</div>
       <div class="grid2">${field('Sub-account (optional)', 'sub_account', a.sub_account, { mono: true })}
       ${field('Account PIN', 'pin', '', { mono: true, ph: q.id ? 'unchanged' : 'NOC/Admin only' })}</div>
+      <div class="grid2">${field('Account email', 'email', a.email, { type: 'email', ph: 'login email / contact' })}
+      ${field('Portal login URL', 'portal_url', a.portal_url, { ph: 'https://portal.carrier.com/login' })}</div>
+      ${field('Account / portal password', 'portal_password', '', { mono: true, ph: q.id ? 'unchanged · NOC/Admin only' : 'NOC/Admin only' })}
+      ${field('Security questions & answers', 'security_questions', a.security_questions || '', { type: 'textarea', ph: q.id && a.has_security_questions ? 'unchanged — type to replace' : 'e.g. First pet? Fluffy · City born? Dallas' })}
       <div class="fld"><label class="fl">Billing address</label><div id="ss-baddr"></div></div>
       ${field('Notes', 'notes', a.notes, { type: 'textarea' })}
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>

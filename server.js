@@ -746,7 +746,7 @@ app.get('/api/accounts', (req, res) => {
     SELECT a.*,
       (SELECT COUNT(*) FROM sites s WHERE s.account_id=a.id) AS site_count
     FROM accounts a ORDER BY a.name`).all();
-  rows.forEach(r => delete r.pin); // never expose PIN in the list
+  rows.forEach(r => { delete r.pin; delete r.portal_password; delete r.security_questions; }); // never expose secrets in the list
   res.json(rows);
 });
 
@@ -760,14 +760,16 @@ app.get('/api/accounts/:id', (req, res) => {
   a.device_count = a.sites.reduce((n, s) => n + s.device_total, 0);
   a.needs_attention = a.sites.filter(s => s.needs_attention).length;
   a.has_pin = !!a.pin;
-  if (!isPriv(req)) delete a.pin; // PIN visible to NOC/Admin only
+  a.has_portal_password = !!a.portal_password;
+  a.has_security_questions = !!a.security_questions;
+  if (!isPriv(req)) { delete a.pin; delete a.portal_password; delete a.security_questions; } // sensitive: NOC/Admin only
   res.json(a);
 });
 
 app.post('/api/accounts', requireNoc, (req, res) => {
   const b = req.body || {};
-  const info = db.prepare('INSERT INTO accounts (name, account_number, sub_account, pin, status, billing_address, notes) VALUES (?,?,?,?,?,?,?)')
-    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.pin), b.status || 'Active', N(b.billing_address), N(b.notes));
+  const info = db.prepare('INSERT INTO accounts (name, account_number, sub_account, pin, email, portal_url, portal_password, security_questions, status, billing_address, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.pin), N(b.email), N(b.portal_url), N(b.portal_password), N(b.security_questions), b.status || 'Active', N(b.billing_address), N(b.notes));
   const id = info.lastInsertRowid;
   for (const c of (b.contacts || [])) {
     db.prepare('INSERT INTO account_contacts (account_id,name,role,email,phone,is_primary,is_billing) VALUES (?,?,?,?,?,?,?)')
@@ -783,9 +785,11 @@ app.post('/api/accounts', requireNoc, (req, res) => {
 
 app.put('/api/accounts/:id', requireNoc, (req, res) => {
   const b = req.body || {};
-  db.prepare('UPDATE accounts SET name=?, account_number=?, sub_account=?, status=?, billing_address=?, notes=? WHERE id=?')
-    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.status, 'Active'), N(b.billing_address), N(b.notes), req.params.id);
+  db.prepare('UPDATE accounts SET name=?, account_number=?, sub_account=?, email=?, portal_url=?, status=?, billing_address=?, notes=? WHERE id=?')
+    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.email), N(b.portal_url), N(b.status, 'Active'), N(b.billing_address), N(b.notes), req.params.id);
   if (b.pin) db.prepare('UPDATE accounts SET pin=? WHERE id=?').run(b.pin, req.params.id);
+  if (b.portal_password) db.prepare('UPDATE accounts SET portal_password=? WHERE id=?').run(b.portal_password, req.params.id);
+  if (b.security_questions) db.prepare('UPDATE accounts SET security_questions=? WHERE id=?').run(b.security_questions, req.params.id);
   audit(req, 'edit', 'account#' + req.params.id, b.name);
   res.json({ ok: true });
 });

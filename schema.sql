@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS accounts (
   account_number TEXT,
   sub_account TEXT,
   pin TEXT,                                 -- sensitive: NOC/Admin only
+  email TEXT,
+  portal_url TEXT,
+  portal_password TEXT,                      -- sensitive: NOC/Admin only
+  security_questions TEXT,                   -- sensitive: NOC/Admin only
   status TEXT NOT NULL DEFAULT 'Active',
   billing_address TEXT,
   notes TEXT,
