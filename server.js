@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, extname } from 'node:path';
 import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, UPLOADS_DIR } from './db.js';
+import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, UPLOADS_DIR, BACKUPS_DIR } from './db.js';
 import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie } from './auth.js';
 import { hashPassword, verifyPassword } from './hash.js';
 import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseCidr } from './wg.js';
@@ -610,6 +610,75 @@ app.get('/api/devices/:id/wifi-clients', requireNoc, async (req, res) => {
   let pref = null; try { pref = (JSON.parse(d.wifi_json || '{}')).system; } catch {}
   try { res.json(await readWifiClients(d, pref)); }
   catch (e) { res.status(502).json({ error: e.http ? ('Device returned ' + e.http) : rosErr(e) }); }
+});
+
+// ---- router config backups (RouterOS text export) ----
+const backupDevices = () => db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
+async function backupDevice(d, source) {
+  const r = await restReq(d.mgmt_address, '/rest/export', { headers: rosHeaders(d), method: 'POST', body: {}, timeoutMs: 25000 });
+  if (r.status >= 400) throw Object.assign(new Error('export failed'), { http: r.status });
+  let text = r.body || '';
+  const t = text.trim();
+  if (t.startsWith('[') || t.startsWith('{') || t.startsWith('"')) { // some builds wrap the export in JSON
+    try {
+      const j = JSON.parse(t);
+      if (typeof j === 'string') text = j;
+      else if (Array.isArray(j)) text = j.map(x => typeof x === 'string' ? x : (x.section || x.line || x.ret || JSON.stringify(x))).join('\n');
+      else if (j && typeof j === 'object') text = j.ret || j.output || j.export || JSON.stringify(j, null, 2);
+    } catch {}
+  }
+  if (!text || !text.trim()) throw new Error('Empty export from device');
+  const stored = 'bak-' + d.id + '-' + Date.now() + '.rsc';
+  writeFileSync(join(BACKUPS_DIR, stored), text);
+  const size = Buffer.byteLength(text);
+  const info = db.prepare("INSERT INTO router_backups (device_id,status,size,stored_name,format,source) VALUES (?,?,?,?,?,?)").run(d.id, 'ok', size, stored, 'rsc', source || 'auto');
+  return { id: info.lastInsertRowid, size };
+}
+function pruneOldBackups() {
+  const old = db.prepare("SELECT * FROM router_backups WHERE created_at < datetime('now','-183 days')").all(); // ~6 months
+  for (const b of old) { if (b.stored_name) { try { unlinkSync(join(BACKUPS_DIR, b.stored_name)); } catch {} } db.prepare('DELETE FROM router_backups WHERE id=?').run(b.id); }
+  return old.length;
+}
+async function runWeeklyBackups(source) {
+  let ok = 0, fail = 0;
+  for (const d of backupDevices()) {
+    try { await backupDevice(d, source); ok++; }
+    catch (e) { fail++; db.prepare("INSERT INTO router_backups (device_id,status,error,format,source) VALUES (?,?,?,?,?)").run(d.id, 'error', e.http ? ('HTTP ' + e.http) : (e.message || 'error'), 'rsc', source || 'auto'); }
+  }
+  const pruned = pruneOldBackups();
+  return { ok, fail, pruned };
+}
+app.get('/api/devices/:id/backups', requireNoc, (req, res) => {
+  res.json(db.prepare('SELECT id, status, error, size, format, source, created_at FROM router_backups WHERE device_id=? ORDER BY datetime(created_at) DESC').all(req.params.id));
+});
+app.post('/api/devices/:id/backup', requireNoc, async (req, res) => {
+  const d = dhcpDevice(req, res); if (!d) return;
+  try { const r = await backupDevice(d, 'manual'); pruneOldBackups(); audit(req, 'backup', 'device#' + d.id, 'manual export ' + r.size + 'b'); res.json({ ok: true, ...r }); }
+  catch (e) {
+    db.prepare("INSERT INTO router_backups (device_id,status,error,format,source) VALUES (?,?,?,?,?)").run(d.id, 'error', e.http ? ('HTTP ' + e.http) : (e.message || 'error'), 'rsc', 'manual');
+    res.status(502).json({ error: e.http ? ('Device returned ' + e.http + ' — does this RouterOS expose /rest/export?') : rosErr(e) });
+  }
+});
+app.get('/api/backups/:id/download', requireNoc, (req, res) => {
+  const b = db.prepare('SELECT * FROM router_backups WHERE id=?').get(req.params.id);
+  if (!b || !b.stored_name) return res.status(404).json({ error: 'not found' });
+  const fp = join(BACKUPS_DIR, b.stored_name);
+  if (!existsSync(fp)) return res.status(404).json({ error: 'file missing' });
+  const dev = db.prepare('SELECT name FROM devices WHERE id=?').get(b.device_id) || {};
+  const fname = ((dev.name || 'router').replace(/[^a-z0-9_-]+/gi, '_')) + '-' + b.created_at.replace(/[: ]/g, '-') + '.rsc';
+  audit(req, 'backup_read', 'device#' + b.device_id, 'download backup#' + b.id);
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Length', statSync(fp).size);
+  res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+  createReadStream(fp).pipe(res);
+});
+app.delete('/api/backups/:id', requireNoc, (req, res) => {
+  const b = db.prepare('SELECT * FROM router_backups WHERE id=?').get(req.params.id);
+  if (!b) return res.status(404).json({ error: 'not found' });
+  if (b.stored_name) { try { unlinkSync(join(BACKUPS_DIR, b.stored_name)); } catch {} }
+  db.prepare('DELETE FROM router_backups WHERE id=?').run(b.id);
+  audit(req, 'delete', 'device#' + b.device_id, 'backup#' + b.id);
+  res.json({ ok: true });
 });
 
 // Fetch from ZeroTier Central with a timeout so a slow/hung call can't stall a request
@@ -1233,11 +1302,19 @@ async function sampleTick() {
     const cutoff = new Date(Date.now() - 5184000 * 1000).toISOString();
     db.prepare('DELETE FROM iface_traffic WHERE ts<?').run(cutoff);
     db.prepare('DELETE FROM dev_latency WHERE ts<?').run(cutoff);
+    // weekly router config backups (kept 6 months) — guarded by a persisted timestamp
+    if (process.env.BACKUPS !== 'off') {
+      const last = (db.prepare("SELECT value FROM settings WHERE key='last_backup_run'").get() || {}).value;
+      if (!last || (Date.now() - Date.parse(last)) > 7 * 24 * 3600 * 1000) {
+        try { await runWeeklyBackups('auto'); } catch {}
+        db.prepare("INSERT INTO settings (key,value) VALUES ('last_backup_run',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(new Date().toISOString());
+      }
+    }
   } finally { _sampling = false; }
 }
 if (process.env.SAMPLER !== 'off') {
   setInterval(() => { sampleTick().catch(() => {}); }, 60000);
-  console.log('Sampler enabled every 60s: traffic, latency, threat harvest + blocklist auto-push (SAMPLER=off / AUTO_PUSH=off to disable)');
+  console.log('Sampler enabled every 60s: traffic, latency, threat harvest + blocklist auto-push + weekly router backups (SAMPLER=off / AUTO_PUSH=off / BACKUPS=off to disable)');
 }
 
 // ---- threat blocklist ----

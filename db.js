@@ -11,6 +11,9 @@ const DB_PATH = process.env.DB_PATH || join(__dirname, 'data.db');
 // Uploaded note attachments live next to the DB (so they ride the same data volume)
 export const UPLOADS_DIR = process.env.UPLOADS_DIR || join(dirname(DB_PATH), 'uploads');
 try { mkdirSync(UPLOADS_DIR, { recursive: true }); } catch {}
+// Router config backups (.rsc) also ride the data volume
+export const BACKUPS_DIR = process.env.BACKUPS_DIR || join(dirname(DB_PATH), 'backups');
+try { mkdirSync(BACKUPS_DIR, { recursive: true }); } catch {}
 
 export const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA journal_mode = WAL;');
@@ -62,6 +65,9 @@ export function migrate() {
   // Note attachments (pictures + PDFs) — files stored on disk, metadata here
   db.exec("CREATE TABLE IF NOT EXISTS note_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_type TEXT NOT NULL, parent_id INTEGER NOT NULL, note_id INTEGER, filename TEXT, mime TEXT, size INTEGER, stored_name TEXT NOT NULL, author TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
   db.exec("CREATE INDEX IF NOT EXISTS idx_note_att ON note_attachments(note_id)");
+  // Weekly router config backups (.rsc exports); files on disk, metadata here
+  db.exec("CREATE TABLE IF NOT EXISTS router_backups (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'ok', error TEXT, size INTEGER, stored_name TEXT, format TEXT DEFAULT 'rsc', source TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_rbak ON router_backups(device_id, created_at)");
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

@@ -115,6 +115,7 @@ async function route() {
     if (p[0] === 'device' && p[2] === 'edit') { setNav('inventory'); return await formDevice({ id: p[1] }); }
     if (p[0] === 'device' && p[2] === 'dhcp') { setNav('inventory'); return await renderDeviceDhcp(p[1]); }
     if (p[0] === 'device' && p[2] === 'wifi') { setNav('inventory'); return await renderDeviceWifi(p[1]); }
+    if (p[0] === 'device' && p[2] === 'backups') { setNav('inventory'); return await renderDeviceBackups(p[1]); }
     if (p[0] === 'device') { setNav('inventory'); return await renderDevice(p[1]); }
     if (p[0] === 'activity') { setNav('activity'); return await renderActivity(); }
     if (p[0] === 'users' && p[1] === 'new') { setNav('users'); return await formUser({}); }
@@ -639,6 +640,12 @@ async function renderDevice(id) {
       <div style="flex:1;min-width:0"><div>DHCP leases</div><div class="small sec-muted">View and manage live DHCP leases on this router</div></div>
       <i class="ti ti-chevron-right muted"></i></a></div>`;
 
+  const backupCard = (d.management_mode === 'provider' || !isPriv()) ? '' : `
+    <div class="card"><a class="row rowlink" href="#/device/${d.id}/backups">
+      <i class="ti ti-archive sec-muted"></i>
+      <div style="flex:1;min-width:0"><div>Config backups</div><div class="small sec-muted">Weekly auto-backups (kept 6 months) · download or back up now</div></div>
+      <i class="ti ti-chevron-right muted"></i></a></div>`;
+
   let wifi = null; try { wifi = d.wifi_json ? JSON.parse(d.wifi_json) : null; } catch {}
   const wifiCard = (d.management_mode === 'provider' || !isPriv() || !wifi || !wifi.radios || !wifi.radios.length) ? '' : `
     <div class="card"><a class="row rowlink" href="#/device/${d.id}/wifi">
@@ -671,6 +678,8 @@ async function renderDevice(id) {
     ${wifiCard}
 
     ${dhcpCard}
+
+    ${backupCard}
 
     ${overlayCard}
 
@@ -1294,6 +1303,37 @@ async function pollDevice(id) {
     else if (r.target) msg += ' · no public IP found (CGNAT?)';
     toast(msg); renderDevice(id);
   } catch (e) { toast(e.message); }
+}
+function fmtSize(n) { n = +n || 0; if (n < 1024) return n + ' B'; if (n < 1048576) return (n / 1024).toFixed(1) + ' KB'; return (n / 1048576).toFixed(1) + ' MB'; }
+async function renderDeviceBackups(id) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const d = await api('/devices/' + id);
+  const list = await api('/devices/' + id + '/backups');
+  const rows = list.map(b => {
+    const ok = b.status === 'ok';
+    return `<div class="row">
+      <i class="ti ti-${ok ? 'file-text sec-muted' : 'alert-triangle'}" ${ok ? '' : 'style="color:var(--danger)"'}></i>
+      <div style="flex:1;min-width:0"><div>${esc(b.created_at)} ${b.source ? `<span class="tag">${esc(b.source)}</span>` : ''}</div>
+        <div class="small sec-muted">${ok ? (fmtSize(b.size) + ' · ' + (b.format || 'rsc')) : ('Failed · ' + esc(b.error || ''))}</div></div>
+      ${ok ? `<a class="btn sm" href="/api/backups/${b.id}/download" title="Download"><i class="ti ti-download"></i></a>` : ''}
+      <button class="btn sm" onclick="delBackup(${b.id},${id})"><i class="ti ti-trash"></i></button></div>`;
+  }).join('');
+  view().innerHTML = `
+    <div class="crumb" onclick="location.hash='#/device/${id}'"><i class="ti ti-chevron-left"></i> ${esc(d.name)}</div>
+    <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1><i class="ti ti-archive"></i> Config backups</h1></div>
+      <div class="small sec-muted" style="margin-top:3px">${esc(d.name)} · automatic weekly · kept 6 months</div></div>
+      <button class="btn primary" onclick="backupNow(${id})"><i class="ti ti-player-record"></i> Back up now</button></div>
+    <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No backups yet. Weekly backups run automatically — or click Back up now.</div>'}</div>
+    <div class="help">RouterOS text export (.rsc). Download to keep offline or to restore on the device. Backups older than 6 months are removed automatically.</div>`;
+}
+async function backupNow(id) {
+  toast('Backing up…');
+  try { const r = await api('/devices/' + id + '/backup', { method: 'POST' }); toast('Backed up · ' + fmtSize(r.size)); renderDeviceBackups(id); }
+  catch (e) { toast(e.message); renderDeviceBackups(id); }
+}
+async function delBackup(bid, id) {
+  if (!confirm('Delete this backup?')) return;
+  try { await api('/backups/' + bid, { method: 'DELETE' }); toast('Deleted'); renderDeviceBackups(id); } catch (e) { toast(e.message); }
 }
 async function renderDeviceDhcp(id) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }

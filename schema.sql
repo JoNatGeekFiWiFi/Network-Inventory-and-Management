@@ -260,6 +260,19 @@ CREATE TABLE IF NOT EXISTS note_attachments (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Weekly router config backups (.rsc exports); files on disk, metadata here
+CREATE TABLE IF NOT EXISTS router_backups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'ok',           -- ok | error
+  error TEXT,
+  size INTEGER,
+  stored_name TEXT,
+  format TEXT DEFAULT 'rsc',
+  source TEXT,                                  -- auto | manual
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Audit log (immutable trail)
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
