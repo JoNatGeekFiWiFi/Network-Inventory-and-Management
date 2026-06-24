@@ -1,8 +1,10 @@
 // Network Inventory & Management Platform — API + static server (testing build)
 import express from 'express';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { db, initSchema, migrate, isEmpty, seed, backfillCustomers } from './db.js';
+import { dirname, join, extname } from 'node:path';
+import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, UPLOADS_DIR } from './db.js';
 import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie } from './auth.js';
 import { hashPassword, verifyPassword } from './hash.js';
 import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseCidr } from './wg.js';
@@ -112,7 +114,7 @@ async function pushBlocklistToDevice(d) {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '30mb' })); // raised so base64 photo/PDF note attachments fit
 
 // First-run: create schema + seed if empty
 initSchema();
@@ -831,7 +833,7 @@ app.get('/api/sites/:id', (req, res) => {
   out.customer = s.customer_id ? db.prepare('SELECT id, name FROM customers WHERE id=?').get(s.customer_id) : null;
   out.connections = db.prepare('SELECT * FROM connections WHERE site_id=? ORDER BY priority').all(s.id).map(resolveConn);
   out.devices = db.prepare('SELECT d.*, m.manufacturer, m.model, m.device_type FROM devices d LEFT JOIN device_models m ON m.id=d.model_id WHERE d.assigned_type=\'site\' AND d.assigned_site_id=? ORDER BY d.name').all(s.id).map(publicDevice);
-  out.notes = db.prepare('SELECT * FROM site_notes WHERE site_id=? ORDER BY datetime(created_at) DESC').all(s.id);
+  out.notes = withNoteAttachments(db.prepare('SELECT * FROM site_notes WHERE site_id=? ORDER BY datetime(created_at) DESC').all(s.id));
   res.json(out);
 });
 
@@ -938,7 +940,7 @@ app.get('/api/pops/:id', (req, res) => {
   out.devices = db.prepare("SELECT d.*, m.manufacturer, m.model, m.device_type FROM devices d LEFT JOIN device_models m ON m.id=d.model_id WHERE d.assigned_type='pop' AND d.assigned_pop_id=? ORDER BY d.name").all(p.id).map(publicDevice);
   out.served_sites = db.prepare(`SELECT DISTINCT s.id, s.name FROM sites s JOIN connections c ON c.site_id=s.id WHERE c.served_type='pop' AND c.served_pop_id=? ORDER BY s.name`).all(p.id);
   out.circuits = db.prepare('SELECT * FROM pop_circuits WHERE pop_id=? ORDER BY id').all(p.id).map(withCircuitLabel);
-  out.notes = db.prepare('SELECT * FROM pop_notes WHERE pop_id=? ORDER BY datetime(created_at) DESC').all(p.id);
+  out.notes = withNoteAttachments(db.prepare('SELECT * FROM pop_notes WHERE pop_id=? ORDER BY datetime(created_at) DESC').all(p.id));
   res.json(out);
 });
 function withCircuitLabel(c) {
@@ -972,9 +974,9 @@ app.delete('/api/pops/:id/circuits/:cid', requireNoc, (req, res) => {
 });
 app.post('/api/pops/:id/notes', (req, res) => {
   const b = req.body || {};
-  db.prepare('INSERT INTO pop_notes (pop_id, author, author_role, body) VALUES (?,?,?,?)').run(req.params.id, b.author || 'tester', role(req), N(b.body));
+  const info = db.prepare('INSERT INTO pop_notes (pop_id, author, author_role, body) VALUES (?,?,?,?)').run(req.params.id, b.author || 'tester', role(req), N(b.body));
   audit(req, 'note', 'pop#' + req.params.id);
-  res.json({ ok: true });
+  res.json({ ok: true, id: info.lastInsertRowid });
 });
 app.get('/api/pops/:id/access', requireNoc, (req, res) => {
   const r = db.prepare('SELECT body FROM pop_access WHERE pop_id=?').get(req.params.id);
@@ -1011,13 +1013,57 @@ app.delete('/api/pops/:id', requireNoc, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---- note attachments (pictures + PDFs) ----
+const ATT_MIME = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp', 'application/pdf': '.pdf' };
+const ATT_MAX = 25 * 1024 * 1024; // 25 MB
+function withNoteAttachments(notes) {
+  const q = db.prepare('SELECT id, filename, mime, size FROM note_attachments WHERE note_id=? ORDER BY id');
+  for (const n of notes) n.attachments = q.all(n.id);
+  return notes;
+}
+app.post('/api/attachments', (req, res) => {
+  const b = req.body || {};
+  if (!['site', 'pop'].includes(b.parent_type) || !b.parent_id) return res.status(400).json({ error: 'parent_type and parent_id required' });
+  if (!ATT_MIME[b.mime]) return res.status(400).json({ error: 'Only images (PNG/JPG/GIF/WebP) and PDF are allowed' });
+  let raw = String(b.data || '');
+  const comma = raw.indexOf(','); if (raw.startsWith('data:') && comma !== -1) raw = raw.slice(comma + 1); // strip data URL prefix
+  let buf; try { buf = Buffer.from(raw, 'base64'); } catch { return res.status(400).json({ error: 'Bad file data' }); }
+  if (!buf.length) return res.status(400).json({ error: 'Empty file' });
+  if (buf.length > ATT_MAX) return res.status(413).json({ error: 'File too large (max 25 MB)' });
+  const stored = randomUUID() + ATT_MIME[b.mime];
+  try { writeFileSync(join(UPLOADS_DIR, stored), buf); } catch (e) { return res.status(500).json({ error: 'Could not save file' }); }
+  const info = db.prepare('INSERT INTO note_attachments (parent_type,parent_id,note_id,filename,mime,size,stored_name,author) VALUES (?,?,?,?,?,?,?,?)')
+    .run(b.parent_type, b.parent_id, N(b.note_id), N(b.filename, 'file'), b.mime, buf.length, stored, (req.user && req.user.email) || '');
+  audit(req, 'attach', b.parent_type + '#' + b.parent_id, b.filename || stored);
+  res.json({ id: info.lastInsertRowid, filename: b.filename, mime: b.mime, size: buf.length });
+});
+app.get('/api/attachments/:id', (req, res) => {
+  const a = db.prepare('SELECT * FROM note_attachments WHERE id=?').get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  const fp = join(UPLOADS_DIR, a.stored_name);
+  if (!existsSync(fp)) return res.status(404).json({ error: 'file missing' });
+  res.setHeader('Content-Type', a.mime || 'application/octet-stream');
+  res.setHeader('Content-Length', statSync(fp).size);
+  res.setHeader('Content-Disposition', `inline; filename="${(a.filename || 'file').replace(/"/g, '')}"`);
+  createReadStream(fp).pipe(res);
+});
+app.delete('/api/attachments/:id', (req, res) => {
+  const a = db.prepare('SELECT * FROM note_attachments WHERE id=?').get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  if (!isPriv(req) && a.author !== (req.user && req.user.email)) return res.status(403).json({ error: 'Only the author or NOC/Admin can delete' });
+  try { unlinkSync(join(UPLOADS_DIR, a.stored_name)); } catch {}
+  db.prepare('DELETE FROM note_attachments WHERE id=?').run(a.id);
+  audit(req, 'delete', a.parent_type + '#' + a.parent_id, 'attachment#' + a.id);
+  res.json({ ok: true });
+});
+
 // site notes
 app.post('/api/sites/:id/notes', (req, res) => {
   const b = req.body || {};
-  db.prepare('INSERT INTO site_notes (site_id,author,author_role,body) VALUES (?,?,?,?)')
+  const info = db.prepare('INSERT INTO site_notes (site_id,author,author_role,body) VALUES (?,?,?,?)')
     .run(req.params.id, b.author || 'tester', role(req), N(b.body));
   audit(req, 'note', 'site#' + req.params.id);
-  res.json({ ok: true });
+  res.json({ ok: true, id: info.lastInsertRowid });
 });
 
 // pinned site access (sensitive — NOC/Admin only)

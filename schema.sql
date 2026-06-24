@@ -246,6 +246,20 @@ CREATE TABLE IF NOT EXISTS devices (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Note attachments (pictures + PDFs); files on disk, metadata here
+CREATE TABLE IF NOT EXISTS note_attachments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_type TEXT NOT NULL,                  -- 'site' | 'pop'
+  parent_id INTEGER NOT NULL,
+  note_id INTEGER,
+  filename TEXT,
+  mime TEXT,
+  size INTEGER,
+  stored_name TEXT NOT NULL,
+  author TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Audit log (immutable trail)
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

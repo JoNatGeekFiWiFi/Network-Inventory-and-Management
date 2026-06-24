@@ -210,7 +210,7 @@ async function renderSite(id) {
 
     <div class="card">
       <div class="hd"><h2><i class="ti ti-notes"></i> Site notes · ${s.notes.length}</h2><a class="btn sm" href="#/site/${s.id}/notes"><i class="ti ti-arrows-diagonal"></i> Expand</a></div>
-      ${note ? `<div class="note"><div class="av">${initials(note.author)}</div><div><div class="small"><b>${esc(note.author)}</b> <span class="muted">· ${esc(note.created_at)}</span></div><div class="small sec-muted" style="margin-top:2px">${esc(note.body)}</div></div></div>` : '<div class="row muted">No notes yet</div>'}
+      ${note ? `<div class="note"><div class="av">${initials(note.author)}</div><div style="flex:1"><div class="small"><b>${esc(note.author)}</b> <span class="muted">· ${esc(note.created_at)}</span></div>${note.body ? `<div class="small sec-muted" style="margin-top:2px">${esc(note.body)}</div>` : ''}${attachmentsHtml(note.attachments, false)}</div></div>` : '<div class="row muted">No notes yet</div>'}
     </div>`;
 }
 
@@ -259,7 +259,7 @@ async function renderPop(id) {
     <div class="card"><div class="hd"><h2>Hardware · ${p.devices.length}</h2><a class="btn sm" href="#/device/new?pop=${p.id}"><i class="ti ti-plus"></i> Add hardware</a></div>${hw}</div>
     <div class="card"><div class="hd"><h2>Customer sites served</h2></div><div style="padding:0 14px 12px">${served}</div></div>
     <div class="card"><div class="hd"><h2><i class="ti ti-notes"></i> Notes · ${p.notes.length}</h2><a class="btn sm" href="#/pop/${p.id}/notes"><i class="ti ti-arrows-diagonal"></i> Expand</a></div>
-      ${p.notes[0] ? `<div class="note"><div class="av">${initials(p.notes[0].author)}</div><div><div class="small"><b>${esc(p.notes[0].author)}</b> <span class="muted">· ${esc(p.notes[0].created_at)}</span></div><div class="small sec-muted" style="margin-top:2px">${esc(p.notes[0].body)}</div></div></div>` : '<div class="row muted">No notes yet</div>'}</div>`;
+      ${p.notes[0] ? `<div class="note"><div class="av">${initials(p.notes[0].author)}</div><div style="flex:1"><div class="small"><b>${esc(p.notes[0].author)}</b> <span class="muted">· ${esc(p.notes[0].created_at)}</span></div>${p.notes[0].body ? `<div class="small sec-muted" style="margin-top:2px">${esc(p.notes[0].body)}</div>` : ''}${attachmentsHtml(p.notes[0].attachments, false)}</div></div>` : '<div class="row muted">No notes yet</div>'}</div>`;
 }
 async function renderPopNotes(id) {
   const p = await api('/pops/' + id);
@@ -273,12 +273,11 @@ async function renderPopNotes(id) {
   const notes = p.notes.map(n => `<div class="card" style="margin-bottom:12px"><div class="note" style="border:0">
     <div class="av">${initials(n.author)}</div>
     <div style="flex:1"><div class="small"><b>${esc(n.author)}</b> <span class="muted">· ${esc(n.created_at)} · ${esc(n.author_role || '')}</span></div>
-    <div class="sec-muted" style="margin-top:4px">${esc(n.body)}</div></div></div>`).join('');
+    ${n.body ? `<div class="sec-muted" style="margin-top:4px">${esc(n.body)}</div>` : ''}${attachmentsHtml(n.attachments, true)}</div></div>`).join('');
   view().innerHTML = `<div class="crumb" onclick="location.hash='#/pop/${id}'"><i class="ti ti-chevron-left"></i> ${esc(p.name)}</div>
     <h1>POP notes</h1><div class="small sec-muted" style="margin-bottom:14px">${esc(p.name)}${p.code ? ' · ' + esc(p.code) : ''}</div>
     ${accessCard}
-    <div class="box"><textarea id="popNoteBody" rows="2" placeholder="Add a note about this POP…"></textarea>
-      <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn primary" onclick="postPopNote(${id})"><i class="ti ti-send"></i> Post note</button></div></div>
+    ${noteComposer('postPopNote', id)}
     ${notes || '<div class="muted">No notes yet</div>'}`;
   window._popAccessBody = accessBody || '';
 }
@@ -293,8 +292,14 @@ async function savePopAccess(id) {
   try { await api('/pops/' + id + '/access', { method: 'PUT', body: JSON.stringify({ body }) }); toast('Saved'); renderPopNotes(id); } catch (e) { toast(e.message); }
 }
 async function postPopNote(id) {
-  const body = $('#popNoteBody').value.trim(); if (!body) return;
-  try { await api('/pops/' + id + '/notes', { method: 'POST', body: JSON.stringify({ body }) }); toast('Note posted'); renderPopNotes(id); } catch (e) { toast(e.message); }
+  const body = $('#noteBody').value.trim();
+  const files = $('#noteFiles').files;
+  if (!body && (!files || !files.length)) { toast('Add a note or attach a file'); return; }
+  try {
+    const r = await api('/pops/' + id + '/notes', { method: 'POST', body: JSON.stringify({ body }) });
+    if (files && files.length) { toast('Uploading attachment(s)…'); await uploadAttachments('pop', id, r.id, files); }
+    toast('Note posted'); renderPopNotes(id);
+  } catch (e) { toast(e.message); }
 }
 async function formPop(q) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
@@ -391,24 +396,57 @@ async function renderNotes(id) {
   const notes = s.notes.map(n => `<div class="card" style="margin-bottom:12px"><div class="note" style="border:0">
     <div class="av">${initials(n.author)}</div>
     <div style="flex:1"><div class="small"><b>${esc(n.author)}</b> <span class="muted">· ${esc(n.created_at)} · ${esc(n.author_role || '')}</span></div>
-    <div class="sec-muted" style="margin-top:4px">${esc(n.body)}</div></div></div>`).join('');
+    ${n.body ? `<div class="sec-muted" style="margin-top:4px">${esc(n.body)}</div>` : ''}${attachmentsHtml(n.attachments, true)}</div></div>`).join('');
 
   view().innerHTML = `
     <div class="crumb" onclick="location.hash='#/site/${id}'"><i class="ti ti-chevron-left"></i> ${esc(s.name)}</div>
     <h1>Site notes</h1><div class="small sec-muted" style="margin-bottom:14px">${esc(s.name)} · ${esc(s.account.name)}</div>
     ${accessHtml}
-    <div class="box"><textarea id="noteBody" rows="2" placeholder="Add a note about this site…"></textarea>
-      <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn primary" onclick="postNote(${id})"><i class="ti ti-send"></i> Post note</button></div></div>
+    ${noteComposer('postNote', id)}
     ${notes || '<div class="muted">No notes yet</div>'}`;
 }
 function kv(k, v, secret) {
   const val = secret ? `<span class="mono" style="cursor:pointer;filter:blur(5px)" onclick="this.style.filter='none'">${esc(v)}</span>` : `<span>${v}</span>`;
   return `<div class="kv"><span class="small sec-muted">${esc(k)}</span>${val}</div>`;
 }
+// ---- note attachments (pictures + PDFs) ----
+const ATT_ACCEPT = 'image/png,image/jpeg,image/gif,image/webp,application/pdf';
+function fileToDataUrl(file) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); }); }
+async function uploadAttachments(parentType, parentId, noteId, files) {
+  for (const f of files) {
+    if (f.size > 25 * 1024 * 1024) { toast(f.name + ' is over 25 MB — skipped'); continue; }
+    try { const data = await fileToDataUrl(f); await api('/attachments', { method: 'POST', body: JSON.stringify({ parent_type: parentType, parent_id: parentId, note_id: noteId, filename: f.name, mime: f.type, data }) }); }
+    catch (e) { toast('Upload failed (' + f.name + '): ' + e.message); }
+  }
+}
+function showPicked(inputId, spanId) { const f = $('#' + inputId).files; const el = $('#' + spanId); el.textContent = f && f.length ? (f.length + ' file' + (f.length > 1 ? 's' : '') + ': ' + Array.from(f).map(x => x.name).join(', ')) : ''; }
+function attachmentsHtml(atts, canDelete) {
+  if (!atts || !atts.length) return '';
+  return `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">` + atts.map(a => {
+    const url = '/api/attachments/' + a.id;
+    const del = canDelete ? `<i class="ti ti-x" title="Remove" style="position:absolute;top:2px;right:2px;background:var(--surface);border-radius:50%;cursor:pointer;font-size:13px;padding:2px" onclick="event.preventDefault();event.stopPropagation();delAttachment(${a.id})"></i>` : '';
+    if ((a.mime || '').startsWith('image/')) return `<a href="${url}" target="_blank" style="position:relative;display:inline-block"><img src="${url}" loading="lazy" style="height:90px;width:90px;object-fit:cover;border-radius:8px;border:.5px solid var(--border)"/>${del}</a>`;
+    return `<a href="${url}" target="_blank" class="tag" style="position:relative;display:inline-flex;align-items:center;gap:5px;padding:8px 24px 8px 10px"><i class="ti ti-file-type-pdf" style="color:var(--danger)"></i> ${esc(a.filename || 'PDF')}${del}</a>`;
+  }).join('') + `</div>`;
+}
+function noteComposer(postFn, id) {
+  return `<div class="box"><textarea id="noteBody" rows="2" placeholder="Add a note…"></textarea>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;gap:8px">
+      <label class="btn sm" style="cursor:pointer;flex:none"><i class="ti ti-paperclip"></i> Attach<input type="file" id="noteFiles" accept="${ATT_ACCEPT}" multiple style="display:none" onchange="showPicked('noteFiles','pickedFiles')"></label>
+      <span id="pickedFiles" class="small sec-muted" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+      <button class="btn primary" style="flex:none" onclick="${postFn}(${id})"><i class="ti ti-send"></i> Post note</button></div>
+    <div class="help" style="padding:6px 2px 0">Attach pictures (PNG/JPG/GIF/WebP) or PDF · up to 25 MB each</div></div>`;
+}
+async function delAttachment(id) { if (!confirm('Remove this attachment?')) return; try { await api('/attachments/' + id, { method: 'DELETE' }); toast('Removed'); route(); } catch (e) { toast(e.message); } }
 async function postNote(id) {
-  const body = $('#noteBody').value.trim(); if (!body) return;
-  await api('/sites/' + id + '/notes', { method: 'POST', body: JSON.stringify({ body }) });
-  toast('Note posted'); renderNotes(id);
+  const body = $('#noteBody').value.trim();
+  const files = $('#noteFiles').files;
+  if (!body && (!files || !files.length)) { toast('Add a note or attach a file'); return; }
+  try {
+    const r = await api('/sites/' + id + '/notes', { method: 'POST', body: JSON.stringify({ body }) });
+    if (files && files.length) { toast('Uploading attachment(s)…'); await uploadAttachments('site', id, r.id, files); }
+    toast('Note posted'); renderNotes(id);
+  } catch (e) { toast(e.message); }
 }
 
 // ---------- Customers ----------

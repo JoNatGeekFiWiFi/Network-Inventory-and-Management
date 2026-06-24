@@ -1,13 +1,16 @@
 // Database bootstrap + seed for the Network Inventory & Management Platform
 // Uses Node's built-in SQLite (node:sqlite) — no native build step required.
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { hashPassword } from './hash.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.DB_PATH || join(__dirname, 'data.db');
+// Uploaded note attachments live next to the DB (so they ride the same data volume)
+export const UPLOADS_DIR = process.env.UPLOADS_DIR || join(dirname(DB_PATH), 'uploads');
+try { mkdirSync(UPLOADS_DIR, { recursive: true }); } catch {}
 
 export const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA journal_mode = WAL;');
@@ -56,6 +59,9 @@ export function migrate() {
   ensure('sites', 'customer_id', 'INTEGER');
   // POP upstream/bandwidth circuits — source is another POP or an account (carrier)
   db.exec("CREATE TABLE IF NOT EXISTS pop_circuits (id INTEGER PRIMARY KEY AUTOINCREMENT, pop_id INTEGER NOT NULL, source_type TEXT NOT NULL, source_pop_id INTEGER, source_account_id INTEGER, circuit_id TEXT, bandwidth TEXT, status TEXT DEFAULT 'Up', notes TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  // Note attachments (pictures + PDFs) — files stored on disk, metadata here
+  db.exec("CREATE TABLE IF NOT EXISTS note_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_type TEXT NOT NULL, parent_id INTEGER NOT NULL, note_id INTEGER, filename TEXT, mime TEXT, size INTEGER, stored_name TEXT NOT NULL, author TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_note_att ON note_attachments(note_id)");
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.
