@@ -921,6 +921,7 @@ async function formDevice(q) {
   const modelOpts = (await api('/models')).map(m => ({ v: m.id, l: m.manufacturer + ' ' + m.model }));
   const siteOpts = (await api('/sites')).map(s => ({ v: s.id, l: s.name }));
   const popOpts = (await api('/pops')).map(p => ({ v: p.id, l: 'POP · ' + p.name }));
+  const custOpts = (await api('/customers')).map(c => ({ v: c.id, l: c.name + (c.account_name ? ' · ' + c.account_name : '') }));
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${q.id ? 'Edit' : 'Add'} hardware</h1>
     <div class="card" style="margin-top:14px;padding:16px;overflow:visible" id="f">
@@ -967,7 +968,15 @@ async function formDevice(q) {
           <button type="button" class="segbtn ${d.assigned_type === 'pop' ? 'on' : ''}" id="dt-pop" onclick="setDest('pop')"><i class="ti ti-server-2"></i> POP site</button>
         </div>
         <input type="hidden" name="assigned_type" value="${d.assigned_type || 'site'}"/>
-        <div id="destSite" style="display:${d.assigned_type === 'pop' ? 'none' : 'block'}"><label class="fl">Client site</label><div id="ss-site"></div></div>
+        <div id="destSite" style="display:${d.assigned_type === 'pop' ? 'none' : 'block'}">
+          <div style="display:flex;justify-content:space-between;align-items:center"><label class="fl">Client site</label>
+            <label class="small sec-muted" style="font-weight:400;cursor:pointer"><input type="checkbox" id="newSite" onchange="toggleNewSite()" style="width:auto"> New site</label></div>
+          <div id="ss-site"></div>
+          <div id="newSiteBox" style="display:none;margin-top:8px;padding:12px;border:.5px solid var(--border);border-radius:8px;background:var(--surface)">
+            ${field('Site name', 'ns_name', '', { ph: 'e.g. Riverside Office' })}
+            <div class="fld"><label class="fl">Customer</label><div id="ss-newcust"></div></div>
+          </div>
+        </div>
         <div id="destPop" style="display:${d.assigned_type === 'pop' ? 'block' : 'none'}"><label class="fl">POP site</label><div id="ss-pop"></div></div>
       </div>
 
@@ -978,6 +987,12 @@ async function formDevice(q) {
   attachSearch($('#ss-model'), modelOpts, 'model_id', d.model_id, 'Search manufacturer / model…');
   attachSearch($('#ss-site'), siteOpts, 'assigned_site_id', d.assigned_site_id, 'Search client site…');
   attachSearch($('#ss-pop'), popOpts, 'assigned_pop_id', d.assigned_pop_id, 'Search POP…');
+  attachSearch($('#ss-newcust'), custOpts, 'ns_customer_id', '', 'Search customer…');
+}
+function toggleNewSite() {
+  const on = $('#newSite').checked;
+  $('#newSiteBox').style.display = on ? 'block' : 'none';
+  $('#ss-site').style.display = on ? 'none' : 'block';
 }
 function setMM(m) { $('input[name=management_mode]').value = m; $('#mm-plat').classList.toggle('on', m === 'platform'); $('#mm-prov').classList.toggle('on', m === 'provider'); $('#provExtra').style.display = m === 'provider' ? 'block' : 'none'; $('#platExtra').style.display = m === 'provider' ? 'none' : 'block'; }
 function setOwn(o) { $('input[name=ownership]').value = o; ['us', 'carrier', 'distributor'].forEach(x => $('#ow-' + x).classList.toggle('on', x === o)); }
@@ -987,6 +1002,15 @@ async function saveDevice(id) {
   const d = collect('#f');
   d.online = 1;
   if (!d.name) { toast('Enter a device name'); return; }
+  // Inline "New site": create the site (under a customer) first, then assign this device to it
+  const newSite = $('#newSite') && $('#newSite').checked;
+  if (d.status === 'Deployed' && d.assigned_type === 'site' && newSite) {
+    if (!d.ns_name) { toast('Enter the new site name'); return; }
+    if (!d.ns_customer_id) { toast('Pick a customer for the new site'); return; }
+    try { const s = await api('/sites', { method: 'POST', body: JSON.stringify({ name: d.ns_name, customer_id: d.ns_customer_id }) }); d.assigned_site_id = s.id; }
+    catch (e) { toast('Site: ' + e.message); return; }
+  }
+  delete d.ns_name; delete d.ns_customer_id;
   // Normalize empty optional/FK fields so SQLite doesn't choke
   ['model_id', 'assigned_site_id', 'assigned_pop_id', 'controller_id'].forEach(k => { if (d[k] === '') d[k] = null; });
   if (d.status !== 'Deployed') { d.assigned_type = null; d.assigned_site_id = null; d.assigned_pop_id = null; }
