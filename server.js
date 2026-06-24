@@ -937,8 +937,38 @@ app.get('/api/pops/:id', (req, res) => {
   const out = withPopSummary(p);
   out.devices = db.prepare("SELECT d.*, m.manufacturer, m.model, m.device_type FROM devices d LEFT JOIN device_models m ON m.id=d.model_id WHERE d.assigned_type='pop' AND d.assigned_pop_id=? ORDER BY d.name").all(p.id).map(publicDevice);
   out.served_sites = db.prepare(`SELECT DISTINCT s.id, s.name FROM sites s JOIN connections c ON c.site_id=s.id WHERE c.served_type='pop' AND c.served_pop_id=? ORDER BY s.name`).all(p.id);
+  out.circuits = db.prepare('SELECT * FROM pop_circuits WHERE pop_id=? ORDER BY id').all(p.id).map(withCircuitLabel);
   out.notes = db.prepare('SELECT * FROM pop_notes WHERE pop_id=? ORDER BY datetime(created_at) DESC').all(p.id);
   res.json(out);
+});
+function withCircuitLabel(c) {
+  let label = '—';
+  if (c.source_type === 'pop' && c.source_pop_id) { const p = db.prepare('SELECT name FROM pops WHERE id=?').get(c.source_pop_id); label = p ? ('POP · ' + p.name) : 'POP'; }
+  else if (c.source_type === 'account' && c.source_account_id) { const a = db.prepare('SELECT name FROM accounts WHERE id=?').get(c.source_account_id); label = a ? a.name : 'Account'; }
+  return { ...c, source_label: label };
+}
+app.post('/api/pops/:id/circuits', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (b.source_type !== 'pop' && b.source_type !== 'account') return res.status(400).json({ error: 'source_type must be pop or account' });
+  if (b.source_type === 'pop' && !b.source_pop_id) return res.status(400).json({ error: 'Pick a source POP' });
+  if (b.source_type === 'account' && !b.source_account_id) return res.status(400).json({ error: 'Pick a source account' });
+  const info = db.prepare('INSERT INTO pop_circuits (pop_id, source_type, source_pop_id, source_account_id, circuit_id, bandwidth, status, notes) VALUES (?,?,?,?,?,?,?,?)')
+    .run(req.params.id, b.source_type, b.source_type === 'pop' ? N(b.source_pop_id) : null, b.source_type === 'account' ? N(b.source_account_id) : null, N(b.circuit_id), N(b.bandwidth), b.status || 'Up', N(b.notes));
+  audit(req, 'create', 'pop#' + req.params.id, 'circuit#' + info.lastInsertRowid);
+  res.json({ id: info.lastInsertRowid });
+});
+app.put('/api/pops/:id/circuits/:cid', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (b.source_type !== 'pop' && b.source_type !== 'account') return res.status(400).json({ error: 'source_type must be pop or account' });
+  db.prepare('UPDATE pop_circuits SET source_type=?, source_pop_id=?, source_account_id=?, circuit_id=?, bandwidth=?, status=?, notes=? WHERE id=? AND pop_id=?')
+    .run(b.source_type, b.source_type === 'pop' ? N(b.source_pop_id) : null, b.source_type === 'account' ? N(b.source_account_id) : null, N(b.circuit_id), N(b.bandwidth), N(b.status, 'Up'), N(b.notes), req.params.cid, req.params.id);
+  audit(req, 'edit', 'pop#' + req.params.id, 'circuit#' + req.params.cid);
+  res.json({ ok: true });
+});
+app.delete('/api/pops/:id/circuits/:cid', requireNoc, (req, res) => {
+  db.prepare('DELETE FROM pop_circuits WHERE id=? AND pop_id=?').run(req.params.cid, req.params.id);
+  audit(req, 'delete', 'pop#' + req.params.id, 'circuit#' + req.params.cid);
+  res.json({ ok: true });
 });
 app.post('/api/pops/:id/notes', (req, res) => {
   const b = req.body || {};

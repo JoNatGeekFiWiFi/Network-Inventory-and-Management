@@ -100,6 +100,8 @@ async function route() {
     if (p[0] === 'pop' && p[1] === 'new') { setNav('sites'); return await formPop({}); }
     if (p[0] === 'pop' && p[2] === 'edit') { setNav('sites'); return await formPop({ id: p[1] }); }
     if (p[0] === 'pop' && p[2] === 'notes') { setNav('sites'); return await renderPopNotes(p[1]); }
+    if (p[0] === 'pop' && p[2] === 'circuit' && p[3] === 'new') { setNav('sites'); return await formPopCircuit({ popId: p[1] }); }
+    if (p[0] === 'pop' && p[2] === 'circuit' && p[3]) { setNav('sites'); return await formPopCircuit({ popId: p[1], id: p[3] }); }
     if (p[0] === 'pop') { setNav('sites'); return await renderPop(p[1]); }
     if (p[0] === 'customers') { setNav('customers'); return await renderCustomers(); }
     if (p[0] === 'customer' && p[1] === 'new') { setNav('customers'); return await formCustomer({}); }
@@ -248,6 +250,12 @@ async function renderPop(id) {
       <div class="metric"><div class="l"><i class="ti ti-shield-lock"></i> Management IP</div><div class="mono" style="font-size:15px;font-weight:500">${p.current_mgmt_ip ? `<a class="iplink" href="https://${esc(p.current_mgmt_ip)}" target="_blank">${esc(p.current_mgmt_ip)} <i class="ti ti-external-link" style="font-size:11px"></i></a>` : '—'}</div></div>
       <div class="metric"><div class="l"><i class="ti ti-world"></i> Public IP</div><div class="mono" style="font-size:15px;font-weight:500">${esc(p.current_public_ip || '—')}</div></div>
     </div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-route"></i> Upstream / bandwidth · ${p.circuits.length}</h2>${isPriv() ? `<a class="btn sm" href="#/pop/${p.id}/circuit/new"><i class="ti ti-plus"></i> Add circuit</a>` : ''}</div>
+      ${p.circuits.length ? p.circuits.map(c => `<div class="row${isPriv() ? ' rowlink' : ''}"${isPriv() ? ` onclick="location.hash='#/pop/${p.id}/circuit/${c.id}'"` : ''}>
+        <i class="ti ti-${c.source_type === 'pop' ? 'building-broadcast-tower' : 'building-bank'} sec-muted"></i>
+        <div style="flex:1;min-width:0"><div>${esc(c.source_label)}${c.bandwidth ? ' · <b>' + esc(c.bandwidth) + '</b>' : ''}</div>
+          <div class="small mono sec-muted">${c.circuit_id ? esc(c.circuit_id) : 'no circuit ID'}${c.notes ? ' · ' + esc(c.notes) : ''}</div></div>
+        ${statusPill(c.status)}${isPriv() ? '<i class="ti ti-chevron-right muted"></i>' : ''}</div>`).join('') : '<div class="row muted">No upstream circuits defined — Add circuit to record where this POP gets bandwidth.</div>'}</div>
     <div class="card"><div class="hd"><h2>Hardware · ${p.devices.length}</h2><a class="btn sm" href="#/device/new?pop=${p.id}"><i class="ti ti-plus"></i> Add hardware</a></div>${hw}</div>
     <div class="card"><div class="hd"><h2>Customer sites served</h2></div><div style="padding:0 14px 12px">${served}</div></div>
     <div class="card"><div class="hd"><h2><i class="ti ti-notes"></i> Notes · ${p.notes.length}</h2><a class="btn sm" href="#/pop/${p.id}/notes"><i class="ti ti-arrows-diagonal"></i> Expand</a></div>
@@ -312,6 +320,56 @@ async function savePop(id) {
     else { const r = await api('/pops', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/pop/' + r.id; }
     toast('Saved');
   } catch (e) { toast(e.message); }
+}
+
+async function formPopCircuit(q) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const pop = await api('/pops/' + q.popId);
+  let c = { source_type: 'pop', source_pop_id: '', source_account_id: '', circuit_id: '', bandwidth: '', status: 'Up', notes: '' };
+  if (q.id) { const found = (pop.circuits || []).find(x => String(x.id) === String(q.id)); if (found) c = found; }
+  const popOpts = (META.pops || []).filter(p => String(p.id) !== String(q.popId)).map(p => ({ v: p.id, l: p.name }));
+  const accOpts = (META.accounts || []).map(a => ({ v: a.id, l: a.name }));
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/pop/${q.popId}'"><i class="ti ti-chevron-left"></i> ${esc(pop.name)}</div>
+    <h1>${q.id ? 'Edit' : 'Add'} circuit</h1>
+    <div class="small sec-muted" style="margin-bottom:14px">Where ${esc(pop.name)} gets its bandwidth</div>
+    <div class="card" style="padding:16px;overflow:visible" id="f">
+      <div class="fld"><label class="fl">Bandwidth source</label>
+        <select name="source_type" onchange="toggleCircSource()">
+          <option value="pop" ${c.source_type === 'pop' ? 'selected' : ''}>Other POP site</option>
+          <option value="account" ${c.source_type === 'account' ? 'selected' : ''}>Account (carrier)</option>
+        </select></div>
+      <div class="fld" id="srcpopFld"><label class="fl">Source POP</label><div id="ss-srcpop"></div></div>
+      <div class="fld" id="srcacctFld"><label class="fl">Source account</label><div id="ss-srcacct"></div></div>
+      <div class="grid2">${field('Circuit / account ID', 'circuit_id', c.circuit_id, { mono: true, ph: 'e.g. COX-123456' })}
+      ${field('Bandwidth', 'bandwidth', c.bandwidth, { ph: 'e.g. 1 Gbps' })}</div>
+      ${field('Status', 'status', c.status, { type: 'select', options: ['Up', 'Standby', 'Down'] })}
+      ${field('Notes', 'notes', c.notes, { type: 'textarea' })}
+      <div style="display:flex;gap:10px;justify-content:${q.id ? 'space-between' : 'flex-end'};margin-top:8px">
+        ${q.id ? `<button class="btn" style="color:var(--danger)" onclick="delCircuit(${q.popId},${q.id})"><i class="ti ti-trash"></i> Delete</button>` : ''}
+        <div style="display:flex;gap:10px"><button class="btn" onclick="history.back()">Cancel</button>
+        <button class="btn primary" onclick="saveCircuit(${q.popId},${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div></div>`;
+  attachSearch($('#ss-srcpop'), popOpts, 'source_pop_id', c.source_pop_id || '', 'Search POP…');
+  attachSearch($('#ss-srcacct'), accOpts, 'source_account_id', c.source_account_id || '', 'Search account…');
+  toggleCircSource();
+}
+function toggleCircSource() {
+  const t = $('#f [name="source_type"]').value;
+  $('#srcpopFld').style.display = t === 'pop' ? 'block' : 'none';
+  $('#srcacctFld').style.display = t === 'account' ? 'block' : 'none';
+}
+async function saveCircuit(popId, id) {
+  const d = collect('#f');
+  if (d.source_type === 'pop' && !d.source_pop_id) { toast('Pick a source POP'); return; }
+  if (d.source_type === 'account' && !d.source_account_id) { toast('Pick a source account'); return; }
+  try {
+    if (id) await api('/pops/' + popId + '/circuits/' + id, { method: 'PUT', body: JSON.stringify(d) });
+    else await api('/pops/' + popId + '/circuits', { method: 'POST', body: JSON.stringify(d) });
+    toast('Saved'); location.hash = '#/pop/' + popId;
+  } catch (e) { toast(e.message); }
+}
+async function delCircuit(popId, id) {
+  if (!confirm('Delete this circuit?')) return;
+  try { await api('/pops/' + popId + '/circuits/' + id, { method: 'DELETE' }); toast('Deleted'); location.hash = '#/pop/' + popId; } catch (e) { toast(e.message); }
 }
 
 // ---------- Notes ----------

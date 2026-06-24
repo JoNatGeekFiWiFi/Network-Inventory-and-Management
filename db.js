@@ -54,6 +54,8 @@ export function migrate() {
   // Customer entity between Account and Site
   db.exec("CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, name TEXT NOT NULL, status TEXT DEFAULT 'Active', notes TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
   ensure('sites', 'customer_id', 'INTEGER');
+  // POP upstream/bandwidth circuits — source is another POP or an account (carrier)
+  db.exec("CREATE TABLE IF NOT EXISTS pop_circuits (id INTEGER PRIMARY KEY AUTOINCREMENT, pop_id INTEGER NOT NULL, source_type TEXT NOT NULL, source_pop_id INTEGER, source_account_id INTEGER, circuit_id TEXT, bandwidth TEXT, status TEXT DEFAULT 'Up', notes TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

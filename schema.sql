@@ -82,6 +82,20 @@ CREATE TABLE IF NOT EXISTS pops (
   current_public_ip TEXT
 );
 
+-- POP upstream/bandwidth circuits — source is another POP or an account (carrier)
+CREATE TABLE IF NOT EXISTS pop_circuits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pop_id INTEGER NOT NULL REFERENCES pops(id) ON DELETE CASCADE,
+  source_type TEXT NOT NULL,                   -- 'pop' | 'account'
+  source_pop_id INTEGER REFERENCES pops(id),
+  source_account_id INTEGER REFERENCES accounts(id),
+  circuit_id TEXT,
+  bandwidth TEXT,
+  status TEXT DEFAULT 'Up',                     -- Up / Standby / Down
+  notes TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Upstream providers (carriers / transit / wholesale)
 CREATE TABLE IF NOT EXISTS upstream_providers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
