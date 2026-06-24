@@ -614,20 +614,41 @@ app.get('/api/devices/:id/wifi-clients', requireNoc, async (req, res) => {
 
 // ---- router config backups (RouterOS text export) ----
 const backupDevices = () => db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
-async function backupDevice(d, source) {
-  const r = await restReq(d.mgmt_address, '/rest/export', { headers: rosHeaders(d), method: 'POST', body: {}, timeoutMs: 25000 });
-  if (r.status >= 400) throw Object.assign(new Error('export failed'), { http: r.status });
-  let text = r.body || '';
-  const t = text.trim();
-  if (t.startsWith('[') || t.startsWith('{') || t.startsWith('"')) { // some builds wrap the export in JSON
+// Pull readable text out of whatever shape /rest/export or a file read returns
+function exportText(body) {
+  let text = body || ''; const t = String(text).trim();
+  if (t.startsWith('[') || t.startsWith('{') || t.startsWith('"')) {
     try {
       const j = JSON.parse(t);
       if (typeof j === 'string') text = j;
-      else if (Array.isArray(j)) text = j.map(x => typeof x === 'string' ? x : (x.section || x.line || x.ret || JSON.stringify(x))).join('\n');
-      else if (j && typeof j === 'object') text = j.ret || j.output || j.export || JSON.stringify(j, null, 2);
+      else if (Array.isArray(j)) text = j.map(x => typeof x === 'string' ? x : (x.section || x.line || x.ret || x.contents || x.output || '')).filter(Boolean).join('\n');
+      else if (j && typeof j === 'object') text = j.ret || j.output || j.export || j.contents || '';
     } catch {}
   }
-  if (!text || !text.trim()) throw new Error('Empty export from device');
+  return text;
+}
+async function backupDevice(d, source) {
+  const H = rosHeaders(d);
+  const ros = (method, path, body) => restReq(d.mgmt_address, path, { headers: H, method, body, timeoutMs: 25000 });
+  let text = '';
+  // Strategy A: some RouterOS builds return the export inline in the response body
+  try { const r = await ros('POST', '/rest/export', {}); if (r.status < 400) text = exportText(r.body); } catch {}
+  // Strategy B: export to a .rsc file on the router, then read that text file back (and clean it up)
+  if (!text || !text.trim()) {
+    const fname = 'netinv-backup';
+    const ex = await ros('POST', '/rest/export', { file: fname });
+    if (ex.status >= 400) throw Object.assign(new Error('export failed'), { http: ex.status });
+    await new Promise(r => setTimeout(r, 1500)); // give the router a moment to write the file
+    const fr = await ros('GET', '/rest/file');
+    let files = []; if (fr.status < 400) { try { files = JSON.parse(fr.body); } catch {} }
+    const f = (Array.isArray(files) ? files : []).find(x => (x.name || '') === fname + '.rsc' || (x.name || '').endsWith('/' + fname + '.rsc'));
+    if (f) {
+      text = f.contents || '';
+      if ((!text || !text.trim()) && f['.id']) { const one = await ros('GET', '/rest/file/' + f['.id']); if (one.status < 400) { try { const o = JSON.parse(one.body); const obj = Array.isArray(o) ? o[0] : o; text = obj.contents || ''; } catch {} } }
+      if (f['.id']) { try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {} } // tidy up flash
+    }
+  }
+  if (!text || !text.trim()) throw new Error('Empty export from device (router returned no config text)');
   const stored = 'bak-' + d.id + '-' + Date.now() + '.rsc';
   writeFileSync(join(BACKUPS_DIR, stored), text);
   const size = Buffer.byteLength(text);
