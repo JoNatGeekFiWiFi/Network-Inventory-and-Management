@@ -1322,9 +1322,19 @@ async function renderDeviceBackups(id) {
     <div class="crumb" onclick="location.hash='#/device/${id}'"><i class="ti ti-chevron-left"></i> ${esc(d.name)}</div>
     <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1><i class="ti ti-archive"></i> Config backups</h1></div>
       <div class="small sec-muted" style="margin-top:3px">${esc(d.name)} · automatic weekly · kept 6 months</div></div>
-      <button class="btn primary" onclick="backupNow(${id})"><i class="ti ti-player-record"></i> Back up now</button></div>
+      <div style="display:flex;gap:8px"><button class="btn" onclick="diagnoseBackup(${id})"><i class="ti ti-stethoscope"></i> Diagnose</button>
+      <button class="btn primary" onclick="backupNow(${id})"><i class="ti ti-player-record"></i> Back up now</button></div></div>
+    <div id="bakDiag"></div>
     <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No backups yet. Weekly backups run automatically — or click Back up now.</div>'}</div>
     <div class="help">RouterOS text export (.rsc). Download to keep offline or to restore on the device. Backups older than 6 months are removed automatically.</div>`;
+}
+async function diagnoseBackup(id) {
+  const box = $('#bakDiag'); if (box) box.innerHTML = '<div class="card" style="margin-top:14px;padding:14px" class="muted">Running diagnostics on the router…</div>';
+  try {
+    const r = await api('/devices/' + id + '/backup-debug');
+    if (box) box.innerHTML = `<div class="card" style="margin-top:14px;padding:14px"><div class="hd" style="padding:0 0 8px"><h2><i class="ti ti-stethoscope"></i> Backup diagnostics</h2></div>
+      <pre style="white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:0;color:var(--text2);max-height:420px;overflow:auto">${esc(JSON.stringify(r, null, 2))}</pre></div>`;
+  } catch (e) { if (box) box.innerHTML = `<div class="card" style="margin-top:14px;padding:14px">Diagnose failed: ${esc(e.message)}</div>`; toast(e.message); }
 }
 async function backupNow(id) {
   toast('Backing up…');

@@ -680,6 +680,34 @@ app.post('/api/devices/:id/backup', requireNoc, async (req, res) => {
     res.status(502).json({ error: e.http ? ('Device returned ' + e.http + ' — does this RouterOS expose /rest/export?') : rosErr(e) });
   }
 });
+// Diagnostic: run each backup step and report raw RouterOS responses
+app.get('/api/devices/:id/backup-debug', requireNoc, async (req, res) => {
+  const d = dhcpDevice(req, res); if (!d) return;
+  const H = rosHeaders(d);
+  const ros = (m, p, b) => restReq(d.mgmt_address, p, { headers: H, method: m, body: b, timeoutMs: 25000 });
+  const out = { device: d.name, mgmt: d.mgmt_address, steps: [] };
+  const rec = (label, r) => out.steps.push({ label, status: r && r.status, bodyLen: r && r.body ? String(r.body).length : 0, snippet: r && r.body ? String(r.body).slice(0, 500) : '' });
+  try { rec('POST /rest/export {}', await ros('POST', '/rest/export', {})); } catch (e) { out.steps.push({ label: 'POST /rest/export {}', error: e.message }); }
+  try { rec('POST /rest/export {file:netinv-backup}', await ros('POST', '/rest/export', { file: 'netinv-backup' })); } catch (e) { out.steps.push({ label: 'POST /rest/export {file}', error: e.message }); }
+  await new Promise(r => setTimeout(r, 1500));
+  try {
+    const c = await ros('GET', '/rest/file');
+    let files = []; try { files = JSON.parse(c.body); } catch {}
+    files = Array.isArray(files) ? files : [];
+    out.steps.push({ label: 'GET /rest/file', status: c.status, count: files.length });
+    out.files = files.map(f => ({ name: f.name, type: f.type, size: f.size, hasContents: f.contents != null, contentsLen: f.contents ? String(f.contents).length : 0 }));
+    const f = files.find(x => (x.name || '').includes('netinv-backup'));
+    if (f && f['.id']) {
+      const one = await ros('GET', '/rest/file/' + f['.id']);
+      let cl = 0, sn = ''; try { const o = JSON.parse(one.body); const obj = Array.isArray(o) ? o[0] : o; cl = obj.contents ? String(obj.contents).length : 0; sn = obj.contents ? String(obj.contents).slice(0, 300) : ''; } catch {}
+      out.steps.push({ label: 'GET /rest/file/:id (netinv-backup)', status: one.status, contentsLen: cl, snippet: sn });
+      try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {}
+    } else {
+      out.steps.push({ label: 'find netinv-backup.rsc', note: 'not found in file list' });
+    }
+  } catch (e) { out.steps.push({ label: 'GET /rest/file', error: e.message }); }
+  res.json(out);
+});
 app.get('/api/backups/:id/download', requireNoc, (req, res) => {
   const b = db.prepare('SELECT * FROM router_backups WHERE id=?').get(req.params.id);
   if (!b || !b.stored_name) return res.status(404).json({ error: 'not found' });
