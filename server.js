@@ -243,14 +243,17 @@ app.get('/api/settings', requireNoc, (req, res) => {
     wg_dns: getSetting('wg_dns') || '',
     wg_server_pub: getSetting('wg_server_pub') || '',
     backup_upload_base: getSetting('backup_upload_base') || '',
+    public_base_url: getSetting('public_base_url') || '',
+    has_provision_token: !!getSetting('provision_token'),
     has_zt_api_token: !!getSetting('zt_api_token'),
     has_wg_server_priv: !!getSetting('wg_server_priv')
   });
 });
 app.put('/api/settings', requireNoc, (req, res) => {
   const b = req.body || {};
-  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns', 'backup_upload_base']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns', 'backup_upload_base', 'public_base_url']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
   if (b.zt_api_token) setSetting('zt_api_token', String(b.zt_api_token).trim());
+  if (!getSetting('provision_token')) setSetting('provision_token', randomUUID().replace(/-/g, '')); // shared secret for phone-home restore
   if (!getSetting('wg_server_priv')) { const kp = wgKeypair(); setSetting('wg_server_priv', kp.privateKey); setSetting('wg_server_pub', kp.publicKey); }
   audit(req, 'edit', 'settings', 'overlay settings');
   res.json({ ok: true });
@@ -796,6 +799,120 @@ app.delete('/api/backups/:id', requireNoc, (req, res) => {
   db.prepare('DELETE FROM router_backups WHERE id=?').run(b.id);
   audit(req, 'delete', 'device#' + b.device_id, 'backup#' + b.id);
   res.json({ ok: true });
+});
+
+// ---- zero-touch provisioning: default config + phone-home restore ----
+app.post('/api/settings/provision/regenerate', requireNoc, (req, res) => {
+  setSetting('provision_token', randomUUID().replace(/-/g, ''));
+  audit(req, 'edit', 'settings', 'regenerated provision token');
+  res.json({ ok: true });
+});
+// Phone-home restore: a freshly-reset router fetches its saved config by serial (token-gated, no session)
+app.get('/provision/:serial', (req, res) => {
+  const token = getSetting('provision_token');
+  if (!token || req.query.token !== token) return res.status(403).type('text/plain').send('# forbidden');
+  const serial = String(req.params.serial || '').replace(/\.rsc$/i, '').trim();
+  const dev = db.prepare('SELECT id, name FROM devices WHERE serial=? COLLATE NOCASE').get(serial);
+  if (!dev) { try { audit({ user: { email: 'router:' + serial } }, 'provision_miss', 'serial#' + serial, 'no device'); } catch {} return res.status(404).type('text/plain').send('# no device for serial ' + serial); }
+  const bak = db.prepare("SELECT * FROM router_backups WHERE device_id=? AND status='ok' AND stored_name IS NOT NULL ORDER BY datetime(created_at) DESC LIMIT 1").get(dev.id);
+  if (!bak) return res.status(404).type('text/plain').send('# no backup on file for ' + dev.name);
+  const fp = join(BACKUPS_DIR, bak.stored_name);
+  if (!existsSync(fp)) return res.status(404).type('text/plain').send('# backup file missing');
+  try { audit({ user: { email: 'router:' + serial } }, 'provision_restore', 'device#' + dev.id, 'served backup#' + bak.id); } catch {}
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Length', statSync(fp).size);
+  createReadStream(fp).pipe(res);
+});
+// Build the Netinstall default-config .rsc for a device (NOC)
+function renderDefaultConfig(d) {
+  const pub = (getSetting('public_base_url') || '').replace(/\/+$/, '');
+  const token = getSetting('provision_token') || '';
+  const q = s => String(s == null ? '' : s).replace(/"/g, '');
+  const L = [];
+  L.push('# ============================================================');
+  L.push('# NetInv default configuration for ' + q(d.name));
+  L.push('# Load this as the DEFAULT CONFIG via Netinstall so it survives the reset button.');
+  L.push('# On boot it phones home by serial number and restores the latest saved backup.');
+  L.push('# Generated ' + new Date().toISOString());
+  L.push('# ============================================================');
+  L.push('/system identity set name="' + q(d.name) + '"');
+  L.push('');
+  L.push('# --- WAN + LAN + NAT (minimal connectivity so the unit can phone home; full config arrives via restore) ---');
+  L.push('/ip dhcp-client add interface=ether1 disabled=no comment="WAN"');
+  L.push('/interface bridge add name=bridge-lan');
+  L.push(':foreach i in=[/interface ethernet find where name!="ether1"] do={ /interface bridge port add bridge=bridge-lan interface=$i }');
+  L.push('/ip address add address=192.168.88.1/24 interface=bridge-lan');
+  L.push('/ip pool add name=lan-pool ranges=192.168.88.10-192.168.88.254');
+  L.push('/ip dhcp-server add name=lan-dhcp interface=bridge-lan address-pool=lan-pool disabled=no');
+  L.push('/ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=1.1.1.1,8.8.8.8');
+  L.push('/ip firewall nat add chain=srcnat action=masquerade out-interface=ether1 comment="netinv default NAT"');
+  L.push('');
+  L.push('# --- users ---');
+  if (d.admin_password) L.push('/user set [find name=admin] password="' + q(d.admin_password) + '"');
+  if (d.admin_username && d.admin_username !== 'admin' && d.admin_password) L.push('/user add name="' + q(d.admin_username) + '" password="' + q(d.admin_password) + '" group=full');
+  if (d.tech_username && d.tech_password) L.push('/user add name="' + q(d.tech_username) + '" password="' + q(d.tech_password) + '" group=read');
+  L.push('');
+  L.push('# --- firewall baseline + netinv blocklist ---');
+  L.push('/ip firewall filter add chain=input action=accept connection-state=established,related comment="netinv base"');
+  L.push('/ip firewall filter add chain=input action=drop connection-state=invalid');
+  L.push('/ip firewall filter add chain=input action=drop src-address-list=netinv-blocklist comment="netinv auto-block"');
+  L.push('/ip firewall filter add chain=input action=accept protocol=icmp');
+  L.push('/ip firewall filter add chain=input action=accept in-interface=bridge-lan comment="allow LAN"');
+  if (d.mgmt_overlay === 'WireGuard') L.push('/ip firewall filter add chain=input action=accept in-interface=wg-mgmt comment="allow mgmt overlay"');
+  L.push('/ip firewall filter add chain=input action=drop in-interface=ether1 comment="drop other WAN input"');
+  L.push('');
+  // WireGuard management overlay (only if provisioned)
+  if (d.mgmt_overlay === 'WireGuard' && d.wg_private_key && d.mgmt_address) {
+    const hubPub = getSetting('wg_server_pub') || '';
+    const ep = getSetting('wg_endpoint') || '';
+    const epHost = ep.split(':')[0] || '';
+    const epPort = ep.split(':')[1] || '51820';
+    L.push('# --- WireGuard management overlay ---');
+    L.push('/interface wireguard add name=wg-mgmt private-key="' + q(d.wg_private_key) + '"');
+    if (hubPub && epHost) L.push('/interface wireguard peers add interface=wg-mgmt public-key="' + q(hubPub) + '" endpoint-address=' + q(epHost) + ' endpoint-port=' + q(epPort) + ' allowed-address=0.0.0.0/0 persistent-keepalive=25s');
+    L.push('/ip address add address=' + q(d.mgmt_address) + '/32 interface=wg-mgmt');
+    L.push('');
+  } else if (d.mgmt_overlay === 'ZeroTier') {
+    L.push('# NOTE: this device uses ZeroTier (a package, not configurable via .rsc). Install/join ZeroTier separately after restore.');
+    L.push('');
+  }
+  // Phone-home restore script + startup scheduler
+  if (pub && token) {
+    const url = pub + '/provision/';
+    L.push('# --- phone-home restore (by serial number, which survives resets) ---');
+    L.push('/system script add name=netinv-restore owner=admin dont-require-permissions=no source={');
+    L.push('    :local n 0');
+    L.push('    :while ($n < 30 && [:len [/ip route find where dst-address="0.0.0.0/0" active=yes]] = 0) do={ :delay 2s; :set n ($n + 1) }');
+    L.push('    :local serial [/system routerboard get serial-number]');
+    L.push('    :local url ("' + url + '" . $serial . "?token=' + token + '")');
+    L.push('    :do {');
+    L.push('        /tool fetch url=$url mode=https dst-path=netinv-restore.rsc');
+    L.push('        :delay 3s');
+    L.push('        :if ([:len [/file find where name="netinv-restore.rsc"]] > 0) do={');
+    L.push('            :if ([/file get [find name="netinv-restore.rsc"] size] > 40) do={');
+    L.push('                /import file-name=netinv-restore.rsc');
+    L.push('                /system scheduler remove [find where name="netinv-restore"]');
+    L.push('            }');
+    L.push('            /file remove [find where name="netinv-restore.rsc"]');
+    L.push('        }');
+    L.push('    } on-error={}');
+    L.push('}');
+    L.push('/system scheduler add name=netinv-restore start-time=startup interval=0 on-event="/system script run netinv-restore" comment="netinv phone-home restore"');
+  } else {
+    L.push('# NOTE: set Settings -> Provisioning (public URL + token) to embed the phone-home restore script.');
+  }
+  L.push('');
+  return L.join('\n');
+}
+app.get('/api/devices/:id/default-config', requireNoc, (req, res) => {
+  const d = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'not found' });
+  if (!getSetting('public_base_url') || !getSetting('provision_token')) return res.status(400).json({ error: 'Set Settings → Provisioning (public URL) and save first' });
+  const text = renderDefaultConfig(d);
+  audit(req, 'config_read', 'device#' + d.id, 'default-config .rsc');
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${(d.name || 'router').replace(/[^a-z0-9_-]+/gi, '_')}-default.rsc"`);
+  res.send(text);
 });
 
 // Fetch from ZeroTier Central with a timeout so a slow/hung call can't stall a request

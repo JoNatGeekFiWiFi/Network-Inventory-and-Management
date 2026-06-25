@@ -1155,8 +1155,18 @@ async function renderSettings() {
     <div class="card" style="padding:16px" id="bak">
       <h2 style="margin-bottom:12px"><i class="ti ti-archive"></i> Router backups</h2>
       ${field('Backup upload URL', 'backup_upload_base', s.backup_upload_base, { mono: true, ph: 'http://<server-overlay-ip>:3000' })}
-      <div class="help">Some RouterOS builds won't return a config export over REST, so the router uploads it to the platform instead. Set this to a URL where this server is reachable <b>from the routers</b> (i.e. the server's address on your management overlay/ZeroTier, with the app port). Leave blank if REST export works on your devices.</div>
+      <div class="help">Optional fallback. The platform pulls config exports from routers via FTP over the overlay; leave this blank unless your routers can only push over HTTP.</div>
       <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" onclick="saveSettings()"><i class="ti ti-check"></i> Save</button></div>
+    </div>
+    <div class="card" style="padding:16px" id="prov">
+      <h2 style="margin-bottom:12px"><i class="ti ti-rocket"></i> Zero-touch provisioning</h2>
+      ${field('Public server URL', 'public_base_url', s.public_base_url, { mono: true, ph: 'https://management.geekitek.com' })}
+      <div class="fld"><label class="fl">Provision token</label>
+        <input value="${s.has_provision_token ? '•••••••• (set)' : '(generated on save)'}" readonly style="font-family:var(--mono);background:var(--surface2)"/>
+        <div class="help">Shared secret embedded in the default-config phone-home script. Routers present it (with their serial) to fetch their saved backup after a reset.</div></div>
+      <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap"><button class="btn primary" onclick="saveProv()"><i class="ti ti-check"></i> Save</button>
+      <button class="btn" onclick="regenProv()"><i class="ti ti-refresh"></i> Regenerate token</button></div>
+      <div class="help">Set the public URL (reachable from devices' WAN, over HTTPS), then download a device's <b>default config</b> from its Config backups page and load it via Netinstall. After a reset the router phones home by serial number and restores its latest backup.</div>
     </div>`;
 }
 async function saveSettings() {
@@ -1164,6 +1174,14 @@ async function saveSettings() {
   const d = Object.assign({}, z, w, bk);
   if (!d.zt_api_token) delete d.zt_api_token; // blank = keep existing
   try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
+}
+async function saveProv() {
+  const d = collect('#prov');
+  try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
+}
+async function regenProv() {
+  if (!confirm('Regenerate the provision token? You must re-download and re-flash default configs that embed the old token.')) return;
+  try { await api('/settings/provision/regenerate', { method: 'POST' }); toast('New token generated'); renderSettings(); } catch (e) { toast(e.message); }
 }
 async function regenWg() {
   if (!confirm('Regenerate the hub keypair? Existing device configs will need to be re-downloaded.')) return;
@@ -1332,7 +1350,10 @@ async function renderDeviceBackups(id) {
       <button class="btn primary" onclick="backupNow(${id})"><i class="ti ti-player-record"></i> Back up now</button></div></div>
     <div id="bakDiag"></div>
     <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No backups yet. Weekly backups run automatically — or click Back up now.</div>'}</div>
-    <div class="help">RouterOS text export (.rsc). Download to keep offline or to restore on the device. Backups older than 6 months are removed automatically.</div>`;
+    <div class="help">RouterOS text export (.rsc). Download to keep offline or to restore on the device. Backups older than 6 months are removed automatically.</div>
+    <div class="card" style="margin-top:14px"><div class="hd"><h2><i class="ti ti-rocket"></i> Default config (Netinstall)</h2>
+      <a class="btn sm" href="/api/devices/${id}/default-config"><i class="ti ti-download"></i> Download .rsc</a></div>
+      <div class="help" style="padding:8px 14px">Load this as the <b>default configuration</b> via Netinstall so it survives the reset button. It sets up users, the management overlay, a baseline firewall, and a phone-home script: after a reset the router identifies by serial number and restores its latest backup automatically. Requires Settings → Zero-touch provisioning (public URL + token) and at least one backup on file. ${d.serial ? '' : '<b style="color:var(--warning)">Poll this device first so its serial number is on file — the phone-home matches by serial.</b>'}</div></div>`;
 }
 async function diagnoseBackup(id) {
   const box = $('#bakDiag'); if (box) box.innerHTML = '<div class="card" style="margin-top:14px;padding:14px" class="muted">Running diagnostics on the router…</div>';
