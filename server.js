@@ -10,6 +10,7 @@ import { hashPassword, verifyPassword } from './hash.js';
 import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseCidr } from './wg.js';
 import https from 'node:https';
 import http from 'node:http';
+import net from 'node:net';
 
 // HTTP(S) JSON request with a timeout; https tolerates self-signed certs (RouterOS). Returns {status, body}.
 function reqJson(mod, urlStr, opts = {}) {
@@ -629,18 +630,47 @@ function exportText(body) {
   return text;
 }
 const _sleep = ms => new Promise(r => setTimeout(r, ms));
-const pendingUploads = new Map(); // token -> { resolve }
-// Ask the router to POST its exported .rsc to our upload endpoint (works when REST won't return file contents)
-async function fetchUploadFromRouter(d, ros, base, srcFileName) {
-  const token = randomUUID();
-  const url = base.replace(/\/+$/, '') + '/router-upload/' + token;
-  const p = new Promise(resolve => pendingUploads.set(token, { resolve }));
-  const fr = await ros('POST', '/rest/tool/fetch', { url, 'http-method': 'post', upload: 'yes', 'src-path': srcFileName, 'keep-result': 'no' });
-  if (fr.status >= 400) { pendingUploads.delete(token); throw new Error('tool/fetch rejected: ' + fr.status + ' ' + String(fr.body || '').slice(0, 240)); }
-  const got = await Promise.race([p, _sleep(20000).then(() => null)]);
-  pendingUploads.delete(token);
-  if (got == null) throw new Error('Router could not reach the backup upload URL — check Settings → backup upload URL and that the router can reach the server on the overlay');
-  return got;
+const pendingUploads = new Map(); // token -> { resolve }  (legacy upload receiver; FTP pull is primary)
+// Minimal FTP client (PASV + RETR) over node:net — RouterOS won't return file contents over REST,
+// and only [s]ftp support fetch-upload, so we pull the exported .rsc directly from the router.
+function ftpRetrieve(host, user, pass, filename, { port = 21, timeoutMs = 20000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const ctrl = net.connect({ host, port });
+    ctrl.setTimeout(timeoutMs);
+    let buf = '', stage = 0, dataChunks = [], dataEnded = false, retrOk = false, finished = false;
+    const fail = e => { if (finished) return; finished = true; try { ctrl.destroy(); } catch {} reject(e instanceof Error ? e : new Error(String(e))); };
+    const done = t => { if (finished) return; finished = true; try { ctrl.write('QUIT\r\n'); ctrl.end(); } catch {} resolve(t); };
+    const send = c => ctrl.write(c + '\r\n');
+    const maybeFinish = () => { if (retrOk && dataEnded) done(Buffer.concat(dataChunks).toString('utf8')); };
+    ctrl.on('timeout', () => fail(new Error('FTP timeout')));
+    ctrl.on('error', fail);
+    ctrl.on('data', chunk => {
+      buf += chunk.toString('binary'); let i;
+      while ((i = buf.indexOf('\r\n')) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 2); handle(line); }
+    });
+    function handle(line) {
+      if (line[3] === '-') return; // multiline continuation
+      const code = parseInt(line.slice(0, 3), 10);
+      if (stage === 0) { if (code === 220) { send('USER ' + user); stage = 1; } else fail(new Error('FTP greeting: ' + line)); }
+      else if (stage === 1) { if (code === 230) { send('TYPE I'); stage = 3; } else if (code === 331) { send('PASS ' + pass); stage = 2; } else fail(new Error('FTP user: ' + line)); }
+      else if (stage === 2) { if (code === 230) { send('TYPE I'); stage = 3; } else fail(new Error('FTP login failed (check admin user/pass + IP>Services>ftp): ' + line)); }
+      else if (stage === 3) { if (code === 200) { send('PASV'); stage = 4; } else fail(new Error('FTP type: ' + line)); }
+      else if (stage === 4) { if (code === 227) openData(line); else fail(new Error('FTP pasv: ' + line)); }
+      else if (stage === 5) { if (code === 150 || code === 125) {} else if (code === 226 || code === 250) { retrOk = true; maybeFinish(); } else if (code >= 400) fail(new Error('FTP retr: ' + line)); }
+    }
+    function openData(line) {
+      const m = line.match(/\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)/);
+      if (!m) return fail(new Error('FTP pasv parse: ' + line));
+      const dport = (+m[5]) * 256 + (+m[6]);
+      const dsock = net.connect({ host, port: dport }); // use control host (overlay-reachable), not advertised PASV IP
+      dsock.setTimeout(timeoutMs);
+      dsock.on('data', c => dataChunks.push(c));
+      dsock.on('end', () => { dataEnded = true; maybeFinish(); });
+      dsock.on('error', fail);
+      dsock.on('timeout', () => fail(new Error('FTP data timeout')));
+      stage = 5; send('RETR ' + filename);
+    }
+  });
 }
 async function backupDevice(d, source) {
   const H = rosHeaders(d);
@@ -661,10 +691,10 @@ async function backupDevice(d, source) {
       // B1: try reading the file's text contents over REST (works on some builds)
       text = f.contents || '';
       if ((!text || !text.trim()) && f['.id']) { const one = await ros('GET', '/rest/file/' + f['.id']); if (one.status < 400) { try { const o = JSON.parse(one.body); const obj = Array.isArray(o) ? o[0] : o; text = obj.contents || ''; } catch {} } }
-      // B2: if REST won't hand back contents, have the router push the file to us
+      // B2: if REST won't hand back contents, pull the .rsc from the router via FTP over the overlay
       if (!text || !text.trim()) {
-        const base = getSetting('backup_upload_base');
-        if (base) { try { text = await fetchUploadFromRouter(d, ros, base, f.name); } catch (e) { if (f['.id']) { try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {} } throw e; } }
+        try { text = await ftpRetrieve(d.mgmt_address, d.admin_username || 'admin', d.admin_password, f.name); }
+        catch (e) { if (f['.id']) { try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {} } throw new Error('REST gave no config and FTP pull failed: ' + e.message); }
       }
       if (f['.id']) { try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {} } // tidy up flash
     }
@@ -736,16 +766,9 @@ app.get('/api/devices/:id/backup-debug', requireNoc, async (req, res) => {
       out.steps.push({ label: 'GET /rest/file/:id (netinv-backup)', status: one.status, fileSize: f.size, contentsLen: cl, snippet: sn });
       // alternate read: collection GET filtered by name with explicit proplist
       try { const alt = await ros('GET', '/rest/file?name=' + encodeURIComponent(f.name) + '&.proplist=name,size,contents'); let al = 0; try { const a = JSON.parse(alt.body); const o = Array.isArray(a) ? a[0] : a; al = o && o.contents ? String(o.contents).length : 0; } catch {} out.steps.push({ label: 'GET /rest/file?name=..&.proplist=contents', status: alt.status, contentsLen: al }); } catch (e) { out.steps.push({ label: 'alt read', error: e.message }); }
-      // tool/fetch upload attempt — show RouterOS's raw response so we can fix params
-      const base = getSetting('backup_upload_base');
-      if (base) {
-        const variants = [
-          { label: "fetch upload (url, src-path, upload=yes, post)", body: { url: base.replace(/\/+$/, '') + '/router-upload/diag', 'http-method': 'post', upload: 'yes', 'src-path': f.name, 'keep-result': 'no' } },
-          { label: "fetch upload (url, src-path, upload=yes, mode=http)", body: { url: base.replace(/\/+$/, '') + '/router-upload/diag', mode: 'http', upload: 'yes', 'src-path': f.name, 'keep-result': 'no' } },
-          { label: "fetch upload (upload-file, post)", body: { url: base.replace(/\/+$/, '') + '/router-upload/diag', 'http-method': 'post', 'upload-file': f.name, 'keep-result': 'no' } }
-        ];
-        for (const v of variants) { try { const ff = await ros('POST', '/rest/tool/fetch', v.body); out.steps.push({ label: v.label, status: ff.status, snippet: String(ff.body || '').slice(0, 300) }); } catch (e) { out.steps.push({ label: v.label, error: e.message }); } }
-      } else { out.steps.push({ label: 'tool/fetch', note: 'backup_upload_base not set in Settings' }); }
+      // FTP pull attempt (the actual backup retrieval path) — report success length or error
+      try { const t = await ftpRetrieve(d.mgmt_address, d.admin_username || 'admin', d.admin_password, f.name, { timeoutMs: 15000 }); out.steps.push({ label: 'FTP RETR ' + f.name, ok: true, bytes: Buffer.byteLength(t), snippet: t.slice(0, 120) }); }
+      catch (e) { out.steps.push({ label: 'FTP RETR ' + f.name, error: e.message }); }
       try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {}
     } else {
       out.steps.push({ label: 'find netinv-backup.rsc', note: 'not found in file list' });
