@@ -1392,6 +1392,84 @@ app.get('/api/devices', (req, res) => {
   res.json(rows);
 });
 
+// ---- batch config changes (fleet-wide, NOC/Admin) ----
+async function applyBatchOp(d, op, params) {
+  const H = rosHeaders(d);
+  const ros = (m, p, b) => restReq(d.mgmt_address, p, { headers: H, method: m, body: b, timeoutMs: 15000 });
+  if (op === 'add-user') {
+    const r = await ros('PUT', '/rest/user', { name: params.name, password: params.password, group: params.group || 'full' });
+    if (r.status >= 400) throw new Error('HTTP ' + r.status + ' ' + String(r.body || '').slice(0, 160));
+    return 'added user ' + params.name + ' (' + (params.group || 'full') + ')';
+  }
+  if (op === 'change-password') {
+    const g = await ros('GET', '/rest/user?name=' + encodeURIComponent(params.name));
+    let users = []; try { users = JSON.parse(g.body); } catch {}
+    const u = (Array.isArray(users) ? users : []).find(x => x.name === params.name);
+    if (!u) throw new Error('user "' + params.name + '" not found on device');
+    const r = await ros('PATCH', '/rest/user/' + u['.id'], { password: params.password });
+    if (r.status >= 400) throw new Error('HTTP ' + r.status + ' ' + String(r.body || '').slice(0, 160));
+    return 'password changed for ' + params.name;
+  }
+  throw new Error('unknown op');
+}
+async function runBatch(op, params, deviceIds, actor) {
+  const devs = deviceIds.map(id => db.prepare('SELECT * FROM devices WHERE id=?').get(id)).filter(Boolean);
+  const results = [];
+  let idx = 0;
+  const worker = async () => {
+    while (idx < devs.length) {
+      const d = devs[idx++];
+      let status = 'ok', detail = '';
+      if (d.management_mode !== 'platform') { status = 'error'; detail = 'provider-managed device (skipped)'; }
+      else if (!d.mgmt_address || !d.admin_password) { status = 'error'; detail = 'no management IP / admin password on file'; }
+      else { try { detail = await applyBatchOp(d, op, params); } catch (e) { status = 'error'; detail = e.message; } }
+      results.push({ device_id: d.id, device_name: d.name, status, detail });
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(5, devs.length) }, worker)); // limited concurrency
+  results.sort((a, b) => String(a.device_name).localeCompare(String(b.device_name)));
+  const ok = results.filter(r => r.status === 'ok').length, fail = results.length - ok;
+  const summary = (op === 'add-user' ? 'Add user ' : 'Change password ') + params.name;
+  const jid = db.prepare("INSERT INTO batch_jobs (op,summary,actor,total,ok,fail) VALUES (?,?,?,?,?,?)").run(op, summary, actor, results.length, ok, fail).lastInsertRowid;
+  const ins = db.prepare("INSERT INTO batch_results (job_id,device_id,device_name,status,detail) VALUES (?,?,?,?,?)");
+  for (const r of results) ins.run(jid, r.device_id, r.device_name, r.status, r.detail);
+  return { id: jid, op, summary, total: results.length, ok, fail, results };
+}
+app.get('/api/batch/targets', requireNoc, (req, res) => {
+  const rows = db.prepare("SELECT id, name, mgmt_address, management_mode, assigned_type, assigned_site_id, assigned_pop_id, (admin_password IS NOT NULL AND admin_password<>'') AS has_pw FROM devices WHERE management_mode='platform' ORDER BY name").all();
+  for (const r of rows) {
+    r.eligible = !!(r.mgmt_address && r.has_pw);
+    r.reason = r.eligible ? '' : (!r.mgmt_address ? 'no mgmt IP' : 'no admin password');
+    if (r.assigned_type === 'site' && r.assigned_site_id) r.group = (db.prepare('SELECT name FROM sites WHERE id=?').get(r.assigned_site_id) || {}).name || 'Site';
+    else if (r.assigned_type === 'pop' && r.assigned_pop_id) r.group = 'POP · ' + ((db.prepare('SELECT name FROM pops WHERE id=?').get(r.assigned_pop_id) || {}).name || '');
+    else r.group = 'Unassigned';
+    delete r.has_pw;
+  }
+  res.json(rows);
+});
+app.get('/api/batch', requireNoc, (req, res) => {
+  res.json(db.prepare('SELECT id, op, summary, actor, total, ok, fail, created_at FROM batch_jobs ORDER BY id DESC LIMIT 100').all());
+});
+app.get('/api/batch/:id', requireNoc, (req, res) => {
+  const job = db.prepare('SELECT * FROM batch_jobs WHERE id=?').get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+  job.results = db.prepare('SELECT device_id, device_name, status, detail FROM batch_results WHERE job_id=? ORDER BY status, device_name').all(job.id);
+  res.json(job);
+});
+app.post('/api/batch', requireNoc, async (req, res) => {
+  const b = req.body || {};
+  if (!['add-user', 'change-password'].includes(b.op)) return res.status(400).json({ error: 'unknown operation' });
+  const ids = (b.device_ids || []).map(Number).filter(Boolean);
+  if (!ids.length) return res.status(400).json({ error: 'Select at least one device' });
+  const p = b.params || {};
+  if (!p.name || !p.password) return res.status(400).json({ error: 'Username and password are required' });
+  try {
+    const out = await runBatch(b.op, p, ids, (req.user && req.user.email) || '');
+    audit(req, 'config_push', 'batch#' + out.id, `${b.op} ${p.name} — ${out.ok}/${out.total} ok`); // never log the password
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/devices/:id', (req, res) => {
   const d = db.prepare('SELECT d.*, m.manufacturer, m.model, m.device_type, m.has_wifi, m.has_cellular FROM devices d LEFT JOIN device_models m ON m.id=d.model_id WHERE d.id=?').get(req.params.id);
   if (!d) return res.status(404).json({ error: 'not found' });

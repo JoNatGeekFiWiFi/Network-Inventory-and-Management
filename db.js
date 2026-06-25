@@ -68,6 +68,10 @@ export function migrate() {
   // Weekly router config backups (.rsc exports); files on disk, metadata here
   db.exec("CREATE TABLE IF NOT EXISTS router_backups (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'ok', error TEXT, size INTEGER, stored_name TEXT, format TEXT DEFAULT 'rsc', source TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
   db.exec("CREATE INDEX IF NOT EXISTS idx_rbak ON router_backups(device_id, created_at)");
+  // Batch config jobs (fleet-wide changes) + per-device results
+  db.exec("CREATE TABLE IF NOT EXISTS batch_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT, summary TEXT, actor TEXT, total INTEGER, ok INTEGER, fail INTEGER, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  db.exec("CREATE TABLE IF NOT EXISTS batch_results (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, device_id INTEGER, device_name TEXT, status TEXT, detail TEXT)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_batchres ON batch_results(job_id)");
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

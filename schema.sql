@@ -273,6 +273,19 @@ CREATE TABLE IF NOT EXISTS router_backups (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Batch config jobs (fleet-wide changes) + per-device results
+CREATE TABLE IF NOT EXISTS batch_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  op TEXT, summary TEXT, actor TEXT,
+  total INTEGER, ok INTEGER, fail INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS batch_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES batch_jobs(id) ON DELETE CASCADE,
+  device_id INTEGER, device_name TEXT, status TEXT, detail TEXT
+);
+
 -- Audit log (immutable trail)
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

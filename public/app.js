@@ -46,6 +46,7 @@ function setupHeader() {
   $('#navSettings').style.display = isPriv() ? '' : 'none';
   $('#navZt').style.display = isPriv() ? '' : 'none';
   $('#navBlock').style.display = isPriv() ? '' : 'none';
+  $('#navBatch').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
 }
 function toast(msg) {
@@ -127,6 +128,8 @@ async function route() {
     if (p[0] === 'settings') { setNav('settings'); return await renderSettings(); }
     if (p[0] === 'zerotier') { setNav('zerotier'); return await renderZeroTier(); }
     if (p[0] === 'blocklist') { setNav('blocklist'); return await renderBlocklist(); }
+    if (p[0] === 'batch' && p[1]) { setNav('batch'); return await renderBatchJob(p[1]); }
+    if (p[0] === 'batch') { setNav('batch'); return await renderBatch(); }
     view().innerHTML = '<div class="card" style="padding:20px">Not found</div>';
   } catch (e) { if (e.message === 'auth') return; view().innerHTML = `<div class="card" style="padding:20px">Error: ${esc(e.message)}</div>`; }
 }
@@ -1123,6 +1126,80 @@ async function saveModel(id) {
 async function delModel(id) {
   if (!confirm('Delete this model?')) return;
   try { await api('/models/' + id, { method: 'DELETE' }); toast('Deleted'); renderModels(); } catch (e) { toast(e.message); }
+}
+
+// ---------- Batch config (fleet-wide changes) ----------
+async function renderBatch() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const [targets, jobs] = await Promise.all([api('/batch/targets'), api('/batch')]);
+  window._batchTargets = targets; window._batchSel = new Set();
+  const jobRows = jobs.map(j => `<div class="row rowlink" onclick="location.hash='#/batch/${j.id}'">
+    <i class="ti ti-${j.fail ? 'alert-triangle' : 'circle-check'}" style="color:${j.fail ? 'var(--warning)' : 'var(--success)'}"></i>
+    <div style="flex:1;min-width:0"><div>${esc(j.summary || j.op)}</div><div class="small sec-muted">${esc(j.created_at)} · ${esc(j.actor || '')}</div></div>
+    <span class="small mono"><span style="color:var(--success)">${j.ok}✓</span>${j.fail ? ' · <span style="color:var(--danger)">' + j.fail + '✗</span>' : ''} / ${j.total}</span>
+    <i class="ti ti-chevron-right muted"></i></div>`).join('');
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Batch config</h1></div>
+    <div class="small sec-muted" style="margin:-6px 0 14px">Push a change to many MikroTik routers at once · runs over the management overlay.</div>
+    <div class="card" style="padding:16px;overflow:visible" id="f">
+      <div class="fld"><label class="fl">Operation</label>
+        <select name="op" onchange="batchOpChange()"><option value="change-password">Change user password</option><option value="add-user">Add user account</option></select></div>
+      <div class="grid2">${field('Username', 'name', '', { mono: true, ph: 'e.g. admin' })}${field('Password', 'password', '', { mono: true, ph: 'new password' })}</div>
+      <div class="fld" id="grpFld" style="display:none"><label class="fl">Group (for new user)</label>
+        <select name="group">${['full', 'write', 'read'].map(g => `<option value="${g}">${g}</option>`).join('')}</select></div>
+      <div class="hd" style="padding:8px 0 4px"><h2>Target routers</h2>
+        <div style="display:flex;gap:8px"><input id="tfilter" placeholder="Filter…" oninput="renderTargets()" style="width:150px"/>
+        <button class="btn sm" onclick="selAllTargets(true)">Select all</button><button class="btn sm" onclick="selAllTargets(false)">None</button></div></div>
+      <div id="targetList" style="max-height:320px;overflow:auto;border:.5px solid var(--border);border-radius:8px"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
+        <span class="small sec-muted" id="selCount"></span>
+        <button class="btn primary" onclick="runBatchOp()"><i class="ti ti-player-play"></i> Run on selected</button></div>
+    </div>
+    <div id="batchResults"></div>
+    <div class="hd" style="margin-top:18px"><h2>Recent batch jobs</h2></div>
+    <div class="card">${jobRows || '<div class="row muted">No batch jobs yet</div>'}</div>`;
+  batchOpChange(); renderTargets();
+}
+function batchOpChange() { const op = $('#f [name=op]').value; $('#grpFld').style.display = op === 'add-user' ? 'block' : 'none'; }
+function batchVisible() { const q = ($('#tfilter').value || '').toLowerCase(); return (window._batchTargets || []).filter(t => !q || (t.name || '').toLowerCase().includes(q) || (t.group || '').toLowerCase().includes(q)); }
+function renderTargets() {
+  const list = $('#targetList'); if (!list) return;
+  const sel = window._batchSel || (window._batchSel = new Set());
+  const items = batchVisible();
+  list.innerHTML = items.map(t => `<label class="row" style="cursor:${t.eligible ? 'pointer' : 'not-allowed'};opacity:${t.eligible ? 1 : .5}">
+    <input type="checkbox" ${sel.has(t.id) ? 'checked' : ''} ${t.eligible ? '' : 'disabled'} onchange="toggleTarget(${t.id},this.checked)" style="width:auto"/>
+    <div style="flex:1;min-width:0"><div>${esc(t.name)}</div><div class="small mono sec-muted">${esc(t.group || '')}${t.mgmt_address ? ' · ' + esc(t.mgmt_address) : ''}${t.eligible ? '' : ' · ' + esc(t.reason)}</div></div></label>`).join('') || '<div class="row muted">No matching devices</div>';
+  updateSelCount();
+}
+function toggleTarget(id, on) { const sel = window._batchSel; if (on) sel.add(id); else sel.delete(id); updateSelCount(); }
+function selAllTargets(on) { const sel = window._batchSel = new Set(); if (on) for (const t of batchVisible()) if (t.eligible) sel.add(t.id); renderTargets(); }
+function updateSelCount() { const el = $('#selCount'); if (el) el.textContent = (window._batchSel || new Set()).size + ' selected'; }
+function batchResultCard(r) {
+  const rows = r.results.map(x => `<div class="row"><i class="ti ti-${x.status === 'ok' ? 'circle-check' : 'alert-triangle'}" style="color:${x.status === 'ok' ? 'var(--success)' : 'var(--danger)'}"></i>
+    <div style="flex:1;min-width:0"><div>${esc(x.device_name || ('device#' + x.device_id))}</div><div class="small sec-muted">${esc(x.detail || '')}</div></div></div>`).join('');
+  return `<div class="card" style="margin-top:14px"><div class="hd"><h2>${esc(r.summary || r.op)}</h2><span class="small mono"><span style="color:var(--success)">${r.ok}✓</span> · <span style="color:var(--danger)">${r.fail}✗</span> / ${r.total}</span></div>${rows}</div>`;
+}
+async function runBatchOp() {
+  const op = $('#f [name=op]').value;
+  const name = $('#f [name=name]').value.trim();
+  const password = $('#f [name=password]').value;
+  const groupEl = $('#f [name=group]'); const group = groupEl ? groupEl.value : 'full';
+  const ids = Array.from(window._batchSel || []);
+  if (!name || !password) { toast('Enter username and password'); return; }
+  if (!ids.length) { toast('Select at least one router'); return; }
+  if (!confirm(`Run "${op === 'add-user' ? 'Add user' : 'Change password'}" for "${name}" on ${ids.length} router(s)?`)) return;
+  const out = $('#batchResults'); out.innerHTML = `<div class="card" style="margin-top:14px;padding:14px"><span class="muted">Running on ${ids.length} router(s)…</span></div>`;
+  try {
+    const r = await api('/batch', { method: 'POST', body: JSON.stringify({ op, params: { name, password, group }, device_ids: ids }) });
+    out.innerHTML = batchResultCard(r);
+    toast(`Done · ${r.ok}/${r.total} ok`);
+  } catch (e) { out.innerHTML = ''; toast(e.message); }
+}
+async function renderBatchJob(id) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const j = await api('/batch/' + id);
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/batch'"><i class="ti ti-chevron-left"></i> Batch config</div>
+    <h1>${esc(j.summary || j.op)}</h1><div class="small sec-muted" style="margin-bottom:14px">${esc(j.created_at)} · ${esc(j.actor || '')}</div>
+    ${batchResultCard(j)}`;
 }
 
 // ---------- Settings: management overlays (NOC/Admin) ----------
