@@ -636,7 +636,7 @@ async function fetchUploadFromRouter(d, ros, base, srcFileName) {
   const url = base.replace(/\/+$/, '') + '/router-upload/' + token;
   const p = new Promise(resolve => pendingUploads.set(token, { resolve }));
   const fr = await ros('POST', '/rest/tool/fetch', { url, 'http-method': 'post', upload: 'yes', 'src-path': srcFileName, 'keep-result': 'no' });
-  if (fr.status >= 400) { pendingUploads.delete(token); throw Object.assign(new Error('tool/fetch upload failed'), { http: fr.status }); }
+  if (fr.status >= 400) { pendingUploads.delete(token); throw new Error('tool/fetch rejected: ' + fr.status + ' ' + String(fr.body || '').slice(0, 240)); }
   const got = await Promise.race([p, _sleep(20000).then(() => null)]);
   pendingUploads.delete(token);
   if (got == null) throw new Error('Router could not reach the backup upload URL — check Settings → backup upload URL and that the router can reach the server on the overlay');
@@ -736,6 +736,16 @@ app.get('/api/devices/:id/backup-debug', requireNoc, async (req, res) => {
       out.steps.push({ label: 'GET /rest/file/:id (netinv-backup)', status: one.status, fileSize: f.size, contentsLen: cl, snippet: sn });
       // alternate read: collection GET filtered by name with explicit proplist
       try { const alt = await ros('GET', '/rest/file?name=' + encodeURIComponent(f.name) + '&.proplist=name,size,contents'); let al = 0; try { const a = JSON.parse(alt.body); const o = Array.isArray(a) ? a[0] : a; al = o && o.contents ? String(o.contents).length : 0; } catch {} out.steps.push({ label: 'GET /rest/file?name=..&.proplist=contents', status: alt.status, contentsLen: al }); } catch (e) { out.steps.push({ label: 'alt read', error: e.message }); }
+      // tool/fetch upload attempt — show RouterOS's raw response so we can fix params
+      const base = getSetting('backup_upload_base');
+      if (base) {
+        const variants = [
+          { label: "fetch upload (url, src-path, upload=yes, post)", body: { url: base.replace(/\/+$/, '') + '/router-upload/diag', 'http-method': 'post', upload: 'yes', 'src-path': f.name, 'keep-result': 'no' } },
+          { label: "fetch upload (url, src-path, upload=yes, mode=http)", body: { url: base.replace(/\/+$/, '') + '/router-upload/diag', mode: 'http', upload: 'yes', 'src-path': f.name, 'keep-result': 'no' } },
+          { label: "fetch upload (upload-file, post)", body: { url: base.replace(/\/+$/, '') + '/router-upload/diag', 'http-method': 'post', 'upload-file': f.name, 'keep-result': 'no' } }
+        ];
+        for (const v of variants) { try { const ff = await ros('POST', '/rest/tool/fetch', v.body); out.steps.push({ label: v.label, status: ff.status, snippet: String(ff.body || '').slice(0, 300) }); } catch (e) { out.steps.push({ label: v.label, error: e.message }); } }
+      } else { out.steps.push({ label: 'tool/fetch', note: 'backup_upload_base not set in Settings' }); }
       try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {}
     } else {
       out.steps.push({ label: 'find netinv-backup.rsc', note: 'not found in file list' });
