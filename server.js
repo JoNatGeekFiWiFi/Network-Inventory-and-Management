@@ -698,9 +698,12 @@ app.get('/api/devices/:id/backup-debug', requireNoc, async (req, res) => {
     out.files = files.map(f => ({ name: f.name, type: f.type, size: f.size, hasContents: f.contents != null, contentsLen: f.contents ? String(f.contents).length : 0 }));
     const f = files.find(x => (x.name || '').includes('netinv-backup'));
     if (f && f['.id']) {
+      out.steps.push({ label: 'matched export file', name: f.name, size: f.size, type: f.type, hasContents: f.contents != null });
       const one = await ros('GET', '/rest/file/' + f['.id']);
       let cl = 0, sn = ''; try { const o = JSON.parse(one.body); const obj = Array.isArray(o) ? o[0] : o; cl = obj.contents ? String(obj.contents).length : 0; sn = obj.contents ? String(obj.contents).slice(0, 300) : ''; } catch {}
-      out.steps.push({ label: 'GET /rest/file/:id (netinv-backup)', status: one.status, contentsLen: cl, snippet: sn });
+      out.steps.push({ label: 'GET /rest/file/:id (netinv-backup)', status: one.status, fileSize: f.size, contentsLen: cl, snippet: sn });
+      // alternate read: collection GET filtered by name with explicit proplist
+      try { const alt = await ros('GET', '/rest/file?name=' + encodeURIComponent(f.name) + '&.proplist=name,size,contents'); let al = 0; try { const a = JSON.parse(alt.body); const o = Array.isArray(a) ? a[0] : a; al = o && o.contents ? String(o.contents).length : 0; } catch {} out.steps.push({ label: 'GET /rest/file?name=..&.proplist=contents', status: alt.status, contentsLen: al }); } catch (e) { out.steps.push({ label: 'alt read', error: e.message }); }
       try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {}
     } else {
       out.steps.push({ label: 'find netinv-backup.rsc', note: 'not found in file list' });
