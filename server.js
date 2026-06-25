@@ -241,13 +241,14 @@ app.get('/api/settings', requireNoc, (req, res) => {
     wg_subnet: getSetting('wg_subnet') || '',
     wg_dns: getSetting('wg_dns') || '',
     wg_server_pub: getSetting('wg_server_pub') || '',
+    backup_upload_base: getSetting('backup_upload_base') || '',
     has_zt_api_token: !!getSetting('zt_api_token'),
     has_wg_server_priv: !!getSetting('wg_server_priv')
   });
 });
 app.put('/api/settings', requireNoc, (req, res) => {
   const b = req.body || {};
-  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns', 'backup_upload_base']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
   if (b.zt_api_token) setSetting('zt_api_token', String(b.zt_api_token).trim());
   if (!getSetting('wg_server_priv')) { const kp = wgKeypair(); setSetting('wg_server_priv', kp.privateKey); setSetting('wg_server_pub', kp.publicKey); }
   audit(req, 'edit', 'settings', 'overlay settings');
@@ -627,28 +628,48 @@ function exportText(body) {
   }
   return text;
 }
+const _sleep = ms => new Promise(r => setTimeout(r, ms));
+const pendingUploads = new Map(); // token -> { resolve }
+// Ask the router to POST its exported .rsc to our upload endpoint (works when REST won't return file contents)
+async function fetchUploadFromRouter(d, ros, base, srcFileName) {
+  const token = randomUUID();
+  const url = base.replace(/\/+$/, '') + '/router-upload/' + token;
+  const p = new Promise(resolve => pendingUploads.set(token, { resolve }));
+  const fr = await ros('POST', '/rest/tool/fetch', { url, 'http-method': 'post', upload: 'yes', 'src-path': srcFileName, 'keep-result': 'no' });
+  if (fr.status >= 400) { pendingUploads.delete(token); throw Object.assign(new Error('tool/fetch upload failed'), { http: fr.status }); }
+  const got = await Promise.race([p, _sleep(20000).then(() => null)]);
+  pendingUploads.delete(token);
+  if (got == null) throw new Error('Router could not reach the backup upload URL — check Settings → backup upload URL and that the router can reach the server on the overlay');
+  return got;
+}
 async function backupDevice(d, source) {
   const H = rosHeaders(d);
   const ros = (method, path, body) => restReq(d.mgmt_address, path, { headers: H, method, body, timeoutMs: 25000 });
   let text = '';
   // Strategy A: some RouterOS builds return the export inline in the response body
   try { const r = await ros('POST', '/rest/export', {}); if (r.status < 400) text = exportText(r.body); } catch {}
-  // Strategy B: export to a .rsc file on the router, then read that text file back (and clean it up)
+  // Strategy B: export to a .rsc file on the router, then retrieve it
   if (!text || !text.trim()) {
     const fname = 'netinv-backup';
     const ex = await ros('POST', '/rest/export', { file: fname });
     if (ex.status >= 400) throw Object.assign(new Error('export failed'), { http: ex.status });
-    await new Promise(r => setTimeout(r, 1500)); // give the router a moment to write the file
+    await _sleep(1500); // give the router a moment to write the file
     const fr = await ros('GET', '/rest/file');
     let files = []; if (fr.status < 400) { try { files = JSON.parse(fr.body); } catch {} }
     const f = (Array.isArray(files) ? files : []).find(x => (x.name || '') === fname + '.rsc' || (x.name || '').endsWith('/' + fname + '.rsc'));
     if (f) {
+      // B1: try reading the file's text contents over REST (works on some builds)
       text = f.contents || '';
       if ((!text || !text.trim()) && f['.id']) { const one = await ros('GET', '/rest/file/' + f['.id']); if (one.status < 400) { try { const o = JSON.parse(one.body); const obj = Array.isArray(o) ? o[0] : o; text = obj.contents || ''; } catch {} } }
+      // B2: if REST won't hand back contents, have the router push the file to us
+      if (!text || !text.trim()) {
+        const base = getSetting('backup_upload_base');
+        if (base) { try { text = await fetchUploadFromRouter(d, ros, base, f.name); } catch (e) { if (f['.id']) { try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {} } throw e; } }
+      }
       if (f['.id']) { try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {} } // tidy up flash
     }
   }
-  if (!text || !text.trim()) throw new Error('Empty export from device (router returned no config text)');
+  if (!text || !text.trim()) throw new Error('Router won\'t return config over REST — set the backup upload URL in Settings so the router can push the file');
   const stored = 'bak-' + d.id + '-' + Date.now() + '.rsc';
   writeFileSync(join(BACKUPS_DIR, stored), text);
   const size = Buffer.byteLength(text);
@@ -669,6 +690,17 @@ async function runWeeklyBackups(source) {
   const pruned = pruneOldBackups();
   return { ok, fail, pruned };
 }
+// Receiver for RouterOS /tool/fetch uploads — token-gated (no session; the router can't auth)
+app.post('/router-upload/:token', express.raw({ type: '*/*', limit: '35mb' }), (req, res) => {
+  const p = pendingUploads.get(req.params.token);
+  if (!p) return res.status(404).json({ error: 'unknown or expired token' });
+  let text = '';
+  if (Buffer.isBuffer(req.body)) text = req.body.toString('utf8');
+  else if (typeof req.body === 'string') text = req.body;
+  else if (req.body && typeof req.body === 'object') text = JSON.stringify(req.body);
+  p.resolve(text);
+  res.json({ ok: true });
+});
 app.get('/api/devices/:id/backups', requireNoc, (req, res) => {
   res.json(db.prepare('SELECT id, status, error, size, format, source, created_at FROM router_backups WHERE device_id=? ORDER BY datetime(created_at) DESC').all(req.params.id));
 });

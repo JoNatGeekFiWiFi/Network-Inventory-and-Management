@@ -1151,11 +1151,17 @@ async function renderSettings() {
       <button class="btn" onclick="regenWg()"><i class="ti ti-refresh"></i> Regenerate hub key</button></div>
       <div id="hubout"></div>
     </div>
-    <div class="help">After saving the WireGuard subnet, open a device → Management overlay → Provision on WireGuard to assign it a non-overlapping IP and download its config. Apply the device's <span class="mono">[Peer]</span> stanza to your hub.</div>`;
+    <div class="help">After saving the WireGuard subnet, open a device → Management overlay → Provision on WireGuard to assign it a non-overlapping IP and download its config. Apply the device's <span class="mono">[Peer]</span> stanza to your hub.</div>
+    <div class="card" style="padding:16px" id="bak">
+      <h2 style="margin-bottom:12px"><i class="ti ti-archive"></i> Router backups</h2>
+      ${field('Backup upload URL', 'backup_upload_base', s.backup_upload_base, { mono: true, ph: 'http://<server-overlay-ip>:3000' })}
+      <div class="help">Some RouterOS builds won't return a config export over REST, so the router uploads it to the platform instead. Set this to a URL where this server is reachable <b>from the routers</b> (i.e. the server's address on your management overlay/ZeroTier, with the app port). Leave blank if REST export works on your devices.</div>
+      <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" onclick="saveSettings()"><i class="ti ti-check"></i> Save</button></div>
+    </div>`;
 }
 async function saveSettings() {
-  const z = collect('#zt'), w = collect('#wg');
-  const d = Object.assign({}, z, w);
+  const z = collect('#zt'), w = collect('#wg'), bk = collect('#bak');
+  const d = Object.assign({}, z, w, bk);
   if (!d.zt_api_token) delete d.zt_api_token; // blank = keep existing
   try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
 }
