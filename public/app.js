@@ -1142,10 +1142,14 @@ async function renderBatch() {
     <div class="small sec-muted" style="margin:-6px 0 14px">Push a change to many MikroTik routers at once · runs over the management overlay.</div>
     <div class="card" style="padding:16px;overflow:visible" id="f">
       <div class="fld"><label class="fl">Operation</label>
-        <select name="op" onchange="batchOpChange()"><option value="change-password">Change user password</option><option value="add-user">Add user account</option></select></div>
-      <div class="grid2">${field('Username', 'name', '', { mono: true, ph: 'e.g. admin' })}${field('Password', 'password', '', { mono: true, ph: 'new password' })}</div>
-      <div class="fld" id="grpFld" style="display:none"><label class="fl">Group (for new user)</label>
-        <select name="group">${['full', 'write', 'read'].map(g => `<option value="${g}">${g}</option>`).join('')}</select></div>
+        <select name="op" onchange="batchOpChange()">
+          <option value="change-password">Change user password</option>
+          <option value="add-user">Add user account</option>
+          <option value="remove-user">Remove user account</option>
+          <option value="set-wifi">Set WiFi (SSID / password)</option>
+          <option value="add-firewall">Add firewall rule</option>
+        </select></div>
+      <div id="opFields"></div>
       <div class="hd" style="padding:8px 0 4px"><h2>Target routers</h2>
         <div style="display:flex;gap:8px"><input id="tfilter" placeholder="Filter…" oninput="renderTargets()" style="width:150px"/>
         <button class="btn sm" onclick="selAllTargets(true)">Select all</button><button class="btn sm" onclick="selAllTargets(false)">None</button></div></div>
@@ -1159,7 +1163,18 @@ async function renderBatch() {
     <div class="card">${jobRows || '<div class="row muted">No batch jobs yet</div>'}</div>`;
   batchOpChange(); renderTargets();
 }
-function batchOpChange() { const op = $('#f [name=op]').value; $('#grpFld').style.display = op === 'add-user' ? 'block' : 'none'; }
+function batchOpChange() {
+  const op = $('#f [name=op]').value, F = $('#opFields'); if (!F) return;
+  if (op === 'add-user') F.innerHTML = `<div class="grid2">${field('Username', 'name', '', { mono: true })}${field('Password', 'password', '', { mono: true })}</div>${field('Group', 'group', 'full', { type: 'select', options: ['full', 'write', 'read'] })}`;
+  else if (op === 'change-password') F.innerHTML = `<div class="grid2">${field('Username', 'name', '', { mono: true, ph: 'e.g. admin' })}${field('New password', 'password', '', { mono: true })}</div>`;
+  else if (op === 'remove-user') F.innerHTML = `${field('Username', 'name', '', { mono: true, ph: 'user to remove' })}<div class="help">Each router's own admin user is protected and will be skipped. Removing a user that isn't present is treated as success.</div>`;
+  else if (op === 'set-wifi') F.innerHTML = `<div class="grid2">${field('New SSID', 'ssid', '', { ph: 'leave blank to keep' })}${field('New WiFi password', 'password', '', { mono: true, ph: 'leave blank to keep' })}</div><div class="help">Applies to all WiFi radios on each router (e.g. 2.4 &amp; 5 GHz). Leave a field blank to leave it unchanged.</div>`;
+  else if (op === 'add-firewall') F.innerHTML = `<div class="grid2">${field('Chain', 'chain', 'input', { type: 'select', options: ['input', 'forward', 'output'] })}${field('Action', 'action', 'drop', { type: 'select', options: ['accept', 'drop', 'reject'] })}</div>
+    <div class="grid2">${field('Protocol', 'protocol', 'any', { type: 'select', options: ['any', 'tcp', 'udp', 'icmp'] })}${field('Dst. port', 'dst_port', '', { mono: true, ph: 'e.g. 23 or 8291' })}</div>
+    <div class="grid2">${field('Src. address', 'src_address', '', { mono: true, ph: 'e.g. 203.0.113.0/24' })}${field('Dst. address', 'dst_address', '', { mono: true })}</div>
+    <div class="grid2">${field('In-interface', 'in_interface', '', { mono: true, ph: 'optional, e.g. ether1' })}${field('Comment', 'comment', 'netinv batch')}</div>
+    <div class="help">Rule is appended to the chain. Order matters in RouterOS — put specific drops above any broad accept. Use a comment so you can find/manage it later.</div>`;
+}
 function batchVisible() { const q = ($('#tfilter').value || '').toLowerCase(); return (window._batchTargets || []).filter(t => !q || (t.name || '').toLowerCase().includes(q) || (t.group || '').toLowerCase().includes(q)); }
 function renderTargets() {
   const list = $('#targetList'); if (!list) return;
@@ -1178,18 +1193,22 @@ function batchResultCard(r) {
     <div style="flex:1;min-width:0"><div>${esc(x.device_name || ('device#' + x.device_id))}</div><div class="small sec-muted">${esc(x.detail || '')}</div></div></div>`).join('');
   return `<div class="card" style="margin-top:14px"><div class="hd"><h2>${esc(r.summary || r.op)}</h2><span class="small mono"><span style="color:var(--success)">${r.ok}✓</span> · <span style="color:var(--danger)">${r.fail}✗</span> / ${r.total}</span></div>${rows}</div>`;
 }
+const BATCH_LABELS = { 'add-user': 'Add user', 'change-password': 'Change password', 'remove-user': 'Remove user', 'set-wifi': 'Set WiFi', 'add-firewall': 'Add firewall rule' };
 async function runBatchOp() {
   const op = $('#f [name=op]').value;
-  const name = $('#f [name=name]').value.trim();
-  const password = $('#f [name=password]').value;
-  const groupEl = $('#f [name=group]'); const group = groupEl ? groupEl.value : 'full';
+  const params = collect('#opFields');
+  if (params.name) params.name = params.name.trim();
   const ids = Array.from(window._batchSel || []);
-  if (!name || !password) { toast('Enter username and password'); return; }
+  if ((op === 'add-user' || op === 'change-password') && (!params.name || !params.password)) { toast('Enter username and password'); return; }
+  if (op === 'remove-user' && !params.name) { toast('Enter a username'); return; }
+  if (op === 'set-wifi' && !params.ssid && !params.password) { toast('Enter an SSID and/or password'); return; }
+  if (op === 'add-firewall' && (!params.chain || !params.action)) { toast('Pick a chain and action'); return; }
   if (!ids.length) { toast('Select at least one router'); return; }
-  if (!confirm(`Run "${op === 'add-user' ? 'Add user' : 'Change password'}" for "${name}" on ${ids.length} router(s)?`)) return;
+  const extra = op === 'remove-user' ? ' — this removes the account' : '';
+  if (!confirm(`Run "${BATCH_LABELS[op]}" on ${ids.length} router(s)?${extra}`)) return;
   const out = $('#batchResults'); out.innerHTML = `<div class="card" style="margin-top:14px;padding:14px"><span class="muted">Running on ${ids.length} router(s)…</span></div>`;
   try {
-    const r = await api('/batch', { method: 'POST', body: JSON.stringify({ op, params: { name, password, group }, device_ids: ids }) });
+    const r = await api('/batch', { method: 'POST', body: JSON.stringify({ op, params, device_ids: ids }) });
     out.innerHTML = batchResultCard(r);
     toast(`Done · ${r.ok}/${r.total} ok`);
   } catch (e) { out.innerHTML = ''; toast(e.message); }

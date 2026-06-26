@@ -1410,6 +1410,35 @@ async function applyBatchOp(d, op, params) {
     if (r.status >= 400) throw new Error('HTTP ' + r.status + ' ' + String(r.body || '').slice(0, 160));
     return 'password changed for ' + params.name;
   }
+  if (op === 'remove-user') {
+    if (params.name === (d.admin_username || 'admin')) throw new Error('refusing to remove the platform admin user "' + params.name + '"');
+    const g = await ros('GET', '/rest/user?name=' + encodeURIComponent(params.name));
+    let users = []; try { users = JSON.parse(g.body); } catch {}
+    const u = (Array.isArray(users) ? users : []).find(x => x.name === params.name);
+    if (!u) return 'user "' + params.name + '" not present (nothing to do)';
+    const r = await ros('DELETE', '/rest/user/' + u['.id']);
+    if (r.status >= 400) throw new Error('HTTP ' + r.status + ' ' + String(r.body || '').slice(0, 160));
+    return 'removed user ' + params.name;
+  }
+  if (op === 'set-wifi') {
+    const wf = await readWifi(d);
+    if (!wf.system || !wf.radios.length) throw new Error('no WiFi on this device');
+    let n = 0;
+    for (const radio of wf.radios) { await writeWifi(d, { system: wf.system, id: radio.id, profile: radio.profile, profileId: radio.profileId, ssid: params.ssid, password: params.password }); n++; }
+    return 'updated ' + n + ' radio(s)' + (params.ssid ? ' · ssid=' + params.ssid : '') + (params.password ? ' · password set' : '');
+  }
+  if (op === 'add-firewall') {
+    const body = { chain: params.chain, action: params.action };
+    if (params.protocol && params.protocol !== 'any') body.protocol = params.protocol;
+    if (params.dst_port) body['dst-port'] = String(params.dst_port);
+    if (params.src_address) body['src-address'] = params.src_address;
+    if (params.dst_address) body['dst-address'] = params.dst_address;
+    if (params.in_interface) body['in-interface'] = params.in_interface;
+    body.comment = params.comment || 'netinv batch';
+    const r = await ros('PUT', '/rest/ip/firewall/filter', body);
+    if (r.status >= 400) throw new Error('HTTP ' + r.status + ' ' + String(r.body || '').slice(0, 160));
+    return body.chain + '/' + body.action + ' rule added';
+  }
   throw new Error('unknown op');
 }
 async function runBatch(op, params, deviceIds, actor) {
@@ -1429,7 +1458,13 @@ async function runBatch(op, params, deviceIds, actor) {
   await Promise.all(Array.from({ length: Math.min(5, devs.length) }, worker)); // limited concurrency
   results.sort((a, b) => String(a.device_name).localeCompare(String(b.device_name)));
   const ok = results.filter(r => r.status === 'ok').length, fail = results.length - ok;
-  const summary = (op === 'add-user' ? 'Add user ' : 'Change password ') + params.name;
+  const summary = ({
+    'add-user': 'Add user ' + params.name,
+    'change-password': 'Change password ' + params.name,
+    'remove-user': 'Remove user ' + params.name,
+    'set-wifi': 'Set WiFi' + (params.ssid ? ' "' + params.ssid + '"' : ' password'),
+    'add-firewall': 'Add firewall ' + params.chain + '/' + params.action
+  })[op] || op;
   const jid = db.prepare("INSERT INTO batch_jobs (op,summary,actor,total,ok,fail) VALUES (?,?,?,?,?,?)").run(op, summary, actor, results.length, ok, fail).lastInsertRowid;
   const ins = db.prepare("INSERT INTO batch_results (job_id,device_id,device_name,status,detail) VALUES (?,?,?,?,?)");
   for (const r of results) ins.run(jid, r.device_id, r.device_name, r.status, r.detail);
@@ -1458,14 +1493,21 @@ app.get('/api/batch/:id', requireNoc, (req, res) => {
 });
 app.post('/api/batch', requireNoc, async (req, res) => {
   const b = req.body || {};
-  if (!['add-user', 'change-password'].includes(b.op)) return res.status(400).json({ error: 'unknown operation' });
+  const OPS = ['add-user', 'change-password', 'remove-user', 'set-wifi', 'add-firewall'];
+  if (!OPS.includes(b.op)) return res.status(400).json({ error: 'unknown operation' });
   const ids = (b.device_ids || []).map(Number).filter(Boolean);
   if (!ids.length) return res.status(400).json({ error: 'Select at least one device' });
   const p = b.params || {};
-  if (!p.name || !p.password) return res.status(400).json({ error: 'Username and password are required' });
+  let err = '';
+  if (b.op === 'add-user' || b.op === 'change-password') { if (!p.name || !p.password) err = 'Username and password are required'; }
+  else if (b.op === 'remove-user') { if (!p.name) err = 'Username is required'; }
+  else if (b.op === 'set-wifi') { if (!p.ssid && !p.password) err = 'Enter a new SSID and/or password'; }
+  else if (b.op === 'add-firewall') { if (!p.chain || !p.action) err = 'Chain and action are required'; }
+  if (err) return res.status(400).json({ error: err });
   try {
     const out = await runBatch(b.op, p, ids, (req.user && req.user.email) || '');
-    audit(req, 'config_push', 'batch#' + out.id, `${b.op} ${p.name} — ${out.ok}/${out.total} ok`); // never log the password
+    const tag = p.name || p.ssid || (p.chain + '/' + p.action) || '';
+    audit(req, 'config_push', 'batch#' + out.id, `${b.op} ${tag} — ${out.ok}/${out.total} ok`); // never log secrets
     res.json(out);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
