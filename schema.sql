@@ -242,6 +242,8 @@ CREATE TABLE IF NOT EXISTS devices (
   interfaces_json TEXT,
   iface_roles_json TEXT,
   wifi_json TEXT,
+  enroll_pending INTEGER DEFAULT 0,
+  enrolled_at TEXT,
   last_polled TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -284,6 +286,26 @@ CREATE TABLE IF NOT EXISTS batch_results (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   job_id INTEGER NOT NULL REFERENCES batch_jobs(id) ON DELETE CASCADE,
   device_id INTEGER, device_name TEXT, status TEXT, detail TEXT
+);
+
+-- RouterOS package files (.npk) + per-device assignment (zero-touch provisioning)
+CREATE TABLE IF NOT EXISTS packages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT, filename TEXT, arch TEXT, version TEXT,
+  size INTEGER, stored_name TEXT NOT NULL, notes TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS device_packages (
+  device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
+  PRIMARY KEY (device_id, package_id)
+);
+
+-- Provisioning bench nodes (netinstall benches) — token-authenticated
+CREATE TABLE IF NOT EXISTS prov_nodes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT, token TEXT UNIQUE, location TEXT, last_seen TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Audit log (immutable trail)

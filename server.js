@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, extname } from 'node:path';
 import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, UPLOADS_DIR, BACKUPS_DIR } from './db.js';
+import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR } from './db.js';
 import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie } from './auth.js';
 import { hashPassword, verifyPassword } from './hash.js';
 import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseCidr } from './wg.js';
@@ -115,7 +115,7 @@ async function pushBlocklistToDevice(d) {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
-app.use(express.json({ limit: '30mb' })); // raised so base64 photo/PDF note attachments fit
+app.use(express.json({ limit: '60mb' })); // raised so base64 note attachments + .npk package uploads fit
 
 // First-run: create schema + seed if empty
 initSchema();
@@ -244,15 +244,22 @@ app.get('/api/settings', requireNoc, (req, res) => {
     wg_server_pub: getSetting('wg_server_pub') || '',
     backup_upload_base: getSetting('backup_upload_base') || '',
     public_base_url: getSetting('public_base_url') || '',
+    allow_auto_enroll: getSetting('allow_auto_enroll') === '1',
+    prov_wifi_ssid: getSetting('prov_wifi_ssid') || '',
     has_provision_token: !!getSetting('provision_token'),
+    has_prov_admin_password: !!getSetting('prov_admin_password'),
+    has_prov_wifi_password: !!getSetting('prov_wifi_password'),
     has_zt_api_token: !!getSetting('zt_api_token'),
     has_wg_server_priv: !!getSetting('wg_server_priv')
   });
 });
 app.put('/api/settings', requireNoc, (req, res) => {
   const b = req.body || {};
-  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns', 'backup_upload_base', 'public_base_url']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns', 'backup_upload_base', 'public_base_url', 'prov_wifi_ssid']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
   if (b.zt_api_token) setSetting('zt_api_token', String(b.zt_api_token).trim());
+  if (b.allow_auto_enroll !== undefined) setSetting('allow_auto_enroll', b.allow_auto_enroll ? '1' : '0');
+  if (b.prov_admin_password) setSetting('prov_admin_password', String(b.prov_admin_password));
+  if (b.prov_wifi_password) setSetting('prov_wifi_password', String(b.prov_wifi_password));
   if (!getSetting('provision_token')) setSetting('provision_token', randomUUID().replace(/-/g, '')); // shared secret for phone-home restore
   if (!getSetting('wg_server_priv')) { const kp = wgKeypair(); setSetting('wg_server_priv', kp.privateKey); setSetting('wg_server_pub', kp.publicKey); }
   audit(req, 'edit', 'settings', 'overlay settings');
@@ -847,6 +854,18 @@ function renderDefaultConfig(d) {
   L.push('/ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=1.1.1.1,8.8.8.8');
   L.push('/ip firewall nat add chain=srcnat action=masquerade out-interface=ether1 comment="netinv default NAT"');
   L.push('');
+  L.push('# --- WiFi (wifiwave2 — applies to all radios; e.g. hAP ax2) ---');
+  if (d.factory_wifi_ssid && d.factory_wifi_password) {
+    L.push(':do {');
+    L.push('  :foreach w in=[/interface/wifi find] do={');
+    L.push('    /interface/wifi set $w disabled=no configuration.mode=ap configuration.ssid="' + q(d.factory_wifi_ssid) + '" security.authentication-types=wpa2-psk,wpa3-psk security.passphrase="' + q(d.factory_wifi_password) + '"');
+    L.push('    /interface/bridge/port add bridge=bridge-lan interface=$w');
+    L.push('  }');
+    L.push('} on-error={}');
+  } else {
+    L.push('# (set the device\'s Factory WiFi SSID + password to include WiFi here)');
+  }
+  L.push('');
   L.push('# --- users ---');
   if (d.admin_password) L.push('/user set [find name=admin] password="' + q(d.admin_password) + '"');
   if (d.admin_username && d.admin_username !== 'admin' && d.admin_password) L.push('/user add name="' + q(d.admin_username) + '" password="' + q(d.admin_password) + '" group=full');
@@ -861,7 +880,7 @@ function renderDefaultConfig(d) {
   if (d.mgmt_overlay === 'WireGuard') L.push('/ip firewall filter add chain=input action=accept in-interface=wg-mgmt comment="allow mgmt overlay"');
   L.push('/ip firewall filter add chain=input action=drop in-interface=ether1 comment="drop other WAN input"');
   L.push('');
-  // WireGuard management overlay (only if provisioned)
+  // WireGuard management overlay (only if provisioned) — optional; AX2 manages over WAN/HTTPS instead
   if (d.mgmt_overlay === 'WireGuard' && d.wg_private_key && d.mgmt_address) {
     const hubPub = getSetting('wg_server_pub') || '';
     const ep = getSetting('wg_endpoint') || '';
@@ -872,34 +891,43 @@ function renderDefaultConfig(d) {
     if (hubPub && epHost) L.push('/interface wireguard peers add interface=wg-mgmt public-key="' + q(hubPub) + '" endpoint-address=' + q(epHost) + ' endpoint-port=' + q(epPort) + ' allowed-address=0.0.0.0/0 persistent-keepalive=25s');
     L.push('/ip address add address=' + q(d.mgmt_address) + '/32 interface=wg-mgmt');
     L.push('');
-  } else if (d.mgmt_overlay === 'ZeroTier') {
-    L.push('# NOTE: this device uses ZeroTier (a package, not configurable via .rsc). Install/join ZeroTier separately after restore.');
-    L.push('');
   }
-  // Phone-home restore script + startup scheduler
+  // Phone-home: install assigned packages, then restore latest backup — by serial, over WAN/HTTPS (no overlay needed)
+  const pkgs = db.prepare('SELECT p.* FROM device_packages dp JOIN packages p ON p.id=dp.package_id WHERE dp.device_id=? ORDER BY p.name').all(d.id);
   if (pub && token) {
-    const url = pub + '/provision/';
-    L.push('# --- phone-home restore (by serial number, which survives resets) ---');
-    L.push('/system script add name=netinv-restore owner=admin dont-require-permissions=no source={');
+    L.push('# --- phone-home: packages + config restore (by serial number, survives resets) ---');
+    L.push('/system script add name=netinv-init owner=admin dont-require-permissions=no source={');
     L.push('    :local n 0');
     L.push('    :while ($n < 30 && [:len [/ip route find where dst-address="0.0.0.0/0" active=yes]] = 0) do={ :delay 2s; :set n ($n + 1) }');
     L.push('    :local serial [/system routerboard get serial-number]');
-    L.push('    :local url ("' + url + '" . $serial . "?token=' + token + '")');
+    if (pkgs.length) {
+      L.push('    # install assigned packages not already present, then reboot to apply');
+      L.push('    :local need false');
+      for (const p of pkgs) {
+        const pname = q(p.name || (p.filename || '').replace(/\.npk$/i, '').split('-')[0]);
+        const fn = q(p.filename || (pname + '.npk'));
+        const purl = pub + '/provision/pkg/' + p.id + '?token=' + token;
+        L.push('    :if ([:len [/system package find where name="' + pname + '"]] = 0) do={ :do { /tool fetch url="' + purl + '" mode=https dst-path="' + fn + '"; :set need true } on-error={} }');
+      }
+      L.push('    :if ($need) do={ :delay 2s; /system reboot }');
+    }
+    L.push('    # restore the latest saved backup for this serial (if any)');
+    L.push('    :local url ("' + pub + '/provision/" . $serial . "?token=' + token + '")');
     L.push('    :do {');
     L.push('        /tool fetch url=$url mode=https dst-path=netinv-restore.rsc');
     L.push('        :delay 3s');
     L.push('        :if ([:len [/file find where name="netinv-restore.rsc"]] > 0) do={');
     L.push('            :if ([/file get [find name="netinv-restore.rsc"] size] > 40) do={');
     L.push('                /import file-name=netinv-restore.rsc');
-    L.push('                /system scheduler remove [find where name="netinv-restore"]');
+    L.push('                /system scheduler remove [find where name="netinv-init"]');
     L.push('            }');
     L.push('            /file remove [find where name="netinv-restore.rsc"]');
     L.push('        }');
     L.push('    } on-error={}');
     L.push('}');
-    L.push('/system scheduler add name=netinv-restore start-time=startup interval=0 on-event="/system script run netinv-restore" comment="netinv phone-home restore"');
+    L.push('/system scheduler add name=netinv-init start-time=startup interval=0 on-event="/system script run netinv-init" comment="netinv phone-home: packages + restore"');
   } else {
-    L.push('# NOTE: set Settings -> Provisioning (public URL + token) to embed the phone-home restore script.');
+    L.push('# NOTE: set Settings -> Zero-touch provisioning (public URL + token) to embed the phone-home script.');
   }
   L.push('');
   return L.join('\n');
@@ -914,6 +942,189 @@ app.get('/api/devices/:id/default-config', requireNoc, (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${(d.name || 'router').replace(/[^a-z0-9_-]+/gi, '_')}-default.rsc"`);
   res.send(text);
 });
+
+// ---- RouterOS package library (.npk) + per-device assignment ----
+app.get('/api/packages', requireNoc, (req, res) => {
+  res.json(db.prepare('SELECT id, name, filename, arch, version, size, notes, created_at FROM packages ORDER BY arch, name').all());
+});
+app.post('/api/packages', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!b.filename || !b.data) return res.status(400).json({ error: 'filename and file data required' });
+  if (!/\.npk$/i.test(b.filename)) return res.status(400).json({ error: 'file must be a RouterOS .npk package' });
+  let raw = String(b.data); const c = raw.indexOf(','); if (raw.startsWith('data:') && c !== -1) raw = raw.slice(c + 1);
+  let buf; try { buf = Buffer.from(raw, 'base64'); } catch { return res.status(400).json({ error: 'bad file data' }); }
+  if (!buf.length) return res.status(400).json({ error: 'empty file' });
+  // derive a default package name from the filename (e.g. wifiwave2-7.15-arm.npk -> wifiwave2)
+  const base = b.filename.replace(/\.npk$/i, '');
+  const name = b.name || base.split('-')[0];
+  const stored = randomUUID() + '.npk';
+  try { writeFileSync(join(PACKAGES_DIR, stored), buf); } catch { return res.status(500).json({ error: 'could not save file' }); }
+  const info = db.prepare('INSERT INTO packages (name, filename, arch, version, size, stored_name, notes) VALUES (?,?,?,?,?,?,?)')
+    .run(name, b.filename, N(b.arch), N(b.version), buf.length, stored, N(b.notes));
+  audit(req, 'create', 'package#' + info.lastInsertRowid, b.filename);
+  res.json({ id: info.lastInsertRowid });
+});
+app.delete('/api/packages/:id', requireNoc, (req, res) => {
+  const p = db.prepare('SELECT * FROM packages WHERE id=?').get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'not found' });
+  if (p.stored_name) { try { unlinkSync(join(PACKAGES_DIR, p.stored_name)); } catch {} }
+  db.prepare('DELETE FROM device_packages WHERE package_id=?').run(p.id);
+  db.prepare('DELETE FROM packages WHERE id=?').run(p.id);
+  audit(req, 'delete', 'package#' + p.id, p.filename);
+  res.json({ ok: true });
+});
+app.get('/api/devices/:id/packages', requireNoc, (req, res) => {
+  const assigned = db.prepare('SELECT package_id FROM device_packages WHERE device_id=?').all(req.params.id).map(r => r.package_id);
+  res.json({ assigned, available: db.prepare('SELECT id, name, filename, arch, version, size FROM packages ORDER BY arch, name').all() });
+});
+app.put('/api/devices/:id/packages', requireNoc, (req, res) => {
+  const ids = ((req.body || {}).package_ids || []).map(Number).filter(Boolean);
+  db.prepare('DELETE FROM device_packages WHERE device_id=?').run(req.params.id);
+  const ins = db.prepare('INSERT OR IGNORE INTO device_packages (device_id, package_id) VALUES (?,?)');
+  for (const pid of ids) ins.run(req.params.id, pid);
+  audit(req, 'edit', 'device#' + req.params.id, 'packages: ' + ids.length);
+  res.json({ ok: true });
+});
+// Serve a package to a phoning-home router (token-gated, no session)
+app.get('/provision/pkg/:id', (req, res) => {
+  const token = getSetting('provision_token');
+  if (!token || req.query.token !== token) return res.status(403).type('text/plain').send('# forbidden');
+  const p = db.prepare('SELECT * FROM packages WHERE id=?').get(req.params.id);
+  if (!p || !p.stored_name) return res.status(404).type('text/plain').send('# not found');
+  const fp = join(PACKAGES_DIR, p.stored_name);
+  if (!existsSync(fp)) return res.status(404).type('text/plain').send('# file missing');
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Length', statSync(fp).size);
+  res.setHeader('Content-Disposition', `attachment; filename="${(p.filename || 'package.npk').replace(/"/g, '')}"`);
+  createReadStream(fp).pipe(res);
+});
+
+// ---- provisioning bench nodes + auto-enroll ----
+// A request is "provisioning-authorized" if it carries the global provision token or a registered node token.
+function provAuth(req) {
+  const t = req.query.token || (req.body && req.body.token);
+  if (!t) return null;
+  if (getSetting('provision_token') && t === getSetting('provision_token')) return { kind: 'global' };
+  const node = db.prepare('SELECT * FROM prov_nodes WHERE token=?').get(t);
+  if (node) { db.prepare("UPDATE prov_nodes SET last_seen=datetime('now') WHERE id=?").run(node.id); return { kind: 'node', node }; }
+  return null;
+}
+app.get('/api/nodes', requireNoc, (req, res) => {
+  res.json(db.prepare('SELECT id, name, location, last_seen, created_at FROM prov_nodes ORDER BY name').all());
+});
+app.post('/api/nodes', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!b.name) return res.status(400).json({ error: 'Name required' });
+  const token = 'node_' + randomUUID().replace(/-/g, '');
+  const info = db.prepare('INSERT INTO prov_nodes (name, token, location) VALUES (?,?,?)').run(b.name, token, N(b.location));
+  audit(req, 'create', 'node#' + info.lastInsertRowid, b.name);
+  res.json({ id: info.lastInsertRowid, token }); // token shown once
+});
+app.delete('/api/nodes/:id', requireNoc, (req, res) => {
+  db.prepare('DELETE FROM prov_nodes WHERE id=?').run(req.params.id);
+  audit(req, 'delete', 'node#' + req.params.id);
+  res.json({ ok: true });
+});
+// Pending enrollments: auto-enrolled devices a tech still needs to finish setting up
+app.get('/api/enrollments', requireNoc, (req, res) => {
+  res.json(db.prepare(`SELECT d.id, d.name, d.serial, d.mac, d.status, d.enrolled_at, m.manufacturer, m.model
+    FROM devices d LEFT JOIN device_models m ON m.id=d.model_id
+    WHERE d.enroll_pending=1 ORDER BY datetime(d.enrolled_at) DESC`).all());
+});
+app.post('/api/devices/:id/enroll-clear', requireNoc, (req, res) => {
+  db.prepare('UPDATE devices SET enroll_pending=0 WHERE id=?').run(req.params.id);
+  audit(req, 'edit', 'device#' + req.params.id, 'cleared pending enrollment');
+  res.json({ ok: true });
+});
+// Auto-enroll: a freshly netinstalled router (or a node) registers a device by serial. GET or POST, token-gated.
+app.all('/enroll', express.urlencoded({ extended: false }), (req, res) => {
+  if (!provAuth(req)) return res.status(403).type('text/plain').send('# forbidden');
+  const g = k => String((req.query[k] != null ? req.query[k] : (req.body && req.body[k]) || '')).trim();
+  const serial = g('serial');
+  if (!serial) return res.status(400).type('text/plain').send('# serial required');
+  const model = g('model'), mac = g('mac'), identity = g('identity');
+  const existing = db.prepare('SELECT id FROM devices WHERE serial=? COLLATE NOCASE').get(serial);
+  if (existing) {
+    if (mac) db.prepare('UPDATE devices SET mac=COALESCE(NULLIF(mac,?),?) WHERE id=?').run('', mac, existing.id);
+    return res.type('text/plain').send('# ok existing ' + existing.id);
+  }
+  if (getSetting('allow_auto_enroll') !== '1') return res.status(403).type('text/plain').send('# auto-enroll disabled');
+  const mid = (db.prepare('SELECT id FROM device_models WHERE model=? COLLATE NOCASE OR (manufacturer||\' \'||model)=? COLLATE NOCASE').get(model, model) || {}).id || null;
+  const name = identity || model || ('Router ' + serial);
+  const info = db.prepare("INSERT INTO devices (name, model_id, serial, mac, status, management_mode, online, enroll_pending, enrolled_at) VALUES (?,?,?,?,?,?,0,1,datetime('now'))")
+    .run(name, mid, serial, N(mac), 'In stock', 'platform');
+  db.prepare('INSERT INTO audit_log (actor, role, action, target, details) VALUES (?,?,?,?,?)').run('provision', 'system', 'enroll', 'device#' + info.lastInsertRowid, serial + ' ' + (model || ''));
+  res.type('text/plain').send('# ok created ' + info.lastInsertRowid);
+});
+// Node-facing: list packages for an architecture (the base .npk set to netinstall)
+app.get('/node/packages', (req, res) => {
+  if (!provAuth(req)) return res.status(403).json({ error: 'forbidden' });
+  const arch = String(req.query.arch || '').trim();
+  const base = (getSetting('public_base_url') || '').replace(/\/+$/, '');
+  const tok = req.query.token;
+  const rows = db.prepare(arch ? 'SELECT * FROM packages WHERE arch=? COLLATE NOCASE ORDER BY name' : 'SELECT * FROM packages ORDER BY name').all(...(arch ? [arch] : []));
+  res.json(rows.map(p => ({ id: p.id, filename: p.filename, name: p.name, arch: p.arch, size: p.size, url: base + '/provision/pkg/' + p.id + '?token=' + tok })));
+});
+// Node-facing: generic default config to apply during netinstall (no specific device; unit self-enrolls by serial on boot)
+app.get('/node/default-config', (req, res) => {
+  if (!provAuth(req)) return res.status(403).type('text/plain').send('# forbidden');
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.send(renderGenericConfig());
+});
+function renderGenericConfig() {
+  const pub = (getSetting('public_base_url') || '').replace(/\/+$/, '');
+  const token = getSetting('provision_token') || '';
+  const q = s => String(s == null ? '' : s).replace(/"/g, '');
+  const adminPw = getSetting('prov_admin_password') || '';
+  const ssid = getSetting('prov_wifi_ssid') || '';
+  const wpw = getSetting('prov_wifi_password') || '';
+  const L = [];
+  L.push('# NetInv generic provisioning config (applied during Netinstall; unit self-enrolls by serial on boot)');
+  L.push('# Generated ' + new Date().toISOString());
+  L.push('/ip dhcp-client add interface=ether1 disabled=no comment="WAN"');
+  L.push('/interface bridge add name=bridge-lan');
+  L.push(':foreach i in=[/interface ethernet find where name!="ether1"] do={ /interface bridge port add bridge=bridge-lan interface=$i }');
+  L.push('/ip address add address=192.168.88.1/24 interface=bridge-lan');
+  L.push('/ip pool add name=lan-pool ranges=192.168.88.10-192.168.88.254');
+  L.push('/ip dhcp-server add name=lan-dhcp interface=bridge-lan address-pool=lan-pool disabled=no');
+  L.push('/ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=1.1.1.1,8.8.8.8');
+  L.push('/ip firewall nat add chain=srcnat action=masquerade out-interface=ether1 comment="netinv default NAT"');
+  if (ssid && wpw) {
+    L.push(':do { :foreach w in=[/interface/wifi find] do={ /interface/wifi set $w disabled=no configuration.mode=ap configuration.ssid="' + q(ssid) + '" security.authentication-types=wpa2-psk,wpa3-psk security.passphrase="' + q(wpw) + '"; /interface/bridge/port add bridge=bridge-lan interface=$w } } on-error={}');
+  }
+  if (adminPw) L.push('/user set [find name=admin] password="' + q(adminPw) + '"');
+  L.push('/ip firewall filter add chain=input action=accept connection-state=established,related');
+  L.push('/ip firewall filter add chain=input action=drop connection-state=invalid');
+  L.push('/ip firewall filter add chain=input action=drop src-address-list=netinv-blocklist comment="netinv auto-block"');
+  L.push('/ip firewall filter add chain=input action=accept protocol=icmp');
+  L.push('/ip firewall filter add chain=input action=accept in-interface=bridge-lan comment="allow LAN"');
+  L.push('/ip firewall filter add chain=input action=drop in-interface=ether1 comment="drop other WAN input"');
+  if (pub && token) {
+    L.push('/system script add name=netinv-init owner=admin dont-require-permissions=no source={');
+    L.push('    :local n 0');
+    L.push('    :while ($n < 30 && [:len [/ip route find where dst-address="0.0.0.0/0" active=yes]] = 0) do={ :delay 2s; :set n ($n + 1) }');
+    L.push('    :local serial [/system routerboard get serial-number]');
+    L.push('    :local board [/system resource get board-name]');
+    L.push('    :local mac ""');
+    L.push('    :do { :set mac [/interface ethernet get [find default-name=ether1] mac-address] } on-error={}');
+    L.push('    # self-enroll into inventory by serial');
+    L.push('    :do { /tool fetch http-method=post mode=https keep-result=no url="' + pub + '/enroll?token=' + token + '" http-data=("serial=" . $serial . "&model=" . $board . "&mac=" . $mac) } on-error={}');
+    L.push('    # then restore the latest saved backup for this serial (if any)');
+    L.push('    :local url ("' + pub + '/provision/" . $serial . "?token=' + token + '")');
+    L.push('    :do {');
+    L.push('        /tool fetch url=$url mode=https dst-path=netinv-restore.rsc');
+    L.push('        :delay 3s');
+    L.push('        :if ([:len [/file find where name="netinv-restore.rsc"]] > 0) do={');
+    L.push('            :if ([/file get [find name="netinv-restore.rsc"] size] > 40) do={ /import file-name=netinv-restore.rsc; /system scheduler remove [find where name="netinv-init"] }');
+    L.push('            /file remove [find where name="netinv-restore.rsc"]');
+    L.push('        }');
+    L.push('    } on-error={}');
+    L.push('}');
+    L.push('/system scheduler add name=netinv-init start-time=startup interval=0 on-event="/system script run netinv-init" comment="netinv enroll + restore"');
+  }
+  L.push('');
+  return L.join('\n');
+}
 
 // Fetch from ZeroTier Central with a timeout so a slow/hung call can't stall a request
 async function ztFetch(path, token, ms = 15000) {
@@ -1553,6 +1764,8 @@ app.put('/api/devices/:id', (req, res) => {
   for (const c of credCols) { if (b[c]) { sets.push(`${c}=?`); vals.push(b[c]); } }
   vals.push(req.params.id);
   db.prepare(`UPDATE devices SET ${sets.join(', ')} WHERE id=?`).run(...vals);
+  // finishing setup (assigning to a site/POP) clears the pending-enrollment flag
+  if (b.assigned_site_id || b.assigned_pop_id) db.prepare('UPDATE devices SET enroll_pending=0 WHERE id=?').run(req.params.id);
   audit(req, 'edit', 'device#' + req.params.id, b.name || existing.name);
   res.json({ ok: true });
 });

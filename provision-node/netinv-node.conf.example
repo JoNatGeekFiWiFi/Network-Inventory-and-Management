@@ -1,0 +1,8 @@
+# NetInv provisioning-node config — copy to /etc/netinv-node.conf and edit.
+PLATFORM=https://management.geekitek.com
+NODE_TOKEN=node_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx   # from the platform: Settings → Provisioning nodes
+IFACE=eth1                                          # NIC facing the netPower 16P bench switch
+ARCH=arm64                                          # router architecture (hAP ax2 = arm64; older = arm/mipsbe)
+STATIC_IP=192.168.88.2/24                           # node IP on the bench segment
+# NETINSTALL=/usr/local/bin/netinstall-cli          # path to netinstall-cli if not on PATH
+# WORK=/var/lib/netinv-node                          # scratch dir for downloaded artifacts

@@ -47,6 +47,7 @@ function setupHeader() {
   $('#navZt').style.display = isPriv() ? '' : 'none';
   $('#navBlock').style.display = isPriv() ? '' : 'none';
   $('#navBatch').style.display = isPriv() ? '' : 'none';
+  $('#navPackages').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
 }
 function toast(msg) {
@@ -130,6 +131,7 @@ async function route() {
     if (p[0] === 'blocklist') { setNav('blocklist'); return await renderBlocklist(); }
     if (p[0] === 'batch' && p[1]) { setNav('batch'); return await renderBatchJob(p[1]); }
     if (p[0] === 'batch') { setNav('batch'); return await renderBatch(); }
+    if (p[0] === 'packages') { setNav('packages'); return await renderPackages(); }
     view().innerHTML = '<div class="card" style="padding:20px">Not found</div>';
   } catch (e) { if (e.message === 'auth') return; view().innerHTML = `<div class="card" style="padding:20px">Error: ${esc(e.message)}</div>`; }
 }
@@ -561,13 +563,27 @@ async function saveCust(id) {
 // ---------- Inventory ----------
 async function renderInventory() {
   const devs = await api('/devices');
+  let pending = []; if (isPriv()) { try { pending = await api('/enrollments'); } catch {} }
+  const pendCard = pending.length ? `<div class="card" style="margin-top:14px;border:1px solid var(--info)">
+    <div class="hd"><h2><i class="ti ti-sparkles" style="color:var(--info)"></i> Pending enrollments · ${pending.length}</h2></div>
+    ${pending.map(d => `<div class="row">
+      <i class="ti ti-router sec-muted"></i>
+      <div style="flex:1;min-width:0"><div>${esc(d.name)} ${d.manufacturer || d.model ? `· ${esc(d.manufacturer || '')} ${esc(d.model || '')}` : ''}</div>
+        <div class="small mono sec-muted">SN ${esc(d.serial || '—')}${d.mac ? ' · ' + esc(d.mac) : ''} · enrolled ${esc(d.enrolled_at || '')}</div></div>
+      <a class="btn sm" href="#/device/${d.id}/edit"><i class="ti ti-settings"></i> Set up</a>
+      <button class="btn sm" onclick="clearEnroll(${d.id})" title="Mark set up"><i class="ti ti-check"></i></button></div>`).join('')}
+    <div class="help" style="padding:8px 14px">Auto-enrolled from the provisioning bench. Assign each to a site/POP and set its details; assigning (or clicking ✓) clears it from this list.</div></div>` : '';
   const rows = devs.map(d => `<div class="row rowlink" onclick="location.hash='#/device/${d.id}'">
     <i class="ti ti-${iconFor(d.device_type)} sec-muted"></i>
-    <div style="flex:1;min-width:0"><div>${esc(d.name)} · ${esc(d.manufacturer || '')} ${esc(d.model || '')}</div>
+    <div style="flex:1;min-width:0"><div>${esc(d.name)} · ${esc(d.manufacturer || '')} ${esc(d.model || '')} ${d.enroll_pending ? '<span class="tag" style="background:var(--info-bg);color:var(--info)">new</span>' : ''}</div>
       <div class="small sec-muted">${esc(d.management_mode === 'provider' ? 'Provider-managed' : 'Platform-managed')} · owned by ${esc(d.ownership)}</div></div>
     <span class="tag">${esc(d.status)}</span>${statusPill(d.online ? 'Online' : 'Offline')}<i class="ti ti-chevron-right muted"></i></div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Inventory</h1><a class="btn" href="#/device/new"><i class="ti ti-plus"></i> Add hardware</a></div>
+    ${pendCard}
     <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No devices</div>'}</div>`;
+}
+async function clearEnroll(id) {
+  try { await api('/devices/' + id + '/enroll-clear', { method: 'POST' }); toast('Marked set up'); renderInventory(); } catch (e) { toast(e.message); }
 }
 
 // ---------- Device detail ----------
@@ -1221,10 +1237,50 @@ async function renderBatchJob(id) {
     ${batchResultCard(j)}`;
 }
 
+// ---------- Packages library (RouterOS .npk) ----------
+async function renderPackages() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const list = await api('/packages');
+  const rows = list.map(p => `<div class="row">
+    <i class="ti ti-package sec-muted"></i>
+    <div style="flex:1;min-width:0"><div>${esc(p.name || p.filename)} ${p.arch ? `<span class="tag">${esc(p.arch)}</span>` : ''}${p.version ? ` <span class="small sec-muted">${esc(p.version)}</span>` : ''}</div>
+      <div class="small mono sec-muted">${esc(p.filename)} · ${fmtSize(p.size)}${p.notes ? ' · ' + esc(p.notes) : ''}</div></div>
+    <button class="btn sm" onclick="delPackage(${p.id})"><i class="ti ti-trash"></i></button></div>`).join('');
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Packages</h1></div>
+    <div class="small sec-muted" style="margin:-6px 0 14px">RouterOS <span class="mono">.npk</span> packages routers can auto-install during zero-touch provisioning.</div>
+    <div class="card" style="padding:16px" id="pf">
+      <div class="grid2">${field('Package name', 'name', '', { mono: true, ph: 'e.g. wifiwave2 (RouterOS package name)' })}${field('Architecture', 'arch', '', { mono: true, ph: 'e.g. arm, arm64, mipsbe' })}</div>
+      <div class="grid2">${field('Version (optional)', 'version', '', { mono: true, ph: 'e.g. 7.15' })}${field('Notes (optional)', 'notes', '')}</div>
+      <div class="fld"><label class="fl">.npk file</label>
+        <label class="btn sm" style="cursor:pointer;display:inline-flex"><i class="ti ti-upload"></i> Choose .npk<input type="file" id="npkFile" accept=".npk" style="display:none" onchange="document.getElementById('npkName').textContent=this.files[0]?this.files[0].name:''"></label>
+        <span id="npkName" class="small sec-muted" style="margin-left:8px"></span></div>
+      <div style="display:flex;justify-content:flex-end"><button class="btn primary" onclick="uploadPackage()"><i class="ti ti-check"></i> Upload</button></div>
+    </div>
+    <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No packages yet — upload a .npk above.</div>'}</div>
+    <div class="help">The package <b>name</b> must match the RouterOS package name (it's used to check if the router already has it). Assign packages to a device on its Config backups page.</div>`;
+}
+async function uploadPackage() {
+  const f = $('#npkFile').files[0];
+  if (!f) { toast('Choose a .npk file'); return; }
+  if (!/\.npk$/i.test(f.name)) { toast('Must be a .npk file'); return; }
+  const d = collect('#pf');
+  toast('Uploading package…');
+  try {
+    const data = await fileToDataUrl(f);
+    await api('/packages', { method: 'POST', body: JSON.stringify({ filename: f.name, name: d.name, arch: d.arch, version: d.version, notes: d.notes, data }) });
+    toast('Uploaded'); renderPackages();
+  } catch (e) { toast(e.message); }
+}
+async function delPackage(id) {
+  if (!confirm('Delete this package? It will be unassigned from all devices.')) return;
+  try { await api('/packages/' + id, { method: 'DELETE' }); toast('Deleted'); renderPackages(); } catch (e) { toast(e.message); }
+}
+
 // ---------- Settings: management overlays (NOC/Admin) ----------
 async function renderSettings() {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
   const s = await api('/settings');
+  let nodes = []; try { nodes = await api('/nodes'); } catch {}
   view().innerHTML = `<h1>Settings</h1><div class="small sec-muted" style="margin:4px 0 14px">Management network &amp; overlays</div>
     <div class="card" style="padding:16px" id="zt">
       <h2 style="margin-bottom:12px"><i class="ti ti-network"></i> ZeroTier</h2>
@@ -1259,10 +1315,24 @@ async function renderSettings() {
       ${field('Public server URL', 'public_base_url', s.public_base_url, { mono: true, ph: 'https://management.geekitek.com' })}
       <div class="fld"><label class="fl">Provision token</label>
         <input value="${s.has_provision_token ? '•••••••• (set)' : '(generated on save)'}" readonly style="font-family:var(--mono);background:var(--surface2)"/>
-        <div class="help">Shared secret embedded in the default-config phone-home script. Routers present it (with their serial) to fetch their saved backup after a reset.</div></div>
+        <div class="help">Shared secret embedded in the phone-home/enroll scripts. Routers present it (with their serial) to enroll and fetch their config.</div></div>
+      <label class="row" style="cursor:pointer;padding:6px 0"><input type="checkbox" id="autoEnroll" ${s.allow_auto_enroll ? 'checked' : ''} style="width:auto"/>
+        <div style="flex:1"><div>Allow auto-enroll</div><div class="small sec-muted">Newly netinstalled routers that phone home (valid token) get added to inventory automatically.</div></div></label>
+      <div class="grid2">${field('Bench WiFi SSID', 'prov_wifi_ssid', s.prov_wifi_ssid, { ph: 'optional, for generic config' })}${field('Bench WiFi password', 'prov_wifi_password', '', { mono: true, ph: s.has_prov_wifi_password ? 'unchanged' : 'optional' })}</div>
+      ${field('Generic admin password', 'prov_admin_password', '', { mono: true, ph: s.has_prov_admin_password ? 'unchanged' : 'admin password for fresh units' })}
       <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap"><button class="btn primary" onclick="saveProv()"><i class="ti ti-check"></i> Save</button>
       <button class="btn" onclick="regenProv()"><i class="ti ti-refresh"></i> Regenerate token</button></div>
-      <div class="help">Set the public URL (reachable from devices' WAN, over HTTPS), then download a device's <b>default config</b> from its Config backups page and load it via Netinstall. After a reset the router phones home by serial number and restores its latest backup.</div>
+      <div class="help">Set the public URL (reachable from devices' WAN over HTTPS). Per-device default configs are on each device's Config backups page; the provisioning node uses the generic config + these bench WiFi/admin defaults.</div>
+    </div>
+    <div class="card" style="padding:16px" id="nodes">
+      <h2 style="margin-bottom:12px"><i class="ti ti-server-cog"></i> Provisioning nodes (Netinstall benches)</h2>
+      ${nodes.map(n => `<div class="row"><i class="ti ti-server-2 sec-muted"></i>
+        <div style="flex:1;min-width:0"><div>${esc(n.name)}</div><div class="small sec-muted">${esc(n.location || '')}${n.last_seen ? ' · last seen ' + esc(n.last_seen) : ' · never connected'}</div></div>
+        <button class="btn sm" onclick="delNode(${n.id})"><i class="ti ti-trash"></i></button></div>`).join('') || '<div class="row muted">No provisioning nodes yet</div>'}
+      <div class="box" style="margin-top:10px"><div class="grid2">${field('Node name', 'nodename', '', { ph: 'e.g. Bench-1' })}${field('Location', 'nodeloc', '', { ph: 'optional' })}</div>
+        <div style="display:flex;justify-content:flex-end"><button class="btn" onclick="addNode()"><i class="ti ti-plus"></i> Add node</button></div></div>
+      <div id="nodeTok"></div>
+      <div class="help">Each bench node uses its token to pull packages + the generic config and to enroll devices. The token is shown once when created.</div>
     </div>`;
 }
 async function saveSettings() {
@@ -1273,7 +1343,25 @@ async function saveSettings() {
 }
 async function saveProv() {
   const d = collect('#prov');
+  d.allow_auto_enroll = $('#autoEnroll').checked;
+  if (!d.prov_wifi_password) delete d.prov_wifi_password;
+  if (!d.prov_admin_password) delete d.prov_admin_password;
   try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
+}
+async function addNode() {
+  const d = collect('#nodes');
+  if (!d.nodename) { toast('Enter a node name'); return; }
+  try {
+    const r = await api('/nodes', { method: 'POST', body: JSON.stringify({ name: d.nodename, location: d.nodeloc }) });
+    const box = $('#nodeTok');
+    if (box) box.innerHTML = `<div class="box" style="margin-top:10px;border:1px solid var(--info)"><div class="small sec-muted" style="margin-bottom:4px">Node token (copy now — shown once):</div>
+      <textarea readonly rows="2" style="font-family:var(--mono);font-size:12px">${esc(r.token)}</textarea></div>`;
+    toast('Node added · copy the token now');
+  } catch (e) { toast(e.message); }
+}
+async function delNode(id) {
+  if (!confirm('Delete this provisioning node? Its token stops working.')) return;
+  try { await api('/nodes/' + id, { method: 'DELETE' }); toast('Deleted'); renderSettings(); } catch (e) { toast(e.message); }
 }
 async function regenProv() {
   if (!confirm('Regenerate the provision token? You must re-download and re-flash default configs that embed the old token.')) return;
@@ -1449,7 +1537,26 @@ async function renderDeviceBackups(id) {
     <div class="help">RouterOS text export (.rsc). Download to keep offline or to restore on the device. Backups older than 6 months are removed automatically.</div>
     <div class="card" style="margin-top:14px"><div class="hd"><h2><i class="ti ti-rocket"></i> Default config (Netinstall)</h2>
       <a class="btn sm" href="/api/devices/${id}/default-config"><i class="ti ti-download"></i> Download .rsc</a></div>
-      <div class="help" style="padding:8px 14px">Load this as the <b>default configuration</b> via Netinstall so it survives the reset button. It sets up users, the management overlay, a baseline firewall, and a phone-home script: after a reset the router identifies by serial number and restores its latest backup automatically. Requires Settings → Zero-touch provisioning (public URL + token) and at least one backup on file. ${d.serial ? '' : '<b style="color:var(--warning)">Poll this device first so its serial number is on file — the phone-home matches by serial.</b>'}</div></div>`;
+      <div class="help" style="padding:8px 14px">Load this as the <b>default configuration</b> via Netinstall so it survives the reset button. It sets up users, WiFi, a baseline firewall, and a phone-home script: after a reset the router installs its assigned packages then restores its latest backup automatically (by serial number, over WAN/HTTPS — no overlay needed). Requires Settings → Zero-touch provisioning (public URL + token). ${d.serial ? '' : '<b style="color:var(--warning)">Poll this device first so its serial number is on file — the phone-home matches by serial.</b>'}</div></div>
+    <div class="card" style="margin-top:14px"><div class="hd"><h2><i class="ti ti-package"></i> Assigned packages</h2><a class="btn sm" href="#/packages"><i class="ti ti-external-link"></i> Library</a></div>
+      <div id="pkgAssign"><div class="row muted">Loading…</div></div></div>`;
+  loadDevicePackages(id);
+}
+async function loadDevicePackages(id) {
+  const box = $('#pkgAssign'); if (!box) return;
+  try {
+    const r = await api('/devices/' + id + '/packages');
+    window._devPkgSel = new Set(r.assigned || []); window._devPkgId = id;
+    if (!r.available.length) { box.innerHTML = '<div class="row muted">No packages in the library yet — add some under Packages.</div>'; return; }
+    box.innerHTML = r.available.map(p => `<label class="row" style="cursor:pointer">
+      <input type="checkbox" ${window._devPkgSel.has(p.id) ? 'checked' : ''} onchange="toggleDevPkg(${p.id},this.checked)" style="width:auto"/>
+      <div style="flex:1;min-width:0"><div>${esc(p.name || p.filename)} ${p.arch ? `<span class="tag">${esc(p.arch)}</span>` : ''}</div><div class="small mono sec-muted">${esc(p.filename)} · ${fmtSize(p.size)}</div></div></label>`).join('')
+      + `<div style="display:flex;justify-content:flex-end;padding:10px 14px"><button class="btn sm primary" onclick="saveDevPkgs()"><i class="ti ti-check"></i> Save assignments</button></div>`;
+  } catch (e) { box.innerHTML = '<div class="row muted">' + esc(e.message) + '</div>'; }
+}
+function toggleDevPkg(id, on) { const s = window._devPkgSel; if (on) s.add(id); else s.delete(id); }
+async function saveDevPkgs() {
+  try { await api('/devices/' + window._devPkgId + '/packages', { method: 'PUT', body: JSON.stringify({ package_ids: Array.from(window._devPkgSel || []) }) }); toast('Saved · re-download the default config to embed them'); } catch (e) { toast(e.message); }
 }
 async function diagnoseBackup(id) {
   const box = $('#bakDiag'); if (box) box.innerHTML = '<div class="card" style="margin-top:14px;padding:14px" class="muted">Running diagnostics on the router…</div>';

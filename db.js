@@ -14,6 +14,9 @@ try { mkdirSync(UPLOADS_DIR, { recursive: true }); } catch {}
 // Router config backups (.rsc) also ride the data volume
 export const BACKUPS_DIR = process.env.BACKUPS_DIR || join(dirname(DB_PATH), 'backups');
 try { mkdirSync(BACKUPS_DIR, { recursive: true }); } catch {}
+// RouterOS package files (.npk) for zero-touch provisioning
+export const PACKAGES_DIR = process.env.PACKAGES_DIR || join(dirname(DB_PATH), 'packages');
+try { mkdirSync(PACKAGES_DIR, { recursive: true }); } catch {}
 
 export const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA journal_mode = WAL;');
@@ -46,6 +49,8 @@ export function migrate() {
   ensure('devices', 'interfaces_json', 'TEXT');
   ensure('devices', 'iface_roles_json', 'TEXT');
   ensure('devices', 'wifi_json', 'TEXT');
+  ensure('devices', 'enroll_pending', 'INTEGER DEFAULT 0');
+  ensure('devices', 'enrolled_at', 'TEXT');
   ensure('devices', 'last_polled', 'TEXT');
   ensure('pops', 'current_mgmt_ip', 'TEXT');
   ensure('pops', 'current_public_ip', 'TEXT');
@@ -72,6 +77,11 @@ export function migrate() {
   db.exec("CREATE TABLE IF NOT EXISTS batch_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT, summary TEXT, actor TEXT, total INTEGER, ok INTEGER, fail INTEGER, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
   db.exec("CREATE TABLE IF NOT EXISTS batch_results (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, device_id INTEGER, device_name TEXT, status TEXT, detail TEXT)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_batchres ON batch_results(job_id)");
+  // RouterOS package files (.npk) + per-device assignment for zero-touch provisioning
+  db.exec("CREATE TABLE IF NOT EXISTS packages (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, filename TEXT, arch TEXT, version TEXT, size INTEGER, stored_name TEXT NOT NULL, notes TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  db.exec("CREATE TABLE IF NOT EXISTS device_packages (device_id INTEGER NOT NULL, package_id INTEGER NOT NULL, PRIMARY KEY (device_id, package_id))");
+  // Provisioning bench nodes (netinstall benches) — token-authenticated
+  db.exec("CREATE TABLE IF NOT EXISTS prov_nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, token TEXT UNIQUE, location TEXT, last_seen TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.
