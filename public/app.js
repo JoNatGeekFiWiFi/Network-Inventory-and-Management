@@ -106,6 +106,7 @@ async function route() {
     if (p[0] === 'pop' && p[2] === 'circuit' && p[3]) { setNav('sites'); return await formPopCircuit({ popId: p[1], id: p[3] }); }
     if (p[0] === 'pop') { setNav('sites'); return await renderPop(p[1]); }
     if (p[0] === 'accounts') { setNav('accounts'); return await renderCustomers(); }
+    if (p[0] === 'customers') { setNav('customers'); return await renderCustomerList(); }
     if (p[0] === 'account' && p[1] === 'new') { setNav('accounts'); return await formCustomer({}); }
     if (p[0] === 'account' && p[2] === 'edit') { setNav('accounts'); return await formCustomer({ id: p[1] }); }
     if (p[0] === 'account') { setNav('accounts'); return await renderCustomer(p[1]); }
@@ -511,7 +512,18 @@ async function renderCustomer(id) {
     ${a.sites.length ? `<div class="card"><div class="hd"><h2>All sites · ${a.sites.length}</h2></div>${sites}</div>` : ''}`;
 }
 
-// ---------- Customer (under an account; owns sites) ----------
+// ---------- Customers (end clients; served by one or more accounts) ----------
+async function renderCustomerList() {
+  const list = await api('/customers');
+  const rows = list.map(c => `<div class="row rowlink" onclick="location.hash='#/customer/${c.id}'">
+    <div class="av">${initials(c.name)}</div>
+    <div style="flex:1;min-width:0"><div>${esc(c.name)}</div><div class="small sec-muted">${esc(c.account_names || 'no account')}</div></div>
+    <span class="small sec-muted">${c.site_count} site${c.site_count == 1 ? '' : 's'}</span>
+    ${statusPill(c.status)}<i class="ti ti-chevron-right muted"></i></div>`).join('');
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Customers</h1>${isPriv() ? '<a class="btn" href="#/customer/new"><i class="ti ti-plus"></i> Add customer</a>' : ''}</div>
+    <div class="small sec-muted" style="margin:-6px 0 14px">End clients. A customer can be served by one or more accounts.</div>
+    <div class="card">${rows || '<div class="row muted">No customers yet</div>'}</div>`;
+}
 async function renderCust(id) {
   const c = await api('/customers/' + id);
   const sites = c.sites.map(s => `<div class="row rowlink" onclick="location.hash='#/site/${s.id}'">
