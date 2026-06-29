@@ -40,14 +40,22 @@ CREATE TABLE IF NOT EXISTS accounts (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Customers live under an account; a customer can own many sites
+-- Customers (end clients). account_id kept as a legacy "primary" account; the real
+-- account⇄customer relationship is many-to-many via account_customers.
 CREATE TABLE IF NOT EXISTS customers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
   name TEXT NOT NULL,
   status TEXT DEFAULT 'Active',
   notes TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Accounts <-> Customers: many-to-many (account serves many customers; customer served by many accounts)
+CREATE TABLE IF NOT EXISTS account_customers (
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  PRIMARY KEY (account_id, customer_id)
 );
 
 CREATE TABLE IF NOT EXISTS account_contacts (

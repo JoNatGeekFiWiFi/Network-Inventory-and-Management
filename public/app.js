@@ -105,13 +105,13 @@ async function route() {
     if (p[0] === 'pop' && p[2] === 'circuit' && p[3] === 'new') { setNav('sites'); return await formPopCircuit({ popId: p[1] }); }
     if (p[0] === 'pop' && p[2] === 'circuit' && p[3]) { setNav('sites'); return await formPopCircuit({ popId: p[1], id: p[3] }); }
     if (p[0] === 'pop') { setNav('sites'); return await renderPop(p[1]); }
-    if (p[0] === 'customers') { setNav('customers'); return await renderCustomers(); }
-    if (p[0] === 'customer' && p[1] === 'new') { setNav('customers'); return await formCustomer({}); }
-    if (p[0] === 'customer' && p[2] === 'edit') { setNav('customers'); return await formCustomer({ id: p[1] }); }
-    if (p[0] === 'customer') { setNav('customers'); return await renderCustomer(p[1]); }
-    if (p[0] === 'cust' && p[1] === 'new') { setNav('customers'); return await formCust(q); }
-    if (p[0] === 'cust' && p[2] === 'edit') { setNav('customers'); return await formCust({ id: p[1] }); }
-    if (p[0] === 'cust') { setNav('customers'); return await renderCust(p[1]); }
+    if (p[0] === 'accounts') { setNav('accounts'); return await renderCustomers(); }
+    if (p[0] === 'account' && p[1] === 'new') { setNav('accounts'); return await formCustomer({}); }
+    if (p[0] === 'account' && p[2] === 'edit') { setNav('accounts'); return await formCustomer({ id: p[1] }); }
+    if (p[0] === 'account') { setNav('accounts'); return await renderCustomer(p[1]); }
+    if (p[0] === 'customer' && p[1] === 'new') { setNav('accounts'); return await formCust(q); }
+    if (p[0] === 'customer' && p[2] === 'edit') { setNav('accounts'); return await formCust({ id: p[1] }); }
+    if (p[0] === 'customer') { setNav('accounts'); return await renderCust(p[1]); }
     if (p[0] === 'inventory') { setNav('inventory'); return await renderInventory(); }
     if (p[0] === 'device' && p[1] === 'new') { setNav('inventory'); return await formDevice(q); }
     if (p[0] === 'device' && p[2] === 'edit') { setNav('inventory'); return await formDevice({ id: p[1] }); }
@@ -199,7 +199,7 @@ async function renderSite(id) {
     <div class="crumb" onclick="location.hash='#/sites'"><i class="ti ti-chevron-left"></i> Sites</div>
     <div class="head"><div class="t">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(s.name)}</h1>${statusPill(s.status)}</div>
-      <div class="small sec-muted" style="margin-top:3px">${s.customer ? `<i class="ti ti-user"></i> <a class="iplink" href="#/cust/${s.customer.id}">${esc(s.customer.name)}</a> &nbsp;·&nbsp; ` : ''}<i class="ti ti-building"></i> <a class="iplink" href="#/customer/${s.account.id}">${esc(s.account.name)}</a> &nbsp;·&nbsp; <i class="ti ti-map-pin"></i> ${loc(s)}</div>
+      <div class="small sec-muted" style="margin-top:3px">${s.customer ? `<i class="ti ti-user"></i> <a class="iplink" href="#/customer/${s.customer.id}">${esc(s.customer.name)}</a> &nbsp;·&nbsp; ` : ''}<i class="ti ti-building"></i> <a class="iplink" href="#/account/${s.account.id}">${esc(s.account.name)}</a> &nbsp;·&nbsp; <i class="ti ti-map-pin"></i> ${loc(s)}</div>
     </div><a class="btn" href="#/site/${s.id}/edit"><i class="ti ti-edit"></i> Edit</a></div>
 
     <div class="grid2" style="margin:16px 0">
@@ -458,12 +458,12 @@ async function postNote(id) {
 // ---------- Customers ----------
 async function renderCustomers() {
   const list = await api('/accounts');
-  const rows = list.map(a => `<div class="row rowlink" onclick="location.hash='#/customer/${a.id}'">
+  const rows = list.map(a => `<div class="row rowlink" onclick="location.hash='#/account/${a.id}'">
     <div class="av">${initials(a.name)}</div>
     <div style="flex:1;min-width:0"><div>${esc(a.name)}</div><div class="small mono sec-muted">${esc(a.account_number || '')}</div></div>
     <span class="small sec-muted">${a.site_count} site${a.site_count === 1 ? '' : 's'}</span>
     ${statusPill(a.status)}<i class="ti ti-chevron-right muted"></i></div>`).join('');
-  view().innerHTML = `<div class="head"><h1 style="flex:1">Accounts</h1>${isPriv() ? '<a class="btn" href="#/customer/new"><i class="ti ti-plus"></i> Add account</a>' : ''}</div>
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Accounts</h1>${isPriv() ? '<a class="btn" href="#/account/new"><i class="ti ti-plus"></i> Add account</a>' : ''}</div>
     <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No accounts yet</div>'}</div>`;
 }
 
@@ -483,7 +483,7 @@ async function renderCustomer(id) {
   if (isPriv() && a.has_security_questions) det.push(`<div class="kv" style="display:block"><div class="small sec-muted" style="margin-bottom:4px">Security Q&amp;A <span class="badge noc">NOC</span></div><div style="cursor:pointer;filter:blur(5px);white-space:pre-wrap" title="click to reveal" onclick="this.style.filter='none'">${esc(a.security_questions)}</div></div>`);
   if (a.billing_address) det.push(kv('Billing', esc(a.billing_address)));
   const detCard = det.length ? `<div class="card"><div class="hd"><h2>Account details</h2></div><div style="padding:0 14px 10px">${det.join('')}</div></div>` : '';
-  const custs = a.customers.map(c => `<div class="row rowlink" onclick="location.hash='#/cust/${c.id}'">
+  const custs = a.customers.map(c => `<div class="row rowlink" onclick="location.hash='#/customer/${c.id}'">
     <div class="av">${initials(c.name)}</div>
     <div style="flex:1;min-width:0"><div>${esc(c.name)}</div><div class="small sec-muted">${c.site_count} site${c.site_count == 1 ? '' : 's'}</div></div>
     ${statusPill(c.status)}<i class="ti ti-chevron-right muted"></i></div>`).join('');
@@ -493,11 +493,11 @@ async function renderCustomer(id) {
     <div class="stat">${statusPill(s.conn_status)}<span class="small mono">${s.device_online}/${s.device_total} online</span></div>
     <i class="ti ti-chevron-right muted"></i></div>`).join('');
   view().innerHTML = `
-    <div class="crumb" onclick="location.hash='#/customers'"><i class="ti ti-chevron-left"></i> Accounts</div>
+    <div class="crumb" onclick="location.hash='#/accounts'"><i class="ti ti-chevron-left"></i> Accounts</div>
     <div class="head"><div class="av" style="width:46px;height:46px;border-radius:8px;font-size:16px">${initials(a.name)}</div>
       <div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(a.name)}</h1>${statusPill(a.status)}</div>
       <div class="small mono sec-muted" style="margin-top:3px">${esc(a.account_number || '')}</div></div>
-      ${isPriv() ? `<a class="btn" href="#/customer/${a.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}</div>
+      ${isPriv() ? `<a class="btn" href="#/account/${a.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}</div>
     <div class="grid3" style="margin:16px 0">
       <div class="metric"><div class="l">Customers</div><div class="v">${a.customers.length}</div></div>
       <div class="metric"><div class="l">Sites</div><div class="v">${a.sites.length}</div></div>
@@ -507,7 +507,7 @@ async function renderCustomer(id) {
     ${detCard}
     ${contacts ? `<div class="card"><div class="hd"><h2>Contacts</h2></div><div style="padding:0 14px 10px">${contacts}</div></div>` : ''}
     ${prev ? `<div class="card"><div class="hd"><h2><i class="ti ti-history-toggle"></i> Previous ISP</h2></div><div style="padding:0 14px 10px">${prev}</div></div>` : ''}
-    <div class="card"><div class="hd"><h2>Customers · ${a.customers.length}</h2>${isPriv() ? `<a class="btn sm" href="#/cust/new?account=${a.id}"><i class="ti ti-plus"></i> Add customer</a>` : ''}</div>${custs || '<div class="row muted">No customers yet</div>'}</div>
+    <div class="card"><div class="hd"><h2>Customers · ${a.customers.length}</h2>${isPriv() ? `<a class="btn sm" href="#/customer/new?account=${a.id}"><i class="ti ti-plus"></i> Add customer</a>` : ''}</div>${custs || '<div class="row muted">No customers yet</div>'}</div>
     ${a.sites.length ? `<div class="card"><div class="hd"><h2>All sites · ${a.sites.length}</h2></div>${sites}</div>` : ''}`;
 }
 
@@ -519,12 +519,13 @@ async function renderCust(id) {
     <div style="flex:1;min-width:0"><div>${esc(s.name)}</div><div class="small mono sec-muted">mgmt ${esc(s.current_mgmt_ip || '—')} · pub ${esc(s.current_public_ip || '—')}</div></div>
     <div class="stat">${statusPill(s.conn_status)}<span class="small mono">${s.device_online}/${s.device_total} online</span></div>
     <i class="ti ti-chevron-right muted"></i></div>`).join('');
+  const acctLinks = (c.accounts || []).map(a => `<a class="tag" href="#/account/${a.id}" style="margin:0 4px 0 0">${esc(a.name)}</a>`).join('') || '<span class="muted small">no accounts</span>';
   view().innerHTML = `
-    <div class="crumb" onclick="location.hash='#/customer/${c.account.id}'"><i class="ti ti-chevron-left"></i> ${esc(c.account.name)}</div>
+    <div class="crumb" onclick="location.hash='#/accounts'"><i class="ti ti-chevron-left"></i> Accounts</div>
     <div class="head"><div class="av" style="width:46px;height:46px;border-radius:8px;font-size:16px">${initials(c.name)}</div>
       <div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(c.name)}</h1>${statusPill(c.status)}</div>
-      <div class="small sec-muted" style="margin-top:3px">Account: <a class="iplink" href="#/customer/${c.account.id}">${esc(c.account.name)}</a></div></div>
-      ${isPriv() ? `<a class="btn" href="#/cust/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}</div>
+      <div class="small sec-muted" style="margin-top:5px">Served by: ${acctLinks}</div></div>
+      ${isPriv() ? `<a class="btn" href="#/customer/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}</div>
     <div class="grid3" style="margin:16px 0">
       <div class="metric"><div class="l">Sites</div><div class="v">${c.sites.length}</div></div>
       <div class="metric"><div class="l">Devices</div><div class="v">${c.device_count}</div></div>
@@ -535,27 +536,42 @@ async function renderCust(id) {
 }
 async function formCust(q) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
-  let c = { name: '', account_id: q.account || '', status: 'Active', notes: '' };
+  let c = { name: '', status: 'Active', notes: '', accounts: [] };
   if (q.id) c = await api('/customers/' + q.id);
-  const accOpts = META.accounts.map(a => ({ v: a.id, l: a.name }));
+  window._custAcctSel = new Set((c.accounts || []).map(a => a.id));
+  if (q.account) window._custAcctSel.add(Number(q.account));
+  window._custAccts = META.accounts;
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${q.id ? 'Edit' : 'Add'} customer</h1>
     <div class="card" style="margin-top:14px;padding:16px;overflow:visible" id="f">
-      <div class="fld"><label class="fl">Account</label><div id="ss-cacct"></div></div>
       ${field('Customer name', 'name', c.name, { ph: 'e.g. Unit 1072 / Acme West' })}
+      <div class="fld"><label class="fl">Served by accounts</label>
+        <input id="acctFilter" placeholder="Filter accounts…" oninput="renderCustAccts()" style="margin-bottom:6px"/>
+        <div id="custAccts" style="max-height:200px;overflow:auto;border:.5px solid var(--border);border-radius:8px"></div>
+        <div class="help">A customer can be served by more than one account. Pick all that apply.</div></div>
       ${field('Status', 'status', c.status, { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}
       ${field('Notes', 'notes', c.notes, { type: 'textarea' })}
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
       <button class="btn primary" onclick="saveCust(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
-  attachSearch($('#ss-cacct'), accOpts, 'account_id', c.account_id || (c.account && c.account.id), 'Search account…');
+  renderCustAccts();
 }
+function renderCustAccts() {
+  const box = $('#custAccts'); if (!box) return;
+  const sel = window._custAcctSel, q = ($('#acctFilter').value || '').toLowerCase();
+  const items = (window._custAccts || []).filter(a => !q || a.name.toLowerCase().includes(q));
+  box.innerHTML = items.map(a => `<label class="row" style="cursor:pointer">
+    <input type="checkbox" ${sel.has(a.id) ? 'checked' : ''} onchange="toggleCustAcct(${a.id},this.checked)" style="width:auto"/>
+    <div style="flex:1;min-width:0">${esc(a.name)}</div></label>`).join('') || '<div class="row muted">No matching accounts</div>';
+}
+function toggleCustAcct(id, on) { if (on) window._custAcctSel.add(id); else window._custAcctSel.delete(id); }
 async function saveCust(id) {
   const d = collect('#f');
-  if (!d.account_id) { toast('Pick an account'); return; }
+  d.account_ids = Array.from(window._custAcctSel || []);
+  if (!d.account_ids.length) { toast('Pick at least one account'); return; }
   if (!d.name) { toast('Enter a customer name'); return; }
   try {
-    if (id) { await api('/customers/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/cust/' + id; }
-    else { const r = await api('/customers', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/cust/' + r.id; }
+    if (id) { await api('/customers/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/customer/' + id; }
+    else { const r = await api('/customers', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/customer/' + r.id; }
     toast('Saved');
   } catch (e) { toast(e.message); }
 }
@@ -858,8 +874,8 @@ async function formCustomer(q) {
 }
 async function saveCustomer(id) {
   const d = collect('#f');
-  if (id) { await api('/accounts/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/customer/' + id; }
-  else { const r = await api('/accounts', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/customer/' + r.id; }
+  if (id) { await api('/accounts/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/account/' + id; }
+  else { const r = await api('/accounts', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/account/' + r.id; }
   toast('Saved');
 }
 
@@ -867,7 +883,7 @@ async function formSite(q) {
   let s = { name: '', service_address: '', status: 'Active', current_mgmt_ip: '', current_public_ip: '' };
   if (q.id) s = await api('/sites/' + q.id);
   const custs = await api('/customers');
-  const custOpts = custs.map(c => ({ v: c.id, l: c.name + (c.account_name ? ' · ' + c.account_name : '') }));
+  const custOpts = custs.map(c => ({ v: c.id, l: c.name + (c.account_names ? ' · ' + c.account_names : '') }));
   const accOpts = META.accounts.map(a => ({ v: a.id, l: a.name }));
   const preCust = q.customer || (s.customer && s.customer.id) || s.customer_id || '';
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
@@ -890,6 +906,7 @@ async function formSite(q) {
           </div>
         </div>
       </div>
+      <div class="fld"><label class="fl">Served by account <span class="small sec-muted" style="font-weight:400">· optional, defaults to the customer's primary</span></label><div id="ss-siteacct"></div></div>
       ${field('Site name', 'name', s.name, { ph: 'e.g. Riverside Office' })}
       <div class="fld"><label class="fl">Service address</label><div id="ss-saddr"></div></div>
       <div class="grid2">${field('Latitude', 'lat', s.lat || '', { mono: true })}${field('Longitude', 'lng', s.lng || '', { mono: true })}</div>
@@ -900,6 +917,7 @@ async function formSite(q) {
       <button class="btn primary" onclick="saveSite(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
   attachSearch($('#ss-customer'), custOpts, 'customer_id', preCust, 'Search customer…');
   attachSearch($('#ss-account'), accOpts, 'account_id', '', 'Search account…');
+  attachSearch($('#ss-siteacct'), accOpts, 'site_account_id', (s.account && s.account.id) || '', 'Search account…');
   attachAddressSearch($('#ss-saddr'), { name: 'service_address', value: s.service_address || '', latName: 'lat', lngName: 'lng', placeholder: 'Street, city, state (optional if GPS)' });
 }
 function toggleNewCust() {
@@ -925,12 +943,15 @@ async function saveSite(id) {
       catch (e) { toast('Account: ' + e.message); return; }
     }
     if (!accountId) { toast('Pick an account for the new customer'); return; }
-    try { const c = await api('/customers', { method: 'POST', body: JSON.stringify({ account_id: accountId, name: d.nc_name }) }); d.customer_id = c.id; }
+    try { const c = await api('/customers', { method: 'POST', body: JSON.stringify({ account_ids: [accountId], name: d.nc_name }) }); d.customer_id = c.id; }
     catch (e) { toast('Customer: ' + e.message); return; }
   }
   if (!d.customer_id) { toast('Pick a customer'); return; }
   if (!d.name) { toast('Enter a site name'); return; }
-  ['nc_name', 'na_name', 'na_account_number', 'na_status', 'account_id'].forEach(k => delete d[k]);
+  // serving account: new-customer flow already set d.account_id; otherwise use the optional override (server defaults to the customer's primary)
+  if (!newCust) d.account_id = d.site_account_id || '';
+  if (!d.account_id) delete d.account_id;
+  ['nc_name', 'na_name', 'na_account_number', 'na_status', 'site_account_id'].forEach(k => delete d[k]);
   try {
     if (id) { await api('/sites/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/site/' + id; }
     else { const r = await api('/sites', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/site/' + r.id; }
@@ -949,7 +970,7 @@ async function formDevice(q) {
   const modelOpts = (await api('/models')).map(m => ({ v: m.id, l: m.manufacturer + ' ' + m.model }));
   const siteOpts = (await api('/sites')).map(s => ({ v: s.id, l: s.name }));
   const popOpts = (await api('/pops')).map(p => ({ v: p.id, l: 'POP · ' + p.name }));
-  const custOpts = (await api('/customers')).map(c => ({ v: c.id, l: c.name + (c.account_name ? ' · ' + c.account_name : '') }));
+  const custOpts = (await api('/customers')).map(c => ({ v: c.id, l: c.name + (c.account_names ? ' · ' + c.account_names : '') }));
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${q.id ? 'Edit' : 'Add'} hardware</h1>
     <div class="card" style="margin-top:14px;padding:16px;overflow:visible" id="f">

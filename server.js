@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, extname } from 'node:path';
 import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR } from './db.js';
+import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, backfillAccountCustomers, UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR } from './db.js';
 import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie } from './auth.js';
 import { hashPassword, verifyPassword } from './hash.js';
 import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseCidr } from './wg.js';
@@ -122,6 +122,7 @@ initSchema();
 migrate();
 if (isEmpty()) { seed(); console.log('Database seeded on first run.'); }
 backfillCustomers();
+backfillAccountCustomers();
 
 // ---- helpers ----
 const N = (v, d = null) => (v === undefined ? d : v); // null-coalesce for SQLite binding
@@ -1266,12 +1267,27 @@ app.get('/api/accounts', (req, res) => {
   res.json(rows);
 });
 
+// Accounts <-> Customers many-to-many helpers
+function customerAccounts(custId) { return db.prepare('SELECT a.id, a.name FROM account_customers ac JOIN accounts a ON a.id=ac.account_id WHERE ac.customer_id=? ORDER BY a.name').all(custId); }
+function accountCustomers(acctId) { return db.prepare('SELECT c.* FROM account_customers ac JOIN customers c ON c.id=ac.customer_id WHERE ac.account_id=? ORDER BY c.name').all(acctId); }
+function setCustomerAccounts(custId, ids) {
+  const clean = [...new Set((ids || []).map(Number).filter(Boolean))];
+  db.prepare('DELETE FROM account_customers WHERE customer_id=?').run(custId);
+  const ins = db.prepare('INSERT OR IGNORE INTO account_customers (account_id, customer_id) VALUES (?,?)');
+  for (const a of clean) ins.run(a, custId);
+  db.prepare('UPDATE customers SET account_id=? WHERE id=?').run(clean[0] || null, custId); // keep legacy primary
+}
+function defaultAccountForCustomer(custId) {
+  const r = db.prepare('SELECT account_id FROM account_customers WHERE customer_id=? ORDER BY account_id LIMIT 1').get(custId);
+  return r ? r.account_id : null;
+}
+
 app.get('/api/accounts/:id', (req, res) => {
   const a = db.prepare('SELECT * FROM accounts WHERE id=?').get(req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
   a.contacts = db.prepare('SELECT * FROM account_contacts WHERE account_id=?').all(a.id);
   a.previous_isps = db.prepare('SELECT * FROM previous_isps WHERE account_id=?').all(a.id);
-  a.customers = db.prepare('SELECT * FROM customers WHERE account_id=? ORDER BY name').all(a.id).map(c => ({ ...c, site_count: db.prepare('SELECT COUNT(*) AS n FROM sites WHERE customer_id=?').get(c.id).n }));
+  a.customers = accountCustomers(a.id).map(c => ({ ...c, site_count: db.prepare('SELECT COUNT(*) AS n FROM sites WHERE customer_id=?').get(c.id).n }));
   a.sites = db.prepare('SELECT * FROM sites WHERE account_id=?').all(a.id).map(withSiteSummary);
   a.device_count = a.sites.reduce((n, s) => n + s.device_total, 0);
   a.needs_attention = a.sites.filter(s => s.needs_attention).length;
@@ -1365,16 +1381,11 @@ function resolveConn(c) {
   return c;
 }
 
-// a site's account always follows its customer's account
-function accountForCustomer(customerId) {
-  if (!customerId) return null;
-  const c = db.prepare('SELECT account_id FROM customers WHERE id=?').get(customerId);
-  return c ? c.account_id : null;
-}
 app.post('/api/sites', (req, res) => {
   const b = req.body || {};
-  const accountId = accountForCustomer(b.customer_id) || b.account_id;
-  if (!accountId) return res.status(400).json({ error: 'A customer (or account) is required' });
+  // a site is served by one account chosen from its customer's accounts (defaults to the customer's primary)
+  const accountId = b.account_id || defaultAccountForCustomer(b.customer_id);
+  if (!accountId) return res.status(400).json({ error: 'A customer (with at least one account) is required' });
   const info = db.prepare('INSERT INTO sites (account_id,customer_id,name,service_address,lat,lng,status,current_mgmt_ip,current_public_ip,notes) VALUES (?,?,?,?,?,?,?,?,?,?)')
     .run(N(accountId), N(b.customer_id || null), N(b.name), N(b.service_address), N(b.lat || null), N(b.lng || null), b.status || 'Active', N(b.current_mgmt_ip), N(b.current_public_ip), N(b.notes));
   audit(req, 'create', 'site#' + info.lastInsertRowid, b.name);
@@ -1385,23 +1396,29 @@ app.put('/api/sites/:id', (req, res) => {
   const b = req.body || {};
   const ex = db.prepare('SELECT customer_id, account_id FROM sites WHERE id=?').get(req.params.id);
   const customerId = b.customer_id !== undefined ? b.customer_id : (ex ? ex.customer_id : null);
-  const accountId = accountForCustomer(customerId) || (ex ? ex.account_id : null);
+  const accountId = b.account_id || defaultAccountForCustomer(customerId) || (ex ? ex.account_id : null);
   db.prepare('UPDATE sites SET account_id=?, customer_id=?, name=?, service_address=?, lat=?, lng=?, status=?, current_mgmt_ip=?, current_public_ip=?, notes=? WHERE id=?')
     .run(N(accountId), N(customerId || null), N(b.name), N(b.service_address), N(b.lat || null), N(b.lng || null), N(b.status, 'Active'), N(b.current_mgmt_ip), N(b.current_public_ip), N(b.notes), req.params.id);
   audit(req, 'edit', 'site#' + req.params.id, b.name);
   res.json({ ok: true });
 });
 
-// ---- customers (under an account; NOC/Admin manage) ----
+// ---- customers (end clients; many-to-many with accounts) ----
+const accountIdsFrom = b => { const ids = b.account_ids || (b.account_id ? [b.account_id] : []); return [...new Set(ids.map(Number).filter(Boolean))]; };
 app.get('/api/customers', (req, res) => {
-  const where = req.query.account_id ? ' WHERE c.account_id=' + Number(req.query.account_id) : '';
-  const rows = db.prepare(`SELECT c.*, a.name AS account_name, (SELECT COUNT(*) FROM sites s WHERE s.customer_id=c.id) AS site_count FROM customers c LEFT JOIN accounts a ON a.id=c.account_id${where} ORDER BY c.name`).all();
+  const acct = req.query.account_id ? Number(req.query.account_id) : null;
+  const where = acct ? ' WHERE c.id IN (SELECT customer_id FROM account_customers WHERE account_id=' + acct + ')' : '';
+  const rows = db.prepare(`SELECT c.*,
+      (SELECT COUNT(*) FROM sites s WHERE s.customer_id=c.id) AS site_count,
+      (SELECT GROUP_CONCAT(a.name, ', ') FROM account_customers ac JOIN accounts a ON a.id=ac.account_id WHERE ac.customer_id=c.id) AS account_names
+    FROM customers c${where} ORDER BY c.name`).all();
   res.json(rows);
 });
 app.get('/api/customers/:id', (req, res) => {
   const c = db.prepare('SELECT * FROM customers WHERE id=?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'not found' });
-  c.account = db.prepare('SELECT id, name FROM accounts WHERE id=?').get(c.account_id);
+  c.accounts = customerAccounts(c.id);
+  c.account = c.accounts[0] || null; // legacy convenience
   c.sites = db.prepare('SELECT * FROM sites WHERE customer_id=?').all(c.id).map(withSiteSummary);
   c.device_count = c.sites.reduce((n, s) => n + s.device_total, 0);
   c.needs_attention = c.sites.filter(s => s.needs_attention).length;
@@ -1409,9 +1426,11 @@ app.get('/api/customers/:id', (req, res) => {
 });
 app.post('/api/customers', requireNoc, (req, res) => {
   const b = req.body || {};
-  if (!b.account_id) return res.status(400).json({ error: 'Account required' });
+  const ids = accountIdsFrom(b);
+  if (!ids.length) return res.status(400).json({ error: 'Pick at least one account' });
   if (!b.name) return res.status(400).json({ error: 'Customer name required' });
-  const info = db.prepare('INSERT INTO customers (account_id,name,status,notes) VALUES (?,?,?,?)').run(N(b.account_id), N(b.name), b.status || 'Active', N(b.notes));
+  const info = db.prepare('INSERT INTO customers (account_id,name,status,notes) VALUES (?,?,?,?)').run(ids[0], N(b.name), b.status || 'Active', N(b.notes));
+  setCustomerAccounts(info.lastInsertRowid, ids);
   audit(req, 'create', 'customer#' + info.lastInsertRowid, b.name);
   res.json({ id: info.lastInsertRowid });
 });
@@ -1419,15 +1438,19 @@ app.put('/api/customers/:id', requireNoc, (req, res) => {
   const b = req.body || {};
   const ex = db.prepare('SELECT * FROM customers WHERE id=?').get(req.params.id);
   if (!ex) return res.status(404).json({ error: 'not found' });
-  db.prepare('UPDATE customers SET name=?, status=?, notes=?, account_id=? WHERE id=?').run(N(b.name, ex.name), N(b.status, ex.status), N(b.notes), N(b.account_id, ex.account_id), req.params.id);
-  // keep sites' account_id in sync with the customer's account
-  db.prepare('UPDATE sites SET account_id=? WHERE customer_id=?').run(N(b.account_id, ex.account_id), req.params.id);
+  db.prepare('UPDATE customers SET name=?, status=?, notes=? WHERE id=?').run(N(b.name, ex.name), N(b.status, ex.status), N(b.notes), req.params.id);
+  if (b.account_ids !== undefined || b.account_id !== undefined) {
+    const ids = accountIdsFrom(b);
+    if (!ids.length) return res.status(400).json({ error: 'A customer must have at least one account' });
+    setCustomerAccounts(req.params.id, ids);
+  }
   audit(req, 'edit', 'customer#' + req.params.id, b.name);
   res.json({ ok: true });
 });
 app.delete('/api/customers/:id', requireNoc, (req, res) => {
   const n = db.prepare('SELECT COUNT(*) AS n FROM sites WHERE customer_id=?').get(req.params.id).n;
   if (n > 0) return res.status(409).json({ error: `Has ${n} site(s)` });
+  db.prepare('DELETE FROM account_customers WHERE customer_id=?').run(req.params.id);
   db.prepare('DELETE FROM customers WHERE id=?').run(req.params.id);
   audit(req, 'delete', 'customer#' + req.params.id);
   res.json({ ok: true });
