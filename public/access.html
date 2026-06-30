@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Site Access Check-in</title>
+  <style>
+    :root { --bg:#0f1216; --card:#171c22; --line:#2a323c; --text:#e6eaf0; --muted:#9aa6b2; --accent:#378ADD; --ok:#1D9E75; --danger:#dc3545; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; line-height:1.5; }
+    .wrap { max-width:520px; margin:0 auto; padding:28px 18px 60px; }
+    h1 { font-size:22px; margin:8px 0 4px; }
+    .sub { color:var(--muted); margin:0 0 20px; font-size:14px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; }
+    label { display:block; font-size:13px; color:var(--muted); margin:14px 0 5px; }
+    input[type=text], input[type=email], input[type=tel] { width:100%; padding:11px 12px; border-radius:9px; border:1px solid var(--line); background:#0e1318; color:var(--text); font-size:15px; }
+    input:focus { outline:none; border-color:var(--accent); }
+    .row2 { display:flex; gap:10px; } .row2 > div { flex:1; }
+    .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+    .chip { background:#0e1318; border:1px solid var(--line); border-radius:20px; padding:5px 10px; font-size:13px; display:inline-flex; align-items:center; gap:6px; }
+    .chip b { cursor:pointer; color:var(--muted); }
+    .dd { position:relative; }
+    .ddlist { position:absolute; left:0; right:0; top:100%; background:var(--card); border:1px solid var(--line); border-radius:9px; margin-top:4px; max-height:200px; overflow:auto; z-index:5; }
+    .ddlist div { padding:9px 12px; cursor:pointer; font-size:14px; } .ddlist div:hover { background:#0e1318; }
+    .photo { margin-top:8px; }
+    .photo label.btn { display:inline-flex; align-items:center; gap:8px; cursor:pointer; background:#0e1318; border:1px solid var(--line); border-radius:9px; padding:10px 14px; color:var(--text); font-size:14px; }
+    .photo img { display:block; margin-top:10px; max-height:180px; border-radius:9px; border:1px solid var(--line); }
+    .submit { width:100%; margin-top:22px; padding:13px; border:0; border-radius:10px; background:var(--accent); color:#fff; font-size:16px; font-weight:600; cursor:pointer; }
+    .submit:disabled { opacity:.6; cursor:default; }
+    .hint { color:var(--muted); font-size:12px; margin-top:6px; }
+    .done { text-align:center; padding:40px 10px; }
+    .done .ic { width:62px;height:62px;border-radius:50%;background:rgba(29,158,117,.15);color:var(--ok);display:flex;align-items:center;justify-content:center;font-size:34px;margin:0 auto 14px; }
+    .err { color:var(--danger); font-size:14px; margin-top:12px; min-height:18px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Site Access Check-in</h1>
+    <p class="sub">Please provide your details and a photo of your ID to request site access.</p>
+    <div id="formCard" class="card">
+      <div class="row2">
+        <div><label>First name *</label><input type="text" id="fn" autocomplete="given-name"/></div>
+        <div><label>Last name *</label><input type="text" id="ln" autocomplete="family-name"/></div>
+      </div>
+      <label>Email</label><input type="email" id="email" autocomplete="email"/>
+      <label>Phone</label><input type="tel" id="phone" autocomplete="tel"/>
+      <label id="siteLbl">Site you're accessing *</label>
+      <div class="dd"><input type="text" id="siteq" placeholder="Start typing the site name…" autocomplete="off"/>
+        <div id="ddlist" class="ddlist" style="display:none"></div></div>
+      <div id="chips" class="chips"></div>
+      <div class="photo">
+        <label>Photo of your ID *</label>
+        <label class="btn" for="idfile">📷 Choose photo / PDF<input type="file" id="idfile" accept="image/*,application/pdf,.pdf" capture="environment" style="display:none"/></label>
+        <img id="preview" style="display:none"/>
+      </div>
+      <button class="submit" id="submit">Submit access request</button>
+      <div class="err" id="err"></div>
+      <div class="hint">Your ID photo is only visible to authorized staff and is used solely to verify your identity for site access.</div>
+    </div>
+    <div id="doneCard" class="card done" style="display:none">
+      <div class="ic">✓</div>
+      <h1 style="text-align:center">Request submitted</h1>
+      <p class="sub" style="text-align:center">Thanks — your access request has been received and is pending review.</p>
+    </div>
+  </div>
+  <script>
+    let multi = false, sites = [], photo = null;
+    const $ = id => document.getElementById(id);
+    fetch('/api/me').then(r => { multi = r.ok; if (multi) $('siteLbl').textContent = "Site(s) you're accessing *"; }).catch(()=>{});
+    let t;
+    $('siteq').addEventListener('input', () => {
+      clearTimeout(t); const q = $('siteq').value.trim();
+      if (q.length < 1) { $('ddlist').style.display = 'none'; return; }
+      t = setTimeout(async () => {
+        try {
+          const r = await fetch('/access/sites?q=' + encodeURIComponent(q));
+          const list = await r.json();
+          $('ddlist').innerHTML = list.length ? list.map(s => `<div data-id="${s.id}">${esc(s.name)}</div>`).join('') : '<div style="color:var(--muted)">No matches</div>';
+          $('ddlist').style.display = 'block';
+        } catch {}
+      }, 250);
+    });
+    $('ddlist').addEventListener('click', e => {
+      const el = e.target.closest('div[data-id]'); if (!el) return;
+      const id = +el.dataset.id, name = el.textContent;
+      if (!multi) sites = [];
+      if (!sites.find(s => s.id === id)) sites.push({ id, name });
+      $('siteq').value = ''; $('ddlist').style.display = 'none'; renderChips();
+    });
+    function renderChips() {
+      $('chips').innerHTML = sites.map((s, i) => `<span class="chip">${esc(s.name)} <b onclick="rm(${i})">✕</b></span>`).join('');
+    }
+    window.rm = i => { sites.splice(i, 1); renderChips(); };
+    $('idfile').addEventListener('change', () => {
+      const f = $('idfile').files[0]; if (!f) return;
+      const r = new FileReader();
+      r.onload = () => { photo = r.result; if (f.type.startsWith('image/')) { $('preview').src = r.result; $('preview').style.display = 'block'; } else { $('preview').style.display = 'none'; } };
+      r.readAsDataURL(f);
+    });
+    $('submit').addEventListener('click', async () => {
+      $('err').textContent = '';
+      const fn = $('fn').value.trim(), ln = $('ln').value.trim();
+      if (!fn || !ln) { $('err').textContent = 'First and last name are required.'; return; }
+      if (!$('email').value.trim() && !$('phone').value.trim()) { $('err').textContent = 'Please provide an email or phone.'; return; }
+      if (!sites.length) { $('err').textContent = 'Please select the site you are accessing.'; return; }
+      if (!photo) { $('err').textContent = 'Please add a photo of your ID.'; return; }
+      $('submit').disabled = true; $('submit').textContent = 'Submitting…';
+      try {
+        const res = await fetch('/access', { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ first_name: fn, last_name: ln, email: $('email').value.trim(), phone: $('phone').value.trim(), site_ids: sites.map(s => s.id), id_photo: photo }) });
+        const j = await res.json();
+        if (!res.ok) throw new Error(j.error || 'Submission failed');
+        $('formCard').style.display = 'none'; $('doneCard').style.display = 'block';
+      } catch (e) { $('err').textContent = e.message; $('submit').disabled = false; $('submit').textContent = 'Submit access request'; }
+    });
+    function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+  </script>
+</body>
+</html>

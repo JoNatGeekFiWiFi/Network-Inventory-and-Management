@@ -87,6 +87,9 @@ export function migrate() {
   db.exec("CREATE TABLE IF NOT EXISTS device_packages (device_id INTEGER NOT NULL, package_id INTEGER NOT NULL, PRIMARY KEY (device_id, package_id))");
   // Provisioning bench nodes (netinstall benches) — token-authenticated
   db.exec("CREATE TABLE IF NOT EXISTS prov_nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, token TEXT UNIQUE, location TEXT, last_seen TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  // Public site-access requests (visitor check-in: name/contact/ID photo) + site links
+  db.exec("CREATE TABLE IF NOT EXISTS access_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, first_name TEXT, last_name TEXT, email TEXT, phone TEXT, id_photo TEXT, status TEXT NOT NULL DEFAULT 'pending', reviewed_by TEXT, reviewed_at TEXT, notes TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  db.exec("CREATE TABLE IF NOT EXISTS access_request_sites (request_id INTEGER NOT NULL, site_id INTEGER NOT NULL, PRIMARY KEY (request_id, site_id))");
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

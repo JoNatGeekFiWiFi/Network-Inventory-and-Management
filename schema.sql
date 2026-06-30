@@ -319,6 +319,20 @@ CREATE TABLE IF NOT EXISTS prov_nodes (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Public site-access requests (visitor check-in incl. ID photo) + site links
+CREATE TABLE IF NOT EXISTS access_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  first_name TEXT, last_name TEXT, email TEXT, phone TEXT,
+  id_photo TEXT, status TEXT NOT NULL DEFAULT 'pending',
+  reviewed_by TEXT, reviewed_at TEXT, notes TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS access_request_sites (
+  request_id INTEGER NOT NULL REFERENCES access_requests(id) ON DELETE CASCADE,
+  site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  PRIMARY KEY (request_id, site_id)
+);
+
 -- Audit log (immutable trail)
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

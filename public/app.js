@@ -47,6 +47,7 @@ function setupHeader() {
   $('#navZt').style.display = isPriv() ? '' : 'none';
   $('#navBlock').style.display = isPriv() ? '' : 'none';
   $('#navBatch').style.display = isPriv() ? '' : 'none';
+  $('#navAccess').style.display = isPriv() ? '' : 'none';
   $('#navPackages').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
 }
@@ -133,6 +134,7 @@ async function route() {
     if (p[0] === 'batch' && p[1]) { setNav('batch'); return await renderBatchJob(p[1]); }
     if (p[0] === 'batch') { setNav('batch'); return await renderBatch(); }
     if (p[0] === 'packages') { setNav('packages'); return await renderPackages(); }
+    if (p[0] === 'access') { setNav('access'); return await renderAccessRequests(); }
     view().innerHTML = '<div class="card" style="padding:20px">Not found</div>';
   } catch (e) { if (e.message === 'auth') return; view().innerHTML = `<div class="card" style="padding:20px">Error: ${esc(e.message)}</div>`; }
 }
@@ -1329,6 +1331,50 @@ async function delPackage(id) {
   try { await api('/packages/' + id, { method: 'DELETE' }); toast('Deleted'); renderPackages(); } catch (e) { toast(e.message); }
 }
 
+// ---------- Site Access requests (visitor check-in review) ----------
+function accessStatusPill(s) {
+  const m = { pending: ['var(--warning)', 'pending'], approved: ['var(--success)', 'approved'], denied: ['var(--danger)', 'denied'] };
+  const [col, lbl] = m[s] || m.pending;
+  return `<span class="pill" style="border-color:${col}"><span class="dot" style="background:${col}"></span>${lbl}</span>`;
+}
+async function renderAccessRequests() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const list = await api('/access');
+  const pending = list.filter(r => r.status === 'pending').length;
+  const rows = list.map(r => {
+    const siteNames = (r.sites || []).map(s => esc(s.name)).join(', ') || '—';
+    const contact = [r.email ? `<a class="iplink" href="mailto:${esc(r.email)}">${esc(r.email)}</a>` : '', r.phone ? `<a class="iplink" href="tel:${esc(r.phone)}">${esc(r.phone)}</a>` : ''].filter(Boolean).join(' · ');
+    const photo = r.has_photo ? `<a href="/api/access/${r.id}/photo" target="_blank" title="View ID"><img src="/api/access/${r.id}/photo" loading="lazy" style="height:54px;width:54px;object-fit:cover;border-radius:8px;border:.5px solid var(--border)"/></a>` : '<span class="small muted" style="width:54px;text-align:center">no ID</span>';
+    return `<div class="row" style="align-items:flex-start">
+      ${photo}
+      <div style="flex:1;min-width:0">
+        <div>${esc(r.first_name)} ${esc(r.last_name)} ${accessStatusPill(r.status)}</div>
+        <div class="small sec-muted">${contact || 'no contact'}</div>
+        <div class="small sec-muted"><i class="ti ti-map-pin"></i> ${siteNames} · <span class="muted">${esc(r.created_at)}</span>${r.reviewed_by ? ' · by ' + esc(r.reviewed_by) : ''}</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+        ${r.status !== 'approved' ? `<button class="btn sm" style="color:var(--success)" onclick="setAccess(${r.id},'approved')"><i class="ti ti-check"></i> Approve</button>` : ''}
+        ${r.status !== 'denied' ? `<button class="btn sm" style="color:var(--danger)" onclick="setAccess(${r.id},'denied')"><i class="ti ti-x"></i> Deny</button>` : ''}
+        <button class="btn sm" onclick="delAccess(${r.id})"><i class="ti ti-trash"></i></button>
+      </div></div>`;
+  }).join('');
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Site Access</h1></div>
+    <div class="small sec-muted" style="margin:-6px 0 14px">Visitor check-in requests. Public form: <a class="iplink" href="/access" target="_blank">/access</a> — share the link or a QR code.</div>
+    <div class="grid3" style="margin-bottom:16px">
+      <div class="metric"><div class="l">Pending</div><div class="v" style="color:var(--warning)">${pending}</div></div>
+      <div class="metric"><div class="l">Total</div><div class="v">${list.length}</div></div>
+      <div class="metric"><div class="l">Approved</div><div class="v" style="color:var(--success)">${list.filter(r => r.status === 'approved').length}</div></div>
+    </div>
+    <div class="card">${rows || '<div class="row muted">No access requests yet</div>'}</div>`;
+}
+async function setAccess(id, status) {
+  try { await api('/access/' + id, { method: 'PUT', body: JSON.stringify({ status }) }); toast(status); renderAccessRequests(); } catch (e) { toast(e.message); }
+}
+async function delAccess(id) {
+  if (!confirm('Delete this access request and its ID photo?')) return;
+  try { await api('/access/' + id, { method: 'DELETE' }); toast('Deleted'); renderAccessRequests(); } catch (e) { toast(e.message); }
+}
+
 // ---------- Settings: management overlays (NOC/Admin) ----------
 async function renderSettings() {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
@@ -1377,6 +1423,16 @@ async function renderSettings() {
       <button class="btn" onclick="regenProv()"><i class="ti ti-refresh"></i> Regenerate token</button></div>
       <div class="help">Set the public URL (reachable from devices' WAN over HTTPS). Per-device default configs are on each device's Config backups page; the provisioning node uses the generic config + these bench WiFi/admin defaults.</div>
     </div>
+    <div class="card" style="padding:16px" id="mail">
+      <h2 style="margin-bottom:12px"><i class="ti ti-mail"></i> Email notifications</h2>
+      <div class="grid2">${field('SMTP host', 'smtp_host', s.smtp_host, { mono: true, ph: 'smtp.example.com' })}${field('SMTP port', 'smtp_port', s.smtp_port, { mono: true, ph: '587' })}</div>
+      <label class="row" style="cursor:pointer;padding:6px 0"><input type="checkbox" id="smtpSecure" ${s.smtp_secure ? 'checked' : ''} style="width:auto"/>
+        <div style="flex:1"><div>Use TLS/SSL (port 465)</div><div class="small sec-muted">Leave off for STARTTLS on 587.</div></div></label>
+      <div class="grid2">${field('SMTP username', 'smtp_user', s.smtp_user, { mono: true })}${field('SMTP password', 'smtp_pass', '', { mono: true, ph: s.has_smtp_pass ? 'unchanged' : '' })}</div>
+      <div class="grid2">${field('From address', 'mail_from', s.mail_from, { mono: true, ph: 'noreply@geekitek.com' })}${field('Access requests → notify', 'access_notify_email', s.access_notify_email, { mono: true, ph: 'access@geekitek.com' })}</div>
+      <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" onclick="saveMail()"><i class="ti ti-check"></i> Save</button></div>
+      <div class="help">New site-access requests email the "notify" address; approving a request emails the requester. Requires a working SMTP server + From address.</div>
+    </div>
     <div class="card" style="padding:16px" id="nodes">
       <h2 style="margin-bottom:12px"><i class="ti ti-server-cog"></i> Provisioning nodes (Netinstall benches)</h2>
       ${nodes.map(n => `<div class="row"><i class="ti ti-server-2 sec-muted"></i>
@@ -1399,6 +1455,12 @@ async function saveProv() {
   d.allow_auto_enroll = $('#autoEnroll').checked;
   if (!d.prov_wifi_password) delete d.prov_wifi_password;
   if (!d.prov_admin_password) delete d.prov_admin_password;
+  try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
+}
+async function saveMail() {
+  const d = collect('#mail');
+  d.smtp_secure = $('#smtpSecure').checked;
+  if (!d.smtp_pass) delete d.smtp_pass;
   try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
 }
 async function addNode() {

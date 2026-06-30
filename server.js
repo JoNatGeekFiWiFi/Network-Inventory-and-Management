@@ -11,6 +11,7 @@ import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseC
 import https from 'node:https';
 import http from 'node:http';
 import net from 'node:net';
+import nodemailer from 'nodemailer';
 
 // HTTP(S) JSON request with a timeout; https tolerates self-signed certs (RouterOS). Returns {status, body}.
 function reqJson(mod, urlStr, opts = {}) {
@@ -235,6 +236,18 @@ app.delete('/api/models/:id', requireNoc, (req, res) => {
 // ---- management overlay settings + provisioning (NOC/Admin) ----
 const getSetting = (k) => { const r = db.prepare('SELECT value FROM settings WHERE key=?').get(k); return r ? r.value : null; };
 const setSetting = (k, v) => db.prepare('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, v == null ? '' : v);
+// Send email via the configured SMTP server (no-op if not configured). Never throws to the caller.
+async function sendMail({ to, subject, text, html }) {
+  const host = getSetting('smtp_host'), from = getSetting('mail_from');
+  if (!host || !from || !to) return false;
+  const tx = nodemailer.createTransport({
+    host, port: parseInt(getSetting('smtp_port'), 10) || 587, secure: getSetting('smtp_secure') === '1',
+    auth: getSetting('smtp_user') ? { user: getSetting('smtp_user'), pass: getSetting('smtp_pass') || '' } : undefined
+  });
+  await tx.sendMail({ from, to, subject, text, html });
+  return true;
+}
+const mailSafe = (opts) => { sendMail(opts).catch(e => console.warn('email send failed:', e.message)); };
 
 app.get('/api/settings', requireNoc, (req, res) => {
   res.json({
@@ -247,6 +260,13 @@ app.get('/api/settings', requireNoc, (req, res) => {
     public_base_url: getSetting('public_base_url') || '',
     allow_auto_enroll: getSetting('allow_auto_enroll') === '1',
     prov_wifi_ssid: getSetting('prov_wifi_ssid') || '',
+    smtp_host: getSetting('smtp_host') || '',
+    smtp_port: getSetting('smtp_port') || '',
+    smtp_secure: getSetting('smtp_secure') === '1',
+    smtp_user: getSetting('smtp_user') || '',
+    mail_from: getSetting('mail_from') || '',
+    access_notify_email: getSetting('access_notify_email') || '',
+    has_smtp_pass: !!getSetting('smtp_pass'),
     has_provision_token: !!getSetting('provision_token'),
     has_prov_admin_password: !!getSetting('prov_admin_password'),
     has_prov_wifi_password: !!getSetting('prov_wifi_password'),
@@ -256,7 +276,9 @@ app.get('/api/settings', requireNoc, (req, res) => {
 });
 app.put('/api/settings', requireNoc, (req, res) => {
   const b = req.body || {};
-  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns', 'backup_upload_base', 'public_base_url', 'prov_wifi_ssid']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns', 'backup_upload_base', 'public_base_url', 'prov_wifi_ssid', 'smtp_host', 'smtp_port', 'smtp_user', 'mail_from', 'access_notify_email']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  if (b.smtp_secure !== undefined) setSetting('smtp_secure', b.smtp_secure ? '1' : '0');
+  if (b.smtp_pass) setSetting('smtp_pass', String(b.smtp_pass));
   if (b.zt_api_token) setSetting('zt_api_token', String(b.zt_api_token).trim());
   if (b.allow_auto_enroll !== undefined) setSetting('allow_auto_enroll', b.allow_auto_enroll ? '1' : '0');
   if (b.prov_admin_password) setSetting('prov_admin_password', String(b.prov_admin_password));
@@ -1991,6 +2013,97 @@ app.post('/api/blocklist/push', requireNoc, async (req, res) => {
   for (const d of devs) { try { const r = await pushBlocklistToDevice(d); results.push({ device: d.name, ...r }); } catch (e) { results.push({ device: d.name, error: e.code || e.message }); } }
   audit(req, 'config_push', 'blocklist', `pushed to ${results.length} device(s)`);
   res.json({ results });
+});
+
+// ---- public site-access check-in (no login) ----
+app.get('/access', (req, res) => res.sendFile(join(__dirname, 'public', 'access.html')));
+// public site autocomplete (minimal: id + name only)
+app.get('/access/sites', (req, res) => {
+  const q = '%' + String(req.query.q || '').trim() + '%';
+  const rows = db.prepare('SELECT id, name FROM sites WHERE name LIKE ? ORDER BY name LIMIT 20').all(q);
+  res.json(rows);
+});
+app.post('/access', (req, res) => {
+  const b = req.body || {};
+  if (!b.first_name || !b.last_name) return res.status(400).json({ error: 'First and last name are required' });
+  if (!b.email && !b.phone) return res.status(400).json({ error: 'An email or phone is required' });
+  let stored = null;
+  if (b.id_photo) {
+    let raw = String(b.id_photo); const c = raw.indexOf(','); let mime = '';
+    if (raw.startsWith('data:')) { mime = raw.slice(5, raw.indexOf(';')); if (c !== -1) raw = raw.slice(c + 1); }
+    if (!ATT_MIME[mime]) return res.status(400).json({ error: 'ID photo must be an image or PDF' });
+    let buf; try { buf = Buffer.from(raw, 'base64'); } catch { return res.status(400).json({ error: 'bad photo data' }); }
+    if (buf.length > ATT_MAX) return res.status(413).json({ error: 'ID photo too large (max 25 MB)' });
+    stored = 'idphoto-' + randomUUID() + ATT_MIME[mime];
+    try { writeFileSync(join(UPLOADS_DIR, stored), buf); } catch { return res.status(500).json({ error: 'could not save photo' }); }
+  }
+  const info = db.prepare("INSERT INTO access_requests (first_name,last_name,email,phone,id_photo) VALUES (?,?,?,?,?)")
+    .run(N(b.first_name), N(b.last_name), N(b.email), N(b.phone), stored);
+  const ids = [...new Set((b.site_ids || (b.site_id ? [b.site_id] : [])).map(Number).filter(Boolean))];
+  const ins = db.prepare('INSERT OR IGNORE INTO access_request_sites (request_id, site_id) VALUES (?,?)');
+  for (const sid of ids) ins.run(info.lastInsertRowid, sid);
+  db.prepare('INSERT INTO audit_log (actor, role, action, target, details) VALUES (?,?,?,?,?)').run((b.email || (b.first_name + ' ' + b.last_name)), 'public', 'access_request', 'access#' + info.lastInsertRowid, ids.length + ' site(s)');
+  // notify staff mailbox
+  const notify = getSetting('access_notify_email');
+  if (notify) {
+    const siteNames = accessSites(info.lastInsertRowid).map(s => s.name).join(', ') || '(none)';
+    const who = `${b.first_name} ${b.last_name}`;
+    const contact = [b.email, b.phone].filter(Boolean).join(' · ');
+    const reviewUrl = (getSetting('public_base_url') || '').replace(/\/+$/, '') + '/#/access';
+    mailSafe({
+      to: notify, subject: `New site access request: ${who}`,
+      text: `New site access request\n\nName: ${who}\nContact: ${contact}\nSite(s): ${siteNames}\nID photo: ${stored ? 'attached (view in app)' : 'none'}\n\nReview: ${reviewUrl}`,
+      html: `<h2>New site access request</h2><p><b>Name:</b> ${who}<br><b>Contact:</b> ${contact || '—'}<br><b>Site(s):</b> ${siteNames}<br><b>ID photo:</b> ${stored ? 'attached (view in app)' : 'none'}</p><p><a href="${reviewUrl}">Review in the platform</a></p>`
+    });
+  }
+  res.json({ ok: true, id: info.lastInsertRowid });
+});
+function accessSites(reqId) { return db.prepare('SELECT s.id, s.name FROM access_request_sites ars JOIN sites s ON s.id=ars.site_id WHERE ars.request_id=?').all(reqId); }
+app.get('/api/access', requireNoc, (req, res) => {
+  const rows = db.prepare('SELECT id, first_name, last_name, email, phone, status, reviewed_by, reviewed_at, notes, created_at, (id_photo IS NOT NULL) AS has_photo FROM access_requests ORDER BY (status=\'pending\') DESC, datetime(created_at) DESC').all();
+  for (const r of rows) r.sites = accessSites(r.id);
+  res.json(rows);
+});
+app.get('/api/access/:id/photo', requireNoc, (req, res) => {
+  const r = db.prepare('SELECT * FROM access_requests WHERE id=?').get(req.params.id);
+  if (!r || !r.id_photo) return res.status(404).json({ error: 'no photo' });
+  const fp = join(UPLOADS_DIR, r.id_photo);
+  if (!existsSync(fp)) return res.status(404).json({ error: 'file missing' });
+  const ext = (r.id_photo.split('.').pop() || '').toLowerCase();
+  const mime = ext === 'pdf' ? 'application/pdf' : (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg');
+  audit(req, 'access_read', 'access#' + r.id, 'ID photo');
+  res.setHeader('Content-Type', mime);
+  res.setHeader('Content-Length', statSync(fp).size);
+  res.setHeader('Content-Disposition', 'inline');
+  createReadStream(fp).pipe(res);
+});
+app.put('/api/access/:id', requireNoc, (req, res) => {
+  const b = req.body || {};
+  const r = db.prepare('SELECT * FROM access_requests WHERE id=?').get(req.params.id);
+  if (!r) return res.status(404).json({ error: 'not found' });
+  if (b.status && ['pending', 'approved', 'denied'].includes(b.status)) {
+    db.prepare("UPDATE access_requests SET status=?, reviewed_by=?, reviewed_at=datetime('now') WHERE id=?").run(b.status, (req.user && req.user.email) || '', r.id);
+    if (b.status === 'approved' && r.email) {
+      const siteNames = accessSites(r.id).map(s => s.name).join(', ') || 'the requested site';
+      mailSafe({
+        to: r.email, subject: 'Your site access request is approved',
+        text: `Hi ${r.first_name},\n\nYour request for access to ${siteNames} has been approved.\n\nThank you.`,
+        html: `<p>Hi ${r.first_name},</p><p>Your request for access to <b>${siteNames}</b> has been <b>approved</b>.</p><p>Thank you.</p>`
+      });
+    }
+  }
+  if (b.notes !== undefined) db.prepare('UPDATE access_requests SET notes=? WHERE id=?').run(N(b.notes), r.id);
+  audit(req, 'edit', 'access#' + r.id, b.status || 'note');
+  res.json({ ok: true });
+});
+app.delete('/api/access/:id', requireNoc, (req, res) => {
+  const r = db.prepare('SELECT * FROM access_requests WHERE id=?').get(req.params.id);
+  if (!r) return res.status(404).json({ error: 'not found' });
+  if (r.id_photo) { try { unlinkSync(join(UPLOADS_DIR, r.id_photo)); } catch {} }
+  db.prepare('DELETE FROM access_request_sites WHERE request_id=?').run(r.id);
+  db.prepare('DELETE FROM access_requests WHERE id=?').run(r.id);
+  audit(req, 'delete', 'access#' + r.id);
+  res.json({ ok: true });
 });
 
 // ---- static frontend ----
