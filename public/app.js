@@ -1197,10 +1197,13 @@ async function renderBatch() {
           <option value="remove-user">Remove user account</option>
           <option value="set-wifi">Set WiFi (SSID / password)</option>
           <option value="add-firewall">Add firewall rule</option>
+          <option value="update-packages">Update packages (RouterOS)</option>
+          <option value="update-firmware">Update RouterBOOT firmware</option>
         </select></div>
       <div id="opFields"></div>
       <div class="hd" style="padding:8px 0 4px"><h2>Target routers</h2>
-        <div style="display:flex;gap:8px"><input id="tfilter" placeholder="Filter…" oninput="renderTargets()" style="width:150px"/>
+        <div style="display:flex;gap:8px"><input id="tfilter" placeholder="Filter…" oninput="renderTargets()" style="width:130px"/>
+        <button class="btn sm" onclick="pollAllTargets()" title="Refresh versions/info from every router"><i class="ti ti-refresh"></i> Poll all</button>
         <button class="btn sm" onclick="selAllTargets(true)">Select all</button><button class="btn sm" onclick="selAllTargets(false)">None</button></div></div>
       <div id="targetList" style="max-height:320px;overflow:auto;border:.5px solid var(--border);border-radius:8px"></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
@@ -1223,18 +1226,34 @@ function batchOpChange() {
     <div class="grid2">${field('Src. address', 'src_address', '', { mono: true, ph: 'e.g. 203.0.113.0/24' })}${field('Dst. address', 'dst_address', '', { mono: true })}</div>
     <div class="grid2">${field('In-interface', 'in_interface', '', { mono: true, ph: 'optional, e.g. ether1' })}${field('Comment', 'comment', 'netinv batch')}</div>
     <div class="help">Rule is appended to the chain. Order matters in RouterOS — put specific drops above any broad accept. Use a comment so you can find/manage it later.</div>`;
+  else if (op === 'update-packages') F.innerHTML = `${field('Channel', 'channel', '', { type: 'select', options: ['', 'stable', 'long-term', 'testing'] })}
+    <div class="help" style="color:var(--warning)"><i class="ti ti-alert-triangle"></i> Checks MikroTik for updates and, if a newer version exists, downloads it and <b>reboots</b> each selected router. Leave channel blank to keep each router's current channel. Routers need internet access.</div>`;
+  else if (op === 'update-firmware') F.innerHTML = `<div class="help" style="color:var(--warning)"><i class="ti ti-alert-triangle"></i> Upgrades the RouterBOOT firmware to match the installed RouterOS and <b>reboots</b> each selected router to apply. Do this after a packages update.</div>`;
 }
 function batchVisible() { const q = ($('#tfilter').value || '').toLowerCase(); return (window._batchTargets || []).filter(t => !q || (t.name || '').toLowerCase().includes(q) || (t.group || '').toLowerCase().includes(q)); }
 function renderTargets() {
   const list = $('#targetList'); if (!list) return;
   const sel = window._batchSel || (window._batchSel = new Set());
   const items = batchVisible();
-  list.innerHTML = items.map(t => `<label class="row" style="cursor:${t.eligible ? 'pointer' : 'not-allowed'};opacity:${t.eligible ? 1 : .5}">
+  list.innerHTML = items.map(t => {
+    const ver = t.ros_version ? `<span class="tag" title="RouterOS version">v${esc(String(t.ros_version).split(' ')[0])}</span>` : '<span class="small muted">v?</span>';
+    const fw = t.fw_needs_update ? `<span class="tag" style="background:rgba(245,166,35,.16);color:var(--warning)" title="RouterBOOT ${esc(t.fw_version)} → ${esc(t.fw_upgrade)}">FW↑ ${esc(t.fw_upgrade)}</span>` : (t.fw_version ? `<span class="small sec-muted" title="RouterBOOT firmware">FW ${esc(t.fw_version)}</span>` : '');
+    return `<label class="row" style="cursor:${t.eligible ? 'pointer' : 'not-allowed'};opacity:${t.eligible ? 1 : .5}">
     <input type="checkbox" ${sel.has(t.id) ? 'checked' : ''} ${t.eligible ? '' : 'disabled'} onchange="toggleTarget(${t.id},this.checked)" style="width:auto"/>
-    <div style="flex:1;min-width:0"><div>${esc(t.name)}</div><div class="small mono sec-muted">${esc(t.group || '')}${t.mgmt_address ? ' · ' + esc(t.mgmt_address) : ''}${t.eligible ? '' : ' · ' + esc(t.reason)}</div></div></label>`).join('') || '<div class="row muted">No matching devices</div>';
+    <div style="flex:1;min-width:0"><div>${esc(t.name)} ${ver} ${fw}</div><div class="small mono sec-muted">${esc(t.group || '')}${t.mgmt_address ? ' · ' + esc(t.mgmt_address) : ''}${t.eligible ? '' : ' · ' + esc(t.reason)}${t.last_polled ? ' · polled ' + esc(t.last_polled) : ' · never polled'}</div></div></label>`;
+  }).join('') || '<div class="row muted">No matching devices</div>';
   updateSelCount();
 }
 function toggleTarget(id, on) { const sel = window._batchSel; if (on) sel.add(id); else sel.delete(id); updateSelCount(); }
+async function pollAllTargets() {
+  toast('Polling all routers… this can take a moment');
+  try {
+    const r = await api('/devices/poll-all', { method: 'POST' });
+    window._batchTargets = await api('/batch/targets'); // refresh versions
+    renderTargets();
+    toast(`Polled ${r.ok}/${r.total} router(s)${r.fail ? ' · ' + r.fail + ' unreachable' : ''}`);
+  } catch (e) { toast(e.message); }
+}
 function selAllTargets(on) { const sel = window._batchSel = new Set(); if (on) for (const t of batchVisible()) if (t.eligible) sel.add(t.id); renderTargets(); }
 function updateSelCount() { const el = $('#selCount'); if (el) el.textContent = (window._batchSel || new Set()).size + ' selected'; }
 function batchResultCard(r) {
@@ -1242,7 +1261,7 @@ function batchResultCard(r) {
     <div style="flex:1;min-width:0"><div>${esc(x.device_name || ('device#' + x.device_id))}</div><div class="small sec-muted">${esc(x.detail || '')}</div></div></div>`).join('');
   return `<div class="card" style="margin-top:14px"><div class="hd"><h2>${esc(r.summary || r.op)}</h2><span class="small mono"><span style="color:var(--success)">${r.ok}✓</span> · <span style="color:var(--danger)">${r.fail}✗</span> / ${r.total}</span></div>${rows}</div>`;
 }
-const BATCH_LABELS = { 'add-user': 'Add user', 'change-password': 'Change password', 'remove-user': 'Remove user', 'set-wifi': 'Set WiFi', 'add-firewall': 'Add firewall rule' };
+const BATCH_LABELS = { 'add-user': 'Add user', 'change-password': 'Change password', 'remove-user': 'Remove user', 'set-wifi': 'Set WiFi', 'add-firewall': 'Add firewall rule', 'update-packages': 'Update packages', 'update-firmware': 'Update RouterBOOT firmware' };
 async function runBatchOp() {
   const op = $('#f [name=op]').value;
   const params = collect('#opFields');
@@ -1253,7 +1272,8 @@ async function runBatchOp() {
   if (op === 'set-wifi' && !params.ssid && !params.password) { toast('Enter an SSID and/or password'); return; }
   if (op === 'add-firewall' && (!params.chain || !params.action)) { toast('Pick a chain and action'); return; }
   if (!ids.length) { toast('Select at least one router'); return; }
-  const extra = op === 'remove-user' ? ' — this removes the account' : '';
+  const reboots = op === 'update-packages' || op === 'update-firmware';
+  const extra = op === 'remove-user' ? ' — this removes the account' : (reboots ? ' — this DOWNLOADS updates and REBOOTS each router' : '');
   if (!confirm(`Run "${BATCH_LABELS[op]}" on ${ids.length} router(s)?${extra}`)) return;
   const out = $('#batchResults'); out.innerHTML = `<div class="card" style="margin-top:14px;padding:14px"><span class="muted">Running on ${ids.length} router(s)…</span></div>`;
   try {

@@ -49,6 +49,9 @@ export function migrate() {
   ensure('devices', 'interfaces_json', 'TEXT');
   ensure('devices', 'iface_roles_json', 'TEXT');
   ensure('devices', 'wifi_json', 'TEXT');
+  ensure('devices', 'ros_version', 'TEXT');
+  ensure('devices', 'fw_version', 'TEXT');
+  ensure('devices', 'fw_upgrade', 'TEXT');
   ensure('devices', 'enroll_pending', 'INTEGER DEFAULT 0');
   ensure('devices', 'enrolled_at', 'TEXT');
   ensure('devices', 'last_polled', 'TEXT');

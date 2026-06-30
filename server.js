@@ -332,23 +332,16 @@ app.put('/api/devices/:id/iface-role', requireNoc, (req, res) => {
   res.json({ ok: true });
 });
 
-// Poll a MikroTik RouterOS device over the management overlay for its live interfaces
-app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
-  const d = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
-  if (!d) return res.status(404).json({ error: 'not found' });
-  if (!d.mgmt_address) return res.status(400).json({ error: 'No management IP — assign/provision the overlay first' });
-  if (!d.admin_password) return res.status(400).json({ error: 'Add an admin password (and username) for this device first' });
-  const user = d.admin_username || 'admin';
-  const auth = 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64');
-  const H = { Authorization: auth, Accept: 'application/json' };
-  try {
+// Poll a MikroTik RouterOS device over the overlay — reusable core (throws on error; updates DB)
+async function pollDeviceCore(d) {
+  if (!d.mgmt_address) throw Object.assign(new Error('No management IP — assign/provision the overlay first'), { http: 400 });
+  if (!d.admin_password) throw Object.assign(new Error('Add an admin password (and username) for this device first'), { http: 400 });
+  const H = rosHeaders(d);
+  {
     const r = await restReq(d.mgmt_address, '/rest/interface', { headers: H });
-    if (r.status >= 400) {
-      const hint = r.status === 401 ? ' (login rejected — check admin user/pass and that the REST service has access)' : '';
-      return res.status(502).json({ error: `Device returned ${r.status}${hint}` });
-    }
+    if (r.status >= 400) throw Object.assign(new Error(`Device returned ${r.status}${r.status === 401 ? ' (login rejected — check admin user/pass)' : ''}`), { http: 502 });
     let data;
-    try { data = JSON.parse(r.body); } catch { return res.status(502).json({ error: 'Unexpected response from device (is REST enabled?)' }); }
+    try { data = JSON.parse(r.body); } catch { throw Object.assign(new Error('Unexpected response from device (is REST enabled?)'), { http: 502 }); }
     // Also pull IP addresses (best-effort) to show active IPs per interface + detect public IP
     let addresses = [];
     try {
@@ -381,10 +374,14 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
     // Port-1 MAC (ether1, else first ethernet/interface with a MAC) + serial from routerboard
     const firstEth = ifaces.find(i => i.name === 'ether1') || ifaces.find(i => i.type === 'ether' && i.mac) || ifaces.find(i => i.mac);
     const macVal = firstEth ? firstEth.mac : null;
-    let serialVal = null;
+    let serialVal = null, fwCur = null, fwUpg = null, rosVer = null;
     try {
       const rb = await restReq(d.mgmt_address, '/rest/system/routerboard', { headers: H, timeoutMs: 7000 });
-      if (rb.status < 400) { const j = JSON.parse(rb.body); const o = Array.isArray(j) ? j[0] : j; serialVal = (o && (o['serial-number'] || o['serial'])) || null; }
+      if (rb.status < 400) { const j = JSON.parse(rb.body); const o = Array.isArray(j) ? j[0] : j; serialVal = (o && (o['serial-number'] || o['serial'])) || null; fwCur = (o && o['current-firmware']) || null; fwUpg = (o && o['upgrade-firmware']) || null; }
+    } catch {}
+    try {
+      const rr = await restReq(d.mgmt_address, '/rest/system/resource', { headers: H, timeoutMs: 7000 });
+      if (rr.status < 400) { const j = JSON.parse(rr.body); const o = Array.isArray(j) ? j[0] : j; rosVer = (o && o.version) || null; }
     } catch {}
     // WiFi presence (best-effort) — store SSIDs only, never passwords
     let wifiSummary = null;
@@ -396,6 +393,9 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
     const sets = ['interfaces_json=?', 'wifi_json=?', 'last_polled=?']; const vals = [JSON.stringify(ifaces), wifiSummary ? JSON.stringify(wifiSummary) : null, polled];
     if (macVal) { sets.push('mac=?'); vals.push(macVal); }
     if (serialVal) { sets.push('serial=?'); vals.push(serialVal); }
+    if (rosVer) { sets.push('ros_version=?'); vals.push(rosVer); }
+    if (fwCur) { sets.push('fw_version=?'); vals.push(fwCur); }
+    if (fwUpg) { sets.push('fw_upgrade=?'); vals.push(fwUpg); }
     vals.push(d.id);
     db.prepare(`UPDATE devices SET ${sets.join(', ')} WHERE id=?`).run(...vals);
     let setPublic = null, setMgmt = null, target = null;
@@ -409,16 +409,23 @@ app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
       target = 'pop';
     }
     let harvested = 0; try { harvested = await harvestThreats(d); } catch {}
-    audit(req, 'poll', 'device#' + d.id, `RouterOS poll: ${ifaces.length} interfaces${publicIp ? ', public ' + publicIp : ''}`);
-    res.json({ count: ifaces.length, interfaces: ifaces, polled_at: polled, public_ip: publicIp, set_public: setPublic, set_mgmt: setMgmt, target, harvested, wifi: wifiSummary ? wifiSummary.radios.length : 0 });
-  } catch (e) {
-    const timedOut = e.code === 'ETIMEDOUT' || e.message === 'timeout';
-    let msg;
-    if (timedOut) msg = 'Device unreachable (timed out) — is the server on the management overlay and the IP correct?';
-    else if (e.code === 'ECONNREFUSED') msg = 'Device refused on ports 443 and 80 — enable the RouterOS web service (www or www-ssl) so the REST API is reachable.';
-    else msg = 'Could not reach device: ' + e.message;
-    res.status(502).json({ error: msg });
+    return { count: ifaces.length, interfaces: ifaces, polled_at: polled, public_ip: publicIp, set_public: setPublic, set_mgmt: setMgmt, target, harvested, wifi: wifiSummary ? wifiSummary.radios.length : 0, ros_version: rosVer, fw_version: fwCur, fw_upgrade: fwUpg };
   }
+}
+app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
+  const d = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'not found' });
+  try { const out = await pollDeviceCore(d); audit(req, 'poll', 'device#' + d.id, `RouterOS poll: ${out.count} interfaces${out.public_ip ? ', public ' + out.public_ip : ''}`); res.json(out); }
+  catch (e) { res.status(e.http === 400 ? 400 : 502).json({ error: e.http ? e.message : rosErr(e) }); }
+});
+// Poll every reachable platform router (refresh versions/info) — limited concurrency
+app.post('/api/devices/poll-all', requireNoc, async (req, res) => {
+  const devs = db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
+  let ok = 0, fail = 0, idx = 0;
+  const worker = async () => { while (idx < devs.length) { const d = devs[idx++]; try { await pollDeviceCore(d); ok++; } catch { fail++; } } };
+  await Promise.all(Array.from({ length: Math.min(5, devs.length) }, worker));
+  audit(req, 'poll', 'devices', `poll-all: ${ok} ok, ${fail} fail of ${devs.length}`);
+  res.json({ total: devs.length, ok, fail });
 });
 
 // ---- RouterOS DHCP lease management (NOC/Admin) ----
@@ -1661,6 +1668,31 @@ async function applyBatchOp(d, op, params) {
     for (const radio of wf.radios) { await writeWifi(d, { system: wf.system, id: radio.id, profile: radio.profile, profileId: radio.profileId, ssid: params.ssid, password: params.password }); n++; }
     return 'updated ' + n + ' radio(s)' + (params.ssid ? ' · ssid=' + params.ssid : '') + (params.password ? ' · password set' : '');
   }
+  if (op === 'update-packages') {
+    if (params.channel) await ros('PATCH', '/rest/system/package/update', { channel: params.channel });
+    await ros('POST', '/rest/system/package/update/check-for-updates', {});
+    let inst = '', latest = '', status = '';
+    const g = await ros('GET', '/rest/system/package/update');
+    if (g.status < 400) { try { const o = JSON.parse(g.body); const u = Array.isArray(o) ? o[0] : o; inst = u['installed-version'] || ''; latest = u['latest-version'] || ''; status = u.status || ''; } catch {} }
+    if (latest && inst && latest !== inst) {
+      try {
+        const r = await ros('POST', '/rest/system/package/update/install', {});
+        if (r.status >= 400) throw new Error('install HTTP ' + r.status + ' ' + String(r.body || '').slice(0, 160));
+      } catch (e) {
+        if (['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ECONNREFUSED'].includes(e.code) || e.message === 'timeout') return 'upgrade ' + inst + ' → ' + latest + ' initiated (device rebooting)';
+        throw e;
+      }
+      return 'upgrading ' + inst + ' → ' + latest + ' (downloading + rebooting)';
+    }
+    return 'already up to date' + (inst ? ' (' + inst + ')' : '') + (status ? ' · ' + status : '');
+  }
+  if (op === 'update-firmware') {
+    const r = await ros('POST', '/rest/system/routerboard/upgrade', {});
+    if (r.status >= 400) throw new Error('routerboard upgrade HTTP ' + r.status + ' ' + String(r.body || '').slice(0, 160));
+    let rebooted = false;
+    try { const rb = await ros('POST', '/rest/system/reboot', {}); rebooted = rb.status < 400; } catch {}
+    return 'RouterBOOT firmware upgrade staged' + (rebooted ? ' · rebooting to apply' : ' · reboot to apply');
+  }
   if (op === 'add-firewall') {
     const body = { chain: params.chain, action: params.action };
     if (params.protocol && params.protocol !== 'any') body.protocol = params.protocol;
@@ -1697,7 +1729,9 @@ async function runBatch(op, params, deviceIds, actor) {
     'change-password': 'Change password ' + params.name,
     'remove-user': 'Remove user ' + params.name,
     'set-wifi': 'Set WiFi' + (params.ssid ? ' "' + params.ssid + '"' : ' password'),
-    'add-firewall': 'Add firewall ' + params.chain + '/' + params.action
+    'add-firewall': 'Add firewall ' + params.chain + '/' + params.action,
+    'update-packages': 'Update packages' + (params.channel ? ' (' + params.channel + ')' : ''),
+    'update-firmware': 'Update RouterBOOT firmware'
   })[op] || op;
   const jid = db.prepare("INSERT INTO batch_jobs (op,summary,actor,total,ok,fail) VALUES (?,?,?,?,?,?)").run(op, summary, actor, results.length, ok, fail).lastInsertRowid;
   const ins = db.prepare("INSERT INTO batch_results (job_id,device_id,device_name,status,detail) VALUES (?,?,?,?,?)");
@@ -1705,9 +1739,10 @@ async function runBatch(op, params, deviceIds, actor) {
   return { id: jid, op, summary, total: results.length, ok, fail, results };
 }
 app.get('/api/batch/targets', requireNoc, (req, res) => {
-  const rows = db.prepare("SELECT id, name, mgmt_address, management_mode, assigned_type, assigned_site_id, assigned_pop_id, (admin_password IS NOT NULL AND admin_password<>'') AS has_pw FROM devices WHERE management_mode='platform' ORDER BY name").all();
+  const rows = db.prepare("SELECT id, name, mgmt_address, management_mode, assigned_type, assigned_site_id, assigned_pop_id, ros_version, fw_version, fw_upgrade, last_polled, (admin_password IS NOT NULL AND admin_password<>'') AS has_pw FROM devices WHERE management_mode='platform' ORDER BY name").all();
   for (const r of rows) {
     r.eligible = !!(r.mgmt_address && r.has_pw);
+    r.fw_needs_update = !!(r.fw_version && r.fw_upgrade && r.fw_version !== r.fw_upgrade);
     r.reason = r.eligible ? '' : (!r.mgmt_address ? 'no mgmt IP' : 'no admin password');
     if (r.assigned_type === 'site' && r.assigned_site_id) r.group = (db.prepare('SELECT name FROM sites WHERE id=?').get(r.assigned_site_id) || {}).name || 'Site';
     else if (r.assigned_type === 'pop' && r.assigned_pop_id) r.group = 'POP · ' + ((db.prepare('SELECT name FROM pops WHERE id=?').get(r.assigned_pop_id) || {}).name || '');
@@ -1727,7 +1762,7 @@ app.get('/api/batch/:id', requireNoc, (req, res) => {
 });
 app.post('/api/batch', requireNoc, async (req, res) => {
   const b = req.body || {};
-  const OPS = ['add-user', 'change-password', 'remove-user', 'set-wifi', 'add-firewall'];
+  const OPS = ['add-user', 'change-password', 'remove-user', 'set-wifi', 'add-firewall', 'update-packages', 'update-firmware'];
   if (!OPS.includes(b.op)) return res.status(400).json({ error: 'unknown operation' });
   const ids = (b.device_ids || []).map(Number).filter(Boolean);
   if (!ids.length) return res.status(400).json({ error: 'Select at least one device' });
@@ -1737,6 +1772,7 @@ app.post('/api/batch', requireNoc, async (req, res) => {
   else if (b.op === 'remove-user') { if (!p.name) err = 'Username is required'; }
   else if (b.op === 'set-wifi') { if (!p.ssid && !p.password) err = 'Enter a new SSID and/or password'; }
   else if (b.op === 'add-firewall') { if (!p.chain || !p.action) err = 'Chain and action are required'; }
+  // update-packages / update-firmware need no params
   if (err) return res.status(400).json({ error: err });
   try {
     const out = await runBatch(b.op, p, ids, (req.user && req.user.email) || '');
