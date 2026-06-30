@@ -93,8 +93,27 @@
     window.rm = i => { sites.splice(i, 1); renderChips(); };
     $('idfile').addEventListener('change', () => {
       const f = $('idfile').files[0]; if (!f) return;
+      $('err').textContent = '';
+      const isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
       const r = new FileReader();
-      r.onload = () => { photo = r.result; if (f.type.startsWith('image/')) { $('preview').src = r.result; $('preview').style.display = 'block'; } else { $('preview').style.display = 'none'; } };
+      r.onerror = () => { $('err').textContent = 'Could not read that file — try a different photo.'; };
+      r.onload = () => {
+        if (isPdf) { photo = r.result; $('preview').style.display = 'none'; return; }
+        // Convert/resize the image to JPEG in the browser (fixes iPhone HEIC + very large files)
+        const img = new Image();
+        img.onload = () => {
+          const max = 1600; let w = img.width, h = img.height;
+          if (w > max || h > max) { const sc = Math.min(max / w, max / h); w = Math.round(w * sc); h = Math.round(h * sc); }
+          try {
+            const c = document.createElement('canvas'); c.width = w; c.height = h;
+            c.getContext('2d').drawImage(img, 0, 0, w, h);
+            photo = c.toDataURL('image/jpeg', 0.85);
+          } catch { photo = r.result; }
+          $('preview').src = photo; $('preview').style.display = 'block';
+        };
+        img.onerror = () => { photo = r.result; $('preview').style.display = 'none'; }; // fallback: upload original
+        img.src = r.result;
+      };
       r.readAsDataURL(f);
     });
     $('submit').addEventListener('click', async () => {

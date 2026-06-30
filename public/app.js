@@ -1430,8 +1430,10 @@ async function renderSettings() {
         <div style="flex:1"><div>Use TLS/SSL (port 465)</div><div class="small sec-muted">Leave off for STARTTLS on 587.</div></div></label>
       <div class="grid2">${field('SMTP username', 'smtp_user', s.smtp_user, { mono: true })}${field('SMTP password', 'smtp_pass', '', { mono: true, ph: s.has_smtp_pass ? 'unchanged' : '' })}</div>
       <div class="grid2">${field('From address', 'mail_from', s.mail_from, { mono: true, ph: 'noreply@geekitek.com' })}${field('Access requests → notify', 'access_notify_email', s.access_notify_email, { mono: true, ph: 'access@geekitek.com' })}</div>
-      <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" onclick="saveMail()"><i class="ti ti-check"></i> Save</button></div>
-      <div class="help">New site-access requests email the "notify" address; approving a request emails the requester. Requires a working SMTP server + From address.</div>
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center"><button class="btn primary" onclick="saveMail()"><i class="ti ti-check"></i> Save</button>
+        <input id="mailTestTo" placeholder="test recipient (optional)" style="flex:1;min-width:160px;font-family:var(--mono)"/>
+        <button class="btn" onclick="sendTestMail()"><i class="ti ti-send"></i> Send test</button></div>
+      <div class="help">New site-access requests email the "notify" address; approving/denying a request emails the requester. Requires a working SMTP server + From address. Save before sending a test.</div>
     </div>
     <div class="card" style="padding:16px" id="nodes">
       <h2 style="margin-bottom:12px"><i class="ti ti-server-cog"></i> Provisioning nodes (Netinstall benches)</h2>
@@ -1461,7 +1463,13 @@ async function saveMail() {
   const d = collect('#mail');
   d.smtp_secure = $('#smtpSecure').checked;
   if (!d.smtp_pass) delete d.smtp_pass;
+  delete d.mailTestTo;
   try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
+}
+async function sendTestMail() {
+  const to = $('#mailTestTo').value.trim();
+  toast('Sending test email…');
+  try { const r = await api('/settings/mail-test', { method: 'POST', body: JSON.stringify({ to }) }); toast('Test email sent to ' + r.to); } catch (e) { toast('Email failed: ' + e.message); }
 }
 async function addNode() {
   const d = collect('#nodes');

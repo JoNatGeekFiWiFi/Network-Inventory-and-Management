@@ -288,6 +288,17 @@ app.put('/api/settings', requireNoc, (req, res) => {
   audit(req, 'edit', 'settings', 'overlay settings');
   res.json({ ok: true });
 });
+// Send a test email to verify SMTP config (awaits + returns the real error)
+app.post('/api/settings/mail-test', requireNoc, async (req, res) => {
+  const to = ((req.body || {}).to || '').trim() || getSetting('access_notify_email') || getSetting('mail_from');
+  if (!getSetting('smtp_host') || !getSetting('mail_from')) return res.status(400).json({ error: 'Set the SMTP host and From address first' });
+  if (!to) return res.status(400).json({ error: 'No recipient — set the notify address or enter one' });
+  try {
+    await sendMail({ to, subject: 'NetInv test email', text: 'This is a test email from your Network Inventory platform. SMTP is working.', html: '<p>This is a <b>test email</b> from your Network Inventory platform. SMTP is working.</p>' });
+    audit(req, 'edit', 'settings', 'sent test email to ' + to);
+    res.json({ ok: true, to });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
 // Full hub (server) wg0.conf — includes the hub private key + all peers. Sensitive, audited.
 app.get('/api/settings/wg/hub-config', requireNoc, (req, res) => {
   const subnet = getSetting('wg_subnet'), priv = getSetting('wg_server_priv');
@@ -1580,7 +1591,7 @@ app.delete('/api/pops/:id', requireNoc, (req, res) => {
 });
 
 // ---- note attachments (pictures + PDFs) ----
-const ATT_MIME = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp', 'application/pdf': '.pdf' };
+const ATT_MIME = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp', 'image/heic': '.heic', 'image/heif': '.heif', 'application/pdf': '.pdf' };
 const ATT_MAX = 25 * 1024 * 1024; // 25 MB
 function withNoteAttachments(notes) {
   const q = db.prepare('SELECT id, filename, mime, size FROM note_attachments WHERE note_id=? ORDER BY id');
@@ -2070,7 +2081,7 @@ app.get('/api/access/:id/photo', requireNoc, (req, res) => {
   const fp = join(UPLOADS_DIR, r.id_photo);
   if (!existsSync(fp)) return res.status(404).json({ error: 'file missing' });
   const ext = (r.id_photo.split('.').pop() || '').toLowerCase();
-  const mime = ext === 'pdf' ? 'application/pdf' : (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/jpeg');
+  const mime = ext === 'pdf' ? 'application/pdf' : (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : ext === 'heic' ? 'image/heic' : ext === 'heif' ? 'image/heif' : 'image/jpeg');
   audit(req, 'access_read', 'access#' + r.id, 'ID photo');
   res.setHeader('Content-Type', mime);
   res.setHeader('Content-Length', statSync(fp).size);
@@ -2083,12 +2094,17 @@ app.put('/api/access/:id', requireNoc, (req, res) => {
   if (!r) return res.status(404).json({ error: 'not found' });
   if (b.status && ['pending', 'approved', 'denied'].includes(b.status)) {
     db.prepare("UPDATE access_requests SET status=?, reviewed_by=?, reviewed_at=datetime('now') WHERE id=?").run(b.status, (req.user && req.user.email) || '', r.id);
-    if (b.status === 'approved' && r.email) {
+    if ((b.status === 'approved' || b.status === 'denied') && r.email) {
       const siteNames = accessSites(r.id).map(s => s.name).join(', ') || 'the requested site';
-      mailSafe({
+      if (b.status === 'approved') mailSafe({
         to: r.email, subject: 'Your site access request is approved',
         text: `Hi ${r.first_name},\n\nYour request for access to ${siteNames} has been approved.\n\nThank you.`,
         html: `<p>Hi ${r.first_name},</p><p>Your request for access to <b>${siteNames}</b> has been <b>approved</b>.</p><p>Thank you.</p>`
+      });
+      else mailSafe({
+        to: r.email, subject: 'Your site access request',
+        text: `Hi ${r.first_name},\n\nYour request for access to ${siteNames} was not approved. Please contact us if you have questions.\n\nThank you.`,
+        html: `<p>Hi ${r.first_name},</p><p>Your request for access to <b>${siteNames}</b> was <b>not approved</b>. Please contact us if you have questions.</p><p>Thank you.</p>`
       });
     }
   }
