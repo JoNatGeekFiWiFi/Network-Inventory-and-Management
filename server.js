@@ -2,7 +2,7 @@
 import express from 'express';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, extname } from 'node:path';
-import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync } from 'node:fs';
+import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync, copyFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, backfillAccountCustomers, UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR } from './db.js';
 import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie } from './auth.js';
@@ -266,6 +266,7 @@ app.get('/api/settings', requireNoc, (req, res) => {
     smtp_user: getSetting('smtp_user') || '',
     mail_from: getSetting('mail_from') || '',
     access_notify_email: getSetting('access_notify_email') || '',
+    auto_checkout_at: getSetting('auto_checkout_at') || '',
     has_smtp_pass: !!getSetting('smtp_pass'),
     has_provision_token: !!getSetting('provision_token'),
     has_prov_admin_password: !!getSetting('prov_admin_password'),
@@ -276,7 +277,7 @@ app.get('/api/settings', requireNoc, (req, res) => {
 });
 app.put('/api/settings', requireNoc, (req, res) => {
   const b = req.body || {};
-  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns', 'backup_upload_base', 'public_base_url', 'prov_wifi_ssid', 'smtp_host', 'smtp_port', 'smtp_user', 'mail_from', 'access_notify_email']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns', 'backup_upload_base', 'public_base_url', 'prov_wifi_ssid', 'smtp_host', 'smtp_port', 'smtp_user', 'mail_from', 'access_notify_email', 'auto_checkout_at']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
   if (b.smtp_secure !== undefined) setSetting('smtp_secure', b.smtp_secure ? '1' : '0');
   if (b.smtp_pass) setSetting('smtp_pass', String(b.smtp_pass));
   if (b.zt_api_token) setSetting('zt_api_token', String(b.zt_api_token).trim());
@@ -1969,6 +1970,22 @@ async function sampleTick() {
         db.prepare("INSERT INTO settings (key,value) VALUES ('last_backup_run',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(new Date().toISOString());
       }
     }
+    // end-of-day auto check-out of any visitors still on site (once per day, at/after the configured time)
+    const acAt = getSetting('auto_checkout_at');
+    if (acAt && /^\d{1,2}:\d{2}$/.test(acAt)) {
+      const now = new Date();
+      const hhmm = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+      const today = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+      const cutoff = acAt.length === 4 ? '0' + acAt : acAt;
+      if (hhmm >= cutoff && getSetting('last_auto_checkout') !== today) {
+        const open = db.prepare('SELECT COUNT(*) AS n FROM visits WHERE check_out_at IS NULL').get().n;
+        if (open > 0) {
+          db.prepare("UPDATE visits SET check_out_at=datetime('now'), check_out_by='auto (end of day)' WHERE check_out_at IS NULL").run();
+          db.prepare("INSERT INTO audit_log (actor,role,action,target,details) VALUES ('system','system','checkout','visits',?)").run('auto end-of-day: ' + open + ' visitor(s)');
+        }
+        setSetting('last_auto_checkout', today);
+      }
+    }
   } finally { _sampling = false; }
 }
 if (process.env.SAMPLER !== 'off') {
@@ -2034,20 +2051,29 @@ app.get('/access/sites', (req, res) => {
   const rows = db.prepare('SELECT id, name FROM sites WHERE name LIKE ? ORDER BY name LIMIT 20').all(q);
   res.json(rows);
 });
+function saveIdPhoto(dataUrl) {
+  let raw = String(dataUrl); const c = raw.indexOf(','); let mime = '';
+  if (raw.startsWith('data:')) { mime = raw.slice(5, raw.indexOf(';')); if (c !== -1) raw = raw.slice(c + 1); }
+  if (!ATT_MIME[mime]) return { error: 'ID photo must be an image or PDF', code: 400 };
+  let buf; try { buf = Buffer.from(raw, 'base64'); } catch { return { error: 'bad photo data', code: 400 }; }
+  if (buf.length > ATT_MAX) return { error: 'ID photo too large (max 25 MB)', code: 413 };
+  const stored = 'idphoto-' + randomUUID() + ATT_MIME[mime];
+  try { writeFileSync(join(UPLOADS_DIR, stored), buf); } catch { return { error: 'could not save photo', code: 500 }; }
+  return { stored };
+}
+// copy a prior visitor's ID photo to a new file so a returning visit reuses it without re-scanning
+function copyIdPhoto(srcStored) {
+  if (!srcStored || !existsSync(join(UPLOADS_DIR, srcStored))) return null;
+  const ext = '.' + (srcStored.split('.').pop() || 'jpg');
+  const stored = 'idphoto-' + randomUUID() + ext;
+  try { copyFileSync(join(UPLOADS_DIR, srcStored), join(UPLOADS_DIR, stored)); return stored; } catch { return null; }
+}
 app.post('/access', (req, res) => {
   const b = req.body || {};
   if (!b.first_name || !b.last_name) return res.status(400).json({ error: 'First and last name are required' });
   if (!b.email && !b.phone) return res.status(400).json({ error: 'An email or phone is required' });
   let stored = null;
-  if (b.id_photo) {
-    let raw = String(b.id_photo); const c = raw.indexOf(','); let mime = '';
-    if (raw.startsWith('data:')) { mime = raw.slice(5, raw.indexOf(';')); if (c !== -1) raw = raw.slice(c + 1); }
-    if (!ATT_MIME[mime]) return res.status(400).json({ error: 'ID photo must be an image or PDF' });
-    let buf; try { buf = Buffer.from(raw, 'base64'); } catch { return res.status(400).json({ error: 'bad photo data' }); }
-    if (buf.length > ATT_MAX) return res.status(413).json({ error: 'ID photo too large (max 25 MB)' });
-    stored = 'idphoto-' + randomUUID() + ATT_MIME[mime];
-    try { writeFileSync(join(UPLOADS_DIR, stored), buf); } catch { return res.status(500).json({ error: 'could not save photo' }); }
-  }
+  if (b.id_photo) { const r = saveIdPhoto(b.id_photo); if (r.error) return res.status(r.code).json({ error: r.error }); stored = r.stored; }
   const info = db.prepare("INSERT INTO access_requests (first_name,last_name,email,phone,id_photo) VALUES (?,?,?,?,?)")
     .run(N(b.first_name), N(b.last_name), N(b.email), N(b.phone), stored);
   const ids = [...new Set((b.site_ids || (b.site_id ? [b.site_id] : [])).map(Number).filter(Boolean))];
@@ -2098,8 +2124,34 @@ app.post('/api/access/:id/checkout', requireNoc, (req, res) => {
   const ov = openVisit(req.params.id);
   if (!ov) return res.status(409).json({ error: 'Not checked in' });
   db.prepare("UPDATE visits SET check_out_at=datetime('now'), check_out_by=? WHERE id=?").run((req.user && req.user.email) || '', ov.id);
+  const r = db.prepare('SELECT * FROM access_requests WHERE id=?').get(req.params.id);
+  if (r && r.email) {
+    const siteNames = accessSites(r.id).map(s => s.name).join(', ') || 'the site';
+    mailSafe({ to: r.email, subject: 'Site check-out confirmation', text: `Hi ${r.first_name},\n\nYou have been checked out of ${siteNames}. Thank you for visiting.`, html: `<p>Hi ${r.first_name},</p><p>You have been checked out of <b>${siteNames}</b>. Thank you for visiting.</p>` });
+  }
   audit(req, 'checkout', 'access#' + req.params.id);
   res.json({ ok: true });
+});
+// Staff-created visitor + immediate check-in (no public form). Can reuse a prior visitor's ID photo.
+app.post('/api/access/manual', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!b.first_name || !b.last_name) return res.status(400).json({ error: 'First and last name are required' });
+  let stored = null;
+  if (b.reuse_photo_from) {
+    const src = db.prepare('SELECT id_photo FROM access_requests WHERE id=?').get(b.reuse_photo_from);
+    if (src && src.id_photo) stored = copyIdPhoto(src.id_photo);
+  } else if (b.id_photo) {
+    const r = saveIdPhoto(b.id_photo); if (r.error) return res.status(r.code).json({ error: r.error }); stored = r.stored;
+  }
+  const me = (req.user && req.user.email) || '';
+  const info = db.prepare("INSERT INTO access_requests (first_name,last_name,email,phone,id_photo,status,reviewed_by,reviewed_at) VALUES (?,?,?,?,?,?,?,datetime('now'))")
+    .run(N(b.first_name), N(b.last_name), N(b.email), N(b.phone), stored, 'approved', me);
+  const ids = [...new Set((b.site_ids || []).map(Number).filter(Boolean))];
+  const insS = db.prepare('INSERT OR IGNORE INTO access_request_sites (request_id, site_id) VALUES (?,?)');
+  for (const sid of ids) insS.run(info.lastInsertRowid, sid);
+  if (b.check_in !== false) db.prepare("INSERT INTO visits (request_id, check_in_at, check_in_by) VALUES (?, datetime('now'), ?)").run(info.lastInsertRowid, me);
+  audit(req, 'access_manual', 'access#' + info.lastInsertRowid, (b.reuse_photo_from ? 'reused photo · ' : '') + ids.length + ' site(s)');
+  res.json({ ok: true, id: info.lastInsertRowid });
 });
 app.get('/api/access/:id/photo', requireNoc, (req, res) => {
   const r = db.prepare('SELECT * FROM access_requests WHERE id=?').get(req.params.id);

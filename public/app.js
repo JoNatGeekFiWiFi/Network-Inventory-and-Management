@@ -134,6 +134,7 @@ async function route() {
     if (p[0] === 'batch' && p[1]) { setNav('batch'); return await renderBatchJob(p[1]); }
     if (p[0] === 'batch') { setNav('batch'); return await renderBatch(); }
     if (p[0] === 'packages') { setNav('packages'); return await renderPackages(); }
+    if (p[0] === 'access' && p[1] === 'new') { setNav('access'); return await formAccessVisit(); }
     if (p[0] === 'access') { setNav('access'); return await renderAccessRequests(); }
     view().innerHTML = '<div class="card" style="padding:20px">Not found</div>';
   } catch (e) { if (e.message === 'auth') return; view().innerHTML = `<div class="card" style="padding:20px">Error: ${esc(e.message)}</div>`; }
@@ -1340,41 +1341,55 @@ function accessStatusPill(s) {
 async function renderAccessRequests() {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
   const list = await api('/access');
+  window._accessAll = list;
   const pending = list.filter(r => r.status === 'pending').length;
   const onSite = list.filter(r => r.on_site).length;
-  const rows = list.map(r => {
-    const siteNames = (r.sites || []).map(s => esc(s.name)).join(', ') || '—';
-    const contact = [r.email ? `<a class="iplink" href="mailto:${esc(r.email)}">${esc(r.email)}</a>` : '', r.phone ? `<a class="iplink" href="tel:${esc(r.phone)}">${esc(r.phone)}</a>` : ''].filter(Boolean).join(' · ');
-    const photo = r.has_photo ? `<a href="/api/access/${r.id}/photo" target="_blank" title="View ID"><img src="/api/access/${r.id}/photo" loading="lazy" style="height:54px;width:54px;object-fit:cover;border-radius:8px;border:.5px solid var(--border)"/></a>` : '<span class="small muted" style="width:54px;text-align:center">no ID</span>';
-    const onSiteBadge = r.on_site ? `<span class="pill" style="border-color:var(--success)"><span class="dot" style="background:var(--success)"></span>on site</span>` : '';
-    const visitLine = r.on_site ? `<div class="small" style="color:var(--success)"><i class="ti ti-login"></i> On site since ${esc(r.checkin_at)}</div>`
-      : (r.last_visit && r.last_visit.check_out_at ? `<div class="small sec-muted"><i class="ti ti-logout"></i> Last out ${esc(r.last_visit.check_out_at)}</div>` : '');
-    return `<div class="row" style="align-items:flex-start">
-      ${photo}
-      <div style="flex:1;min-width:0">
-        <div>${esc(r.first_name)} ${esc(r.last_name)} ${accessStatusPill(r.status)} ${onSiteBadge}</div>
-        <div class="small sec-muted">${contact || 'no contact'}</div>
-        <div class="small sec-muted"><i class="ti ti-map-pin"></i> ${siteNames} · <span class="muted">${esc(r.created_at)}</span>${r.reviewed_by ? ' · by ' + esc(r.reviewed_by) : ''}${r.visit_count ? ` · ${r.visit_count} visit${r.visit_count == 1 ? '' : 's'}` : ''}</div>
-        ${visitLine}
-      </div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
-        ${r.on_site
-          ? `<button class="btn sm" style="color:var(--warning)" onclick="checkVisit(${r.id},'checkout')"><i class="ti ti-logout"></i> Check out</button>`
-          : `<button class="btn sm" style="color:var(--success)" onclick="checkVisit(${r.id},'checkin')"><i class="ti ti-login"></i> Check in</button>`}
-        ${r.visit_count ? `<button class="btn sm" onclick="visitHistory(${r.id})" title="Visit history"><i class="ti ti-history"></i></button>` : ''}
-        ${r.status !== 'approved' ? `<button class="btn sm" style="color:var(--success)" onclick="setAccess(${r.id},'approved')"><i class="ti ti-check"></i> Approve</button>` : ''}
-        ${r.status !== 'denied' ? `<button class="btn sm" style="color:var(--danger)" onclick="setAccess(${r.id},'denied')"><i class="ti ti-x"></i> Deny</button>` : ''}
-        <button class="btn sm" onclick="delAccess(${r.id})"><i class="ti ti-trash"></i></button>
-      </div></div>`;
-  }).join('');
-  view().innerHTML = `<div class="head"><h1 style="flex:1">Site Access</h1></div>
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Site Access</h1><a class="btn" href="#/access/new"><i class="ti ti-user-plus"></i> Add visitor</a></div>
     <div class="small sec-muted" style="margin:-6px 0 14px">Visitor check-in requests. Public form: <a class="iplink" href="/access" target="_blank">/access</a> — share the link or a QR code.</div>
     <div class="grid2" style="margin-bottom:14px">
       <div class="metric"><div class="l"><i class="ti ti-user-check"></i> On site now</div><div class="v" style="color:var(--success)">${onSite}</div></div>
       <div class="metric"><div class="l">Pending review</div><div class="v" style="color:var(--warning)">${pending}</div></div>
     </div>
+    <div class="box"><div style="display:flex;gap:8px;align-items:center"><i class="ti ti-search sec-muted"></i>
+      <input id="accessSearch" placeholder="Search a returning visitor by name, email, or phone…" oninput="renderAccessRows()" style="flex:1"/>
+      <label class="small sec-muted" style="cursor:pointer;white-space:nowrap"><input type="checkbox" id="accessOnSiteOnly" onchange="renderAccessRows()" style="width:auto"> On site only</label></div></div>
     <div id="visitHist"></div>
-    <div class="card">${rows || '<div class="row muted">No access requests yet</div>'}</div>`;
+    <div class="card" id="accessRows"></div>`;
+  renderAccessRows();
+}
+function accessRow(r) {
+  const siteNames = (r.sites || []).map(s => esc(s.name)).join(', ') || '—';
+  const contact = [r.email ? `<a class="iplink" href="mailto:${esc(r.email)}">${esc(r.email)}</a>` : '', r.phone ? `<a class="iplink" href="tel:${esc(r.phone)}">${esc(r.phone)}</a>` : ''].filter(Boolean).join(' · ');
+  const photo = r.has_photo ? `<a href="/api/access/${r.id}/photo" target="_blank" title="View ID"><img src="/api/access/${r.id}/photo" loading="lazy" style="height:54px;width:54px;object-fit:cover;border-radius:8px;border:.5px solid var(--border)"/></a>` : '<span class="small muted" style="width:54px;text-align:center">no ID</span>';
+  const onSiteBadge = r.on_site ? `<span class="pill" style="border-color:var(--success)"><span class="dot" style="background:var(--success)"></span>on site</span>` : '';
+  const visitLine = r.on_site ? `<div class="small" style="color:var(--success)"><i class="ti ti-login"></i> On site since ${esc(r.checkin_at)}</div>`
+    : (r.last_visit && r.last_visit.check_out_at ? `<div class="small sec-muted"><i class="ti ti-logout"></i> Last out ${esc(r.last_visit.check_out_at)}</div>` : '');
+  return `<div class="row" style="align-items:flex-start">
+    ${photo}
+    <div style="flex:1;min-width:0">
+      <div>${esc(r.first_name)} ${esc(r.last_name)} ${accessStatusPill(r.status)} ${onSiteBadge}</div>
+      <div class="small sec-muted">${contact || 'no contact'}</div>
+      <div class="small sec-muted"><i class="ti ti-map-pin"></i> ${siteNames} · <span class="muted">${esc(r.created_at)}</span>${r.reviewed_by ? ' · by ' + esc(r.reviewed_by) : ''}${r.visit_count ? ` · ${r.visit_count} visit${r.visit_count == 1 ? '' : 's'}` : ''}</div>
+      ${visitLine}
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+      ${r.on_site
+        ? `<button class="btn sm" style="color:var(--warning)" onclick="checkVisit(${r.id},'checkout')"><i class="ti ti-logout"></i> Check out</button>`
+        : `<button class="btn sm" style="color:var(--success)" onclick="checkVisit(${r.id},'checkin')"><i class="ti ti-login"></i> Check in</button>`}
+      ${r.visit_count ? `<button class="btn sm" onclick="visitHistory(${r.id})" title="Visit history"><i class="ti ti-history"></i></button>` : ''}
+      ${r.status !== 'approved' ? `<button class="btn sm" style="color:var(--success)" onclick="setAccess(${r.id},'approved')"><i class="ti ti-check"></i> Approve</button>` : ''}
+      ${r.status !== 'denied' ? `<button class="btn sm" style="color:var(--danger)" onclick="setAccess(${r.id},'denied')"><i class="ti ti-x"></i> Deny</button>` : ''}
+      <button class="btn sm" onclick="delAccess(${r.id})"><i class="ti ti-trash"></i></button>
+    </div></div>`;
+}
+function renderAccessRows() {
+  const box = $('#accessRows'); if (!box) return;
+  const q = ($('#accessSearch') && $('#accessSearch').value || '').toLowerCase().trim();
+  const onlyOnSite = $('#accessOnSiteOnly') && $('#accessOnSiteOnly').checked;
+  let items = window._accessAll || [];
+  if (onlyOnSite) items = items.filter(r => r.on_site);
+  if (q) items = items.filter(r => [r.first_name, r.last_name, r.first_name + ' ' + r.last_name, r.email, r.phone].some(v => (v || '').toLowerCase().includes(q)));
+  box.innerHTML = items.map(accessRow).join('') || `<div class="row muted">${q || onlyOnSite ? 'No matching visitors' : 'No access requests yet'}</div>`;
 }
 async function checkVisit(id, action) {
   try { await api('/access/' + id + '/' + action, { method: 'POST' }); toast(action === 'checkin' ? 'Checked in' : 'Checked out'); renderAccessRequests(); } catch (e) { toast(e.message); }
@@ -1387,6 +1402,70 @@ async function visitHistory(id) {
       ${v.map(x => `<div class="row"><i class="ti ti-arrow-right sec-muted"></i><div style="flex:1"><div class="small">In: ${esc(x.check_in_at || '—')} ${x.check_in_by ? '· ' + esc(x.check_in_by) : ''}</div><div class="small sec-muted">Out: ${esc(x.check_out_at || 'still on site')} ${x.check_out_by ? '· ' + esc(x.check_out_by) : ''}</div></div></div>`).join('') || '<div class="row muted">No visits</div>'}</div>`;
     box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) { toast(e.message); }
+}
+async function formAccessVisit() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  window._maPeople = await api('/access');
+  window._maSites = []; window._reusePhoto = null; window._maPhoto = null; window._maSiteResults = [];
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/access'"><i class="ti ti-chevron-left"></i> Site Access</div>
+    <h1>Add visitor</h1><div class="small sec-muted" style="margin-bottom:14px">Register + check in a visitor without the public form. Look up a returning visitor to reuse their details and ID photo.</div>
+    <div class="card" style="padding:16px;overflow:visible" id="f">
+      <div class="fld"><label class="fl">Returning visitor? (optional)</label>
+        <div style="position:relative"><input id="maReturn" placeholder="Search a previous visitor…" autocomplete="off" oninput="maReturnSearch()"/>
+          <div id="maReturnList" class="ss-list" style="display:none"></div></div>
+        <div id="maReuseNote" class="help"></div></div>
+      <div class="grid2">${field('First name', 'ma_fn', '', {})}${field('Last name', 'ma_ln', '', {})}</div>
+      <div class="grid2">${field('Email', 'ma_email', '', { type: 'email' })}${field('Phone', 'ma_phone', '', { type: 'tel' })}</div>
+      <div class="fld"><label class="fl">Site(s)</label>
+        <div style="position:relative"><input id="maSiteQ" placeholder="Search a site to add…" autocomplete="off" oninput="maSiteSearch()"/>
+          <div id="maSiteList" class="ss-list" style="display:none"></div></div>
+        <div id="maChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div></div>
+      <div class="fld"><label class="fl">ID photo</label>
+        <label class="btn sm" style="cursor:pointer;display:inline-flex"><i class="ti ti-camera"></i> Choose photo / PDF<input type="file" id="maPhoto" accept="image/*,application/pdf,.pdf" style="display:none" onchange="maPhotoPick()"></label>
+        <span id="maPhotoName" class="small sec-muted" style="margin-left:8px"></span></div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
+      <button class="btn primary" onclick="saveAccessVisit()"><i class="ti ti-login"></i> Add &amp; check in</button></div></div>`;
+}
+function maReturnSearch() {
+  const q = ($('#maReturn').value || '').toLowerCase().trim(); const box = $('#maReturnList');
+  if (!q) { box.style.display = 'none'; return; }
+  const m = (window._maPeople || []).filter(p => [p.first_name, p.last_name, p.first_name + ' ' + p.last_name, p.email, p.phone].some(v => (v || '').toLowerCase().includes(q))).slice(0, 8);
+  box.innerHTML = m.length ? m.map(p => `<div class="ss-opt" onmousedown="maReturnPick(${p.id})">${esc(p.first_name)} ${esc(p.last_name)}${p.email ? ' · ' + esc(p.email) : ''}${p.has_photo ? ' · 📷' : ''}</div>`).join('') : '<div class="ss-opt muted">No matches</div>';
+  box.style.display = 'block';
+}
+function maReturnPick(id) {
+  const p = (window._maPeople || []).find(x => x.id === id); if (!p) return;
+  $('#f [name=ma_fn]').value = p.first_name || ''; $('#f [name=ma_ln]').value = p.last_name || '';
+  $('#f [name=ma_email]').value = p.email || ''; $('#f [name=ma_phone]').value = p.phone || '';
+  window._reusePhoto = p.has_photo ? p.id : null; window._maPhoto = null; $('#maPhotoName').textContent = '';
+  window._maSites = (p.sites || []).map(s => ({ id: s.id, name: s.name })); maRenderChips();
+  $('#maReturn').value = p.first_name + ' ' + p.last_name; $('#maReturnList').style.display = 'none';
+  $('#maReuseNote').innerHTML = p.has_photo ? '<span style="color:var(--success)"><i class="ti ti-photo"></i> Reusing ID photo from their previous visit — no re-scan needed.</span>' : 'No prior ID photo on file — capture one below.';
+}
+async function maSiteSearch() {
+  const q = ($('#maSiteQ').value || '').trim(); const box = $('#maSiteList');
+  if (!q) { box.style.display = 'none'; return; }
+  try {
+    const r = await fetch('/access/sites?q=' + encodeURIComponent(q)); window._maSiteResults = await r.json();
+    box.innerHTML = window._maSiteResults.length ? window._maSiteResults.map((s, i) => `<div class="ss-opt" onmousedown="maSiteAdd(${i})">${esc(s.name)}</div>`).join('') : '<div class="ss-opt muted">No matches</div>';
+    box.style.display = 'block';
+  } catch {}
+}
+function maSiteAdd(i) { const s = (window._maSiteResults || [])[i]; if (!s) return; if (!window._maSites.find(x => x.id === s.id)) window._maSites.push({ id: s.id, name: s.name }); $('#maSiteQ').value = ''; $('#maSiteList').style.display = 'none'; maRenderChips(); }
+function maRenderChips() { $('#maChips').innerHTML = (window._maSites || []).map((s, i) => `<span class="tag">${esc(s.name)} <b style="cursor:pointer" onclick="maRmSite(${i})">✕</b></span>`).join(''); }
+function maRmSite(i) { window._maSites.splice(i, 1); maRenderChips(); }
+async function maPhotoPick() {
+  const f = $('#maPhoto').files[0]; if (!f) return;
+  window._reusePhoto = null; $('#maReuseNote').innerHTML = '';
+  try { window._maPhoto = await fileToDataUrl(f); $('#maPhotoName').textContent = f.name; } catch { toast('Could not read file'); }
+}
+async function saveAccessVisit() {
+  const d = collect('#f');
+  if (!d.ma_fn || !d.ma_ln) { toast('Enter first and last name'); return; }
+  const body = { first_name: d.ma_fn, last_name: d.ma_ln, email: d.ma_email, phone: d.ma_phone, site_ids: (window._maSites || []).map(s => s.id) };
+  if (window._reusePhoto) body.reuse_photo_from = window._reusePhoto;
+  else if (window._maPhoto) body.id_photo = window._maPhoto;
+  try { await api('/access/manual', { method: 'POST', body: JSON.stringify(body) }); toast('Added & checked in'); location.hash = '#/access'; } catch (e) { toast(e.message); }
 }
 async function setAccess(id, status) {
   try { await api('/access/' + id, { method: 'PUT', body: JSON.stringify({ status }) }); toast(status); renderAccessRequests(); } catch (e) { toast(e.message); }
@@ -1456,6 +1535,12 @@ async function renderSettings() {
         <button class="btn" onclick="sendTestMail()"><i class="ti ti-send"></i> Send test</button></div>
       <div class="help">New site-access requests email the "notify" address; approving/denying a request emails the requester. Requires a working SMTP server + From address. Save before sending a test.</div>
     </div>
+    <div class="card" style="padding:16px" id="accesscfg">
+      <h2 style="margin-bottom:12px"><i class="ti ti-id-badge-2"></i> Site access</h2>
+      ${field('Auto check-out time (HH:MM, blank = off)', 'auto_checkout_at', s.auto_checkout_at, { mono: true, ph: 'e.g. 18:00' })}
+      <div class="help">Any visitor still checked in at this time each day is automatically checked out (uses the server's local time). Manual check-out emails the visitor; auto check-out does not.</div>
+      <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" onclick="saveAccessCfg()"><i class="ti ti-check"></i> Save</button></div>
+    </div>
     <div class="card" style="padding:16px" id="nodes">
       <h2 style="margin-bottom:12px"><i class="ti ti-server-cog"></i> Provisioning nodes (Netinstall benches)</h2>
       ${nodes.map(n => `<div class="row"><i class="ti ti-server-2 sec-muted"></i>
@@ -1485,6 +1570,10 @@ async function saveMail() {
   d.smtp_secure = $('#smtpSecure').checked;
   if (!d.smtp_pass) delete d.smtp_pass;
   delete d.mailTestTo;
+  try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
+}
+async function saveAccessCfg() {
+  const d = collect('#accesscfg');
   try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
 }
 async function sendTestMail() {
