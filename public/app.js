@@ -1341,18 +1341,27 @@ async function renderAccessRequests() {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
   const list = await api('/access');
   const pending = list.filter(r => r.status === 'pending').length;
+  const onSite = list.filter(r => r.on_site).length;
   const rows = list.map(r => {
     const siteNames = (r.sites || []).map(s => esc(s.name)).join(', ') || '—';
     const contact = [r.email ? `<a class="iplink" href="mailto:${esc(r.email)}">${esc(r.email)}</a>` : '', r.phone ? `<a class="iplink" href="tel:${esc(r.phone)}">${esc(r.phone)}</a>` : ''].filter(Boolean).join(' · ');
     const photo = r.has_photo ? `<a href="/api/access/${r.id}/photo" target="_blank" title="View ID"><img src="/api/access/${r.id}/photo" loading="lazy" style="height:54px;width:54px;object-fit:cover;border-radius:8px;border:.5px solid var(--border)"/></a>` : '<span class="small muted" style="width:54px;text-align:center">no ID</span>';
+    const onSiteBadge = r.on_site ? `<span class="pill" style="border-color:var(--success)"><span class="dot" style="background:var(--success)"></span>on site</span>` : '';
+    const visitLine = r.on_site ? `<div class="small" style="color:var(--success)"><i class="ti ti-login"></i> On site since ${esc(r.checkin_at)}</div>`
+      : (r.last_visit && r.last_visit.check_out_at ? `<div class="small sec-muted"><i class="ti ti-logout"></i> Last out ${esc(r.last_visit.check_out_at)}</div>` : '');
     return `<div class="row" style="align-items:flex-start">
       ${photo}
       <div style="flex:1;min-width:0">
-        <div>${esc(r.first_name)} ${esc(r.last_name)} ${accessStatusPill(r.status)}</div>
+        <div>${esc(r.first_name)} ${esc(r.last_name)} ${accessStatusPill(r.status)} ${onSiteBadge}</div>
         <div class="small sec-muted">${contact || 'no contact'}</div>
-        <div class="small sec-muted"><i class="ti ti-map-pin"></i> ${siteNames} · <span class="muted">${esc(r.created_at)}</span>${r.reviewed_by ? ' · by ' + esc(r.reviewed_by) : ''}</div>
+        <div class="small sec-muted"><i class="ti ti-map-pin"></i> ${siteNames} · <span class="muted">${esc(r.created_at)}</span>${r.reviewed_by ? ' · by ' + esc(r.reviewed_by) : ''}${r.visit_count ? ` · ${r.visit_count} visit${r.visit_count == 1 ? '' : 's'}` : ''}</div>
+        ${visitLine}
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+        ${r.on_site
+          ? `<button class="btn sm" style="color:var(--warning)" onclick="checkVisit(${r.id},'checkout')"><i class="ti ti-logout"></i> Check out</button>`
+          : `<button class="btn sm" style="color:var(--success)" onclick="checkVisit(${r.id},'checkin')"><i class="ti ti-login"></i> Check in</button>`}
+        ${r.visit_count ? `<button class="btn sm" onclick="visitHistory(${r.id})" title="Visit history"><i class="ti ti-history"></i></button>` : ''}
         ${r.status !== 'approved' ? `<button class="btn sm" style="color:var(--success)" onclick="setAccess(${r.id},'approved')"><i class="ti ti-check"></i> Approve</button>` : ''}
         ${r.status !== 'denied' ? `<button class="btn sm" style="color:var(--danger)" onclick="setAccess(${r.id},'denied')"><i class="ti ti-x"></i> Deny</button>` : ''}
         <button class="btn sm" onclick="delAccess(${r.id})"><i class="ti ti-trash"></i></button>
@@ -1360,12 +1369,24 @@ async function renderAccessRequests() {
   }).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Site Access</h1></div>
     <div class="small sec-muted" style="margin:-6px 0 14px">Visitor check-in requests. Public form: <a class="iplink" href="/access" target="_blank">/access</a> — share the link or a QR code.</div>
-    <div class="grid3" style="margin-bottom:16px">
-      <div class="metric"><div class="l">Pending</div><div class="v" style="color:var(--warning)">${pending}</div></div>
-      <div class="metric"><div class="l">Total</div><div class="v">${list.length}</div></div>
-      <div class="metric"><div class="l">Approved</div><div class="v" style="color:var(--success)">${list.filter(r => r.status === 'approved').length}</div></div>
+    <div class="grid2" style="margin-bottom:14px">
+      <div class="metric"><div class="l"><i class="ti ti-user-check"></i> On site now</div><div class="v" style="color:var(--success)">${onSite}</div></div>
+      <div class="metric"><div class="l">Pending review</div><div class="v" style="color:var(--warning)">${pending}</div></div>
     </div>
+    <div id="visitHist"></div>
     <div class="card">${rows || '<div class="row muted">No access requests yet</div>'}</div>`;
+}
+async function checkVisit(id, action) {
+  try { await api('/access/' + id + '/' + action, { method: 'POST' }); toast(action === 'checkin' ? 'Checked in' : 'Checked out'); renderAccessRequests(); } catch (e) { toast(e.message); }
+}
+async function visitHistory(id) {
+  try {
+    const v = await api('/access/' + id + '/visits');
+    const box = $('#visitHist'); if (!box) return;
+    box.innerHTML = `<div class="card" style="margin-bottom:14px;border:1px solid var(--info)"><div class="hd"><h2><i class="ti ti-history"></i> Visit history</h2><button class="btn sm" onclick="document.getElementById('visitHist').innerHTML=''">Close</button></div>
+      ${v.map(x => `<div class="row"><i class="ti ti-arrow-right sec-muted"></i><div style="flex:1"><div class="small">In: ${esc(x.check_in_at || '—')} ${x.check_in_by ? '· ' + esc(x.check_in_by) : ''}</div><div class="small sec-muted">Out: ${esc(x.check_out_at || 'still on site')} ${x.check_out_by ? '· ' + esc(x.check_out_by) : ''}</div></div></div>`).join('') || '<div class="row muted">No visits</div>'}</div>`;
+    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (e) { toast(e.message); }
 }
 async function setAccess(id, status) {
   try { await api('/access/' + id, { method: 'PUT', body: JSON.stringify({ status }) }); toast(status); renderAccessRequests(); } catch (e) { toast(e.message); }

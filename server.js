@@ -2070,10 +2070,36 @@ app.post('/access', (req, res) => {
   res.json({ ok: true, id: info.lastInsertRowid });
 });
 function accessSites(reqId) { return db.prepare('SELECT s.id, s.name FROM access_request_sites ars JOIN sites s ON s.id=ars.site_id WHERE ars.request_id=?').all(reqId); }
+const openVisit = reqId => db.prepare('SELECT * FROM visits WHERE request_id=? AND check_out_at IS NULL ORDER BY id DESC LIMIT 1').get(reqId);
 app.get('/api/access', requireNoc, (req, res) => {
   const rows = db.prepare('SELECT id, first_name, last_name, email, phone, status, reviewed_by, reviewed_at, notes, created_at, (id_photo IS NOT NULL) AS has_photo FROM access_requests ORDER BY (status=\'pending\') DESC, datetime(created_at) DESC').all();
-  for (const r of rows) r.sites = accessSites(r.id);
+  for (const r of rows) {
+    r.sites = accessSites(r.id);
+    const ov = openVisit(r.id);
+    r.on_site = !!ov; r.checkin_at = ov ? ov.check_in_at : null;
+    const last = db.prepare('SELECT check_in_at, check_out_at FROM visits WHERE request_id=? ORDER BY id DESC LIMIT 1').get(r.id);
+    r.last_visit = last || null;
+    r.visit_count = db.prepare('SELECT COUNT(*) AS n FROM visits WHERE request_id=?').get(r.id).n;
+  }
   res.json(rows);
+});
+app.get('/api/access/:id/visits', requireNoc, (req, res) => {
+  res.json(db.prepare('SELECT * FROM visits WHERE request_id=? ORDER BY id DESC').all(req.params.id));
+});
+app.post('/api/access/:id/checkin', requireNoc, (req, res) => {
+  const r = db.prepare('SELECT id FROM access_requests WHERE id=?').get(req.params.id);
+  if (!r) return res.status(404).json({ error: 'not found' });
+  if (openVisit(r.id)) return res.status(409).json({ error: 'Already checked in' });
+  db.prepare("INSERT INTO visits (request_id, check_in_at, check_in_by) VALUES (?, datetime('now'), ?)").run(r.id, (req.user && req.user.email) || '');
+  audit(req, 'checkin', 'access#' + r.id);
+  res.json({ ok: true });
+});
+app.post('/api/access/:id/checkout', requireNoc, (req, res) => {
+  const ov = openVisit(req.params.id);
+  if (!ov) return res.status(409).json({ error: 'Not checked in' });
+  db.prepare("UPDATE visits SET check_out_at=datetime('now'), check_out_by=? WHERE id=?").run((req.user && req.user.email) || '', ov.id);
+  audit(req, 'checkout', 'access#' + req.params.id);
+  res.json({ ok: true });
 });
 app.get('/api/access/:id/photo', requireNoc, (req, res) => {
   const r = db.prepare('SELECT * FROM access_requests WHERE id=?').get(req.params.id);

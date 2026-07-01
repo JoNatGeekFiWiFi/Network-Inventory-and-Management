@@ -332,6 +332,12 @@ CREATE TABLE IF NOT EXISTS access_request_sites (
   site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
   PRIMARY KEY (request_id, site_id)
 );
+-- Visitor check-in / check-out log
+CREATE TABLE IF NOT EXISTS visits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id INTEGER NOT NULL REFERENCES access_requests(id) ON DELETE CASCADE,
+  check_in_at TEXT, check_in_by TEXT, check_out_at TEXT, check_out_by TEXT
+);
 
 -- Audit log (immutable trail)
 CREATE TABLE IF NOT EXISTS audit_log (

@@ -90,6 +90,9 @@ export function migrate() {
   // Public site-access requests (visitor check-in: name/contact/ID photo) + site links
   db.exec("CREATE TABLE IF NOT EXISTS access_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, first_name TEXT, last_name TEXT, email TEXT, phone TEXT, id_photo TEXT, status TEXT NOT NULL DEFAULT 'pending', reviewed_by TEXT, reviewed_at TEXT, notes TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
   db.exec("CREATE TABLE IF NOT EXISTS access_request_sites (request_id INTEGER NOT NULL, site_id INTEGER NOT NULL, PRIMARY KEY (request_id, site_id))");
+  // Visitor check-in / check-out log (comings and goings)
+  db.exec("CREATE TABLE IF NOT EXISTS visits (id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER NOT NULL, check_in_at TEXT, check_in_by TEXT, check_out_at TEXT, check_out_by TEXT)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_visits ON visits(request_id)");
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.
