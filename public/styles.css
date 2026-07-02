@@ -82,6 +82,10 @@ label.fl{display:block;font-size:13px;color:var(--text2);margin-bottom:5px}
 .eye{width:34px;flex:none;cursor:pointer;color:var(--text2)}
 .inline{display:flex;gap:8px}
 .wan{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-family:var(--mono);background:var(--surface2);padding:2px 8px;border-radius:var(--radius);color:var(--text2)}
+.themeseg{display:flex;flex:none;border:.5px solid var(--border2);border-radius:var(--radius);overflow:hidden}
+.themeseg button{border:0;background:transparent;color:var(--text2);font-size:12px;padding:6px 10px;cursor:pointer}
+.themeseg button+button{border-left:.5px solid var(--border)}
+.themeseg button.on{background:var(--info-bg);color:var(--info);font-weight:500}
 .usermenu{display:flex;align-items:center;gap:10px;font-size:13px}
 .usermenu .who{text-align:right;line-height:1.2}
 .usermenu .who .nm{font-weight:500}

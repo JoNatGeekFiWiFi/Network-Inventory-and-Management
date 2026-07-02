@@ -8,19 +8,16 @@ const esc = (s) => (s == null ? '' : String(s).replace(/[&<>"]/g, c => ({ '&': '
 
 // ---------- Theme (auto = follow device, or force light/dark; saved per device) ----------
 const THEMES = ['auto', 'light', 'dark'];
-const THEME_META = { auto: ['ti-sun-moon', 'Theme: auto (follows device)'], light: ['ti-sun', 'Theme: light'], dark: ['ti-moon', 'Theme: dark'] };
 function getTheme() { try { const t = localStorage.getItem('theme'); return THEMES.includes(t) ? t : 'auto'; } catch { return 'auto'; } }
 function applyTheme(t) {
   if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
   else delete document.documentElement.dataset.theme;
-  const b = $('#themeBtn');
-  if (b) { b.innerHTML = `<i class="ti ${THEME_META[t][0]}"></i>`; b.title = THEME_META[t][1] + ' — click to change'; }
+  document.querySelectorAll('#themeSeg button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
 }
-function cycleTheme() {
-  const t = THEMES[(THEMES.indexOf(getTheme()) + 1) % THEMES.length];
+function setTheme(t) {
+  if (!THEMES.includes(t)) t = 'auto';
   try { localStorage.setItem('theme', t); } catch {}
   applyTheme(t);
-  toast(THEME_META[t][1]);
 }
 
 async function api(path, opts = {}) {
@@ -1113,7 +1110,7 @@ async function renderUsers() {
     <div style="flex:1;min-width:0"><div>${esc(u.name || '—')} ${u.id === CURRENT_USER.id ? '<span class="muted small">(you)</span>' : ''}</div><div class="small sec-muted">${esc(u.email)}</div></div>
     <span class="roletag">${esc(u.role)}</span>
     ${u.active ? '' : '<span class="pill s-down"><span class="dot" style="background:var(--danger)"></span>inactive</span>'}
-    <a class="btn sm" href="#/users/${u.id}/edit"><i class="ti ti-edit"></i></a>
+    <a class="btn sm" href="#/users/${u.id}/edit" title="Edit name, role, password or active status"><i class="ti ti-edit"></i> Edit</a>
     ${u.id === CURRENT_USER.id ? '' : `<button class="btn sm" onclick="delUser(${u.id})" title="Delete this user"><i class="ti ti-trash"></i> Delete</button>`}
   </div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Users</h1><a class="btn" href="#/users/new"><i class="ti ti-plus"></i> Add user</a></div>
@@ -1162,7 +1159,7 @@ async function renderModels() {
     <i class="ti ti-${iconFor(m.device_type)} sec-muted"></i>
     <div style="flex:1;min-width:0"><div>${esc(m.manufacturer)} ${esc(m.model)}</div>
       <div class="small sec-muted">${esc(m.device_type || '—')}${m.has_wifi ? ' · WiFi' : ''}${m.has_cellular ? ' · Cellular' : ''}</div></div>
-    <a class="btn sm" href="#/models/${m.id}/edit"><i class="ti ti-edit"></i></a>
+    <a class="btn sm" href="#/models/${m.id}/edit" title="Edit this model's details"><i class="ti ti-edit"></i> Edit</a>
     <button class="btn sm" onclick="delModel(${m.id})" title="Delete this model"><i class="ti ti-trash"></i> Delete</button></div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Models</h1><a class="btn" href="#/models/new"><i class="ti ti-plus"></i> Add model</a></div>
     <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No models yet</div>'}</div>
@@ -1773,7 +1770,7 @@ async function renderDeviceBackups(id) {
       <i class="ti ti-${ok ? 'file-text sec-muted' : 'alert-triangle'}" ${ok ? '' : 'style="color:var(--danger)"'}></i>
       <div style="flex:1;min-width:0"><div>${esc(b.created_at)} ${b.source ? `<span class="tag">${esc(b.source)}</span>` : ''}</div>
         <div class="small sec-muted">${ok ? (fmtSize(b.size) + ' · ' + (b.format || 'rsc')) : ('Failed · ' + esc(b.error || ''))}</div></div>
-      ${ok ? `<a class="btn sm" href="/api/backups/${b.id}/download" title="Download"><i class="ti ti-download"></i></a>` : ''}
+      ${ok ? `<a class="btn sm" href="/api/backups/${b.id}/download" title="Download this config export (.rsc)"><i class="ti ti-download"></i> Download</a>` : ''}
       <button class="btn sm" onclick="delBackup(${b.id},${id})" title="Delete this backup file"><i class="ti ti-trash"></i> Delete</button></div>`;
   }).join('');
   view().innerHTML = `

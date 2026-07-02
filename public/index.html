@@ -14,7 +14,11 @@
   <header class="topbar">
     <div class="brand"><i class="ti ti-network"></i> <span>Network Inventory</span> <span class="env">testing</span></div>
     <div class="spacer"></div>
-    <button class="btn sm" id="themeBtn" onclick="cycleTheme()" title="Theme"><i class="ti ti-sun-moon"></i></button>
+    <div class="themeseg" id="themeSeg" title="Color theme">
+      <button data-t="light" onclick="setTheme('light')" title="Always light">Light</button>
+      <button data-t="dark" onclick="setTheme('dark')" title="Always dark">Dark</button>
+      <button data-t="auto" onclick="setTheme('auto')" title="Follow this device's setting">Auto</button>
+    </div>
     <div id="userMenu" class="usermenu"></div>
   </header>
   <div class="layout">
