@@ -670,7 +670,7 @@ async function renderDevice(id) {
   let roles = {};
   try { roles = d.iface_roles_json ? JSON.parse(d.iface_roles_json) : {}; } catch {}
   const portsCard = (d.management_mode === 'provider') ? '' : `
-    <div class="card"><div class="hd"><h2><i class="ti ti-plug"></i> Ports / interfaces${ifaces.length ? ` · ${ifaces.length}` : ''} <span class="small muted" style="font-weight:400">· tap to graph</span></h2>${isPriv() ? `<button class="btn sm" onclick="pollDevice(${d.id})"><i class="ti ti-refresh"></i> Poll now</button>` : ''}</div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-plug"></i> Ports / interfaces${ifaces.length ? ` · ${ifaces.length}` : ''} <span class="small muted" style="font-weight:400">· tap to graph</span></h2>${isPriv() ? `<button class="btn sm" onclick="pollDevice(${d.id})" title="Contact the router and refresh its live ports, IPs and version info"><i class="ti ti-refresh"></i> Poll now</button>` : ''}</div>
       ${ifaces.length ? ifaces.map((i, idx) => { const role = roles[i.name] || ''; return `
         <div class="row rowlink" onclick="togglePort(${idx})">
           <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${i.running ? 'var(--success)' : 'var(--text3)'};flex:none"></span>
@@ -695,9 +695,9 @@ async function renderDevice(id) {
         <div class="kv"><span class="small sec-muted">ZeroTier node ID</span><span class="mono">${esc(d.zt_node_id || '—')}</span></div>
         ${isPriv() ? `<div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
           ${d.wg_provisioned
-            ? `<button class="btn sm" onclick="showWg(${d.id})"><i class="ti ti-shield-lock"></i> WireGuard config</button><button class="btn sm" onclick="provisionWg(${d.id})"><i class="ti ti-refresh"></i> Re-provision</button>`
-            : `<button class="btn sm" onclick="provisionWg(${d.id})"><i class="ti ti-shield-lock"></i> Provision on WireGuard</button>`}
-          ${d.zt_node_id ? `<button class="btn sm" onclick="ztSyncDevice(${d.id})"><i class="ti ti-refresh"></i> Sync ZeroTier</button>` : ''}
+            ? `<button class="btn sm" onclick="showWg(${d.id})" title="Show/download this device's WireGuard config (contains its private key — logged)"><i class="ti ti-shield-lock"></i> WireGuard config</button><button class="btn sm" onclick="provisionWg(${d.id})" title="Keep or re-assign this device's WireGuard key and management IP"><i class="ti ti-refresh"></i> Re-provision</button>`
+            : `<button class="btn sm" onclick="provisionWg(${d.id})" title="Generate a WireGuard key and assign a free management IP for this device"><i class="ti ti-shield-lock"></i> Provision on WireGuard</button>`}
+          ${d.zt_node_id ? `<button class="btn sm" onclick="ztSyncDevice(${d.id})" title="Pull this device's assigned IP from ZeroTier Central"><i class="ti ti-refresh"></i> Sync ZeroTier</button>` : ''}
         </div><div id="wgout"></div>` : '<div class="help">Overlay provisioning is NOC/Admin only.</div>'}
       </div></div>`;
 
@@ -750,7 +750,7 @@ async function renderDevice(id) {
 
     ${overlayCard}
 
-    ${visibleCreds.length ? `<div class="card"><div class="hd"><h2><i class="ti ti-key"></i> Credentials</h2><button class="btn sm" onclick="revealCreds(${d.id})"><i class="ti ti-eye"></i> Reveal</button></div><div style="padding:0 14px 10px">${credRows}<div class="help"><i class="ti ti-lock"></i> Masked · reveal is logged${isPriv() ? '' : ' · NOC-only fields hidden for your role'}</div></div></div>` : ''}`;
+    ${visibleCreds.length ? `<div class="card"><div class="hd"><h2><i class="ti ti-key"></i> Credentials</h2><button class="btn sm" onclick="revealCreds(${d.id})" title="Show the masked passwords (each reveal is written to the activity log)"><i class="ti ti-eye"></i> Reveal</button></div><div style="padding:0 14px 10px">${credRows}<div class="help"><i class="ti ti-lock"></i> Masked · reveal is logged${isPriv() ? '' : ' · NOC-only fields hidden for your role'}</div></div></div>` : ''}`;
 
   window._devId = d.id; window._devPorts = ifaces.map(i => i.name);
   if (d.management_mode !== 'provider') { setWanRange('1h'); setLatRange('1h'); }
@@ -1114,7 +1114,7 @@ async function renderUsers() {
     <span class="roletag">${esc(u.role)}</span>
     ${u.active ? '' : '<span class="pill s-down"><span class="dot" style="background:var(--danger)"></span>inactive</span>'}
     <a class="btn sm" href="#/users/${u.id}/edit"><i class="ti ti-edit"></i></a>
-    ${u.id === CURRENT_USER.id ? '' : `<button class="btn sm" onclick="delUser(${u.id})"><i class="ti ti-trash"></i></button>`}
+    ${u.id === CURRENT_USER.id ? '' : `<button class="btn sm" onclick="delUser(${u.id})" title="Delete this user"><i class="ti ti-trash"></i></button>`}
   </div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Users</h1><a class="btn" href="#/users/new"><i class="ti ti-plus"></i> Add user</a></div>
     <div class="card" style="margin-top:14px">${rows}</div>
@@ -1163,7 +1163,7 @@ async function renderModels() {
     <div style="flex:1;min-width:0"><div>${esc(m.manufacturer)} ${esc(m.model)}</div>
       <div class="small sec-muted">${esc(m.device_type || '—')}${m.has_wifi ? ' · WiFi' : ''}${m.has_cellular ? ' · Cellular' : ''}</div></div>
     <a class="btn sm" href="#/models/${m.id}/edit"><i class="ti ti-edit"></i></a>
-    <button class="btn sm" onclick="delModel(${m.id})"><i class="ti ti-trash"></i></button></div>`).join('');
+    <button class="btn sm" onclick="delModel(${m.id})" title="Delete this model"><i class="ti ti-trash"></i></button></div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Models</h1><a class="btn" href="#/models/new"><i class="ti ti-plus"></i> Add model</a></div>
     <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No models yet</div>'}</div>
     <div class="help">The hardware catalog — what shows up in the Model picker when adding devices. NOC/Admin only.</div>`;
@@ -1228,7 +1228,7 @@ async function renderBatch() {
       <div id="targetList" style="max-height:320px;overflow:auto;border:.5px solid var(--border);border-radius:8px"></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
         <span class="small sec-muted" id="selCount"></span>
-        <button class="btn primary" onclick="runBatchOp()"><i class="ti ti-player-play"></i> Run on selected</button></div>
+        <button class="btn primary" onclick="runBatchOp()" title="Apply this operation to every selected router now"><i class="ti ti-player-play"></i> Run on selected</button></div>
     </div>
     <div id="batchResults"></div>
     <div class="hd" style="margin-top:18px"><h2>Recent batch jobs</h2></div>
@@ -1318,7 +1318,7 @@ async function renderPackages() {
     <i class="ti ti-package sec-muted"></i>
     <div style="flex:1;min-width:0"><div>${esc(p.name || p.filename)} ${p.arch ? `<span class="tag">${esc(p.arch)}</span>` : ''}${p.version ? ` <span class="small sec-muted">${esc(p.version)}</span>` : ''}</div>
       <div class="small mono sec-muted">${esc(p.filename)} · ${fmtSize(p.size)}${p.notes ? ' · ' + esc(p.notes) : ''}</div></div>
-    <button class="btn sm" onclick="delPackage(${p.id})"><i class="ti ti-trash"></i></button></div>`).join('');
+    <button class="btn sm" onclick="delPackage(${p.id})" title="Delete this package file"><i class="ti ti-trash"></i></button></div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Packages</h1></div>
     <div class="small sec-muted" style="margin:-6px 0 14px">RouterOS <span class="mono">.npk</span> packages routers can auto-install during zero-touch provisioning.</div>
     <div class="card" style="padding:16px" id="pf">
@@ -1396,7 +1396,7 @@ function accessRow(r) {
       ${r.visit_count ? `<button class="btn sm" onclick="visitHistory(${r.id})" title="Visit history"><i class="ti ti-history"></i></button>` : ''}
       ${r.status !== 'approved' ? `<button class="btn sm" style="color:var(--success)" onclick="setAccess(${r.id},'approved')"><i class="ti ti-check"></i> Approve</button>` : ''}
       ${r.status !== 'denied' ? `<button class="btn sm" style="color:var(--danger)" onclick="setAccess(${r.id},'denied')"><i class="ti ti-x"></i> Deny</button>` : ''}
-      <button class="btn sm" onclick="delAccess(${r.id})"><i class="ti ti-trash"></i></button>
+      <button class="btn sm" onclick="delAccess(${r.id})" title="Delete this visitor record (and ID photo)"><i class="ti ti-trash"></i></button>
     </div></div>`;
 }
 function renderAccessRows() {
@@ -1504,7 +1504,7 @@ async function renderSettings() {
       ${field('API token', 'zt_api_token', '', { mono: true, ph: s.has_zt_api_token ? 'unchanged' : 'ZeroTier Central API token' })}
       <div class="help">Used to read members' assigned IPs from ZeroTier Central. Token is NOC/Admin-only and stored server-side.</div>
       <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" onclick="saveSettings()"><i class="ti ti-check"></i> Save</button>
-      <button class="btn" onclick="ztSync()"><i class="ti ti-refresh"></i> Sync ZeroTier now</button></div>
+      <button class="btn" onclick="ztSync()" title="Pull every linked device's assigned IP from ZeroTier Central into its management IP"><i class="ti ti-refresh"></i> Sync ZeroTier now</button></div>
     </div>
     <div class="card" style="padding:16px" id="wg">
       <h2 style="margin-bottom:12px"><i class="ti ti-shield-lock"></i> WireGuard</h2>
@@ -1515,8 +1515,8 @@ async function renderSettings() {
         <input value="${esc(s.wg_server_pub || '(generated on save)')}" readonly style="font-family:var(--mono);background:var(--surface2)"/>
         <div class="help">Devices use this as the [Peer] PublicKey. Private key stays server-side. ${s.has_wg_server_priv ? '' : 'Save once to generate the hub keypair.'}</div></div>
       <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap"><button class="btn primary" onclick="saveSettings()"><i class="ti ti-check"></i> Save</button>
-      <button class="btn" onclick="dlHub()"><i class="ti ti-download"></i> Download hub wg0.conf</button>
-      <button class="btn" onclick="regenWg()"><i class="ti ti-refresh"></i> Regenerate hub key</button></div>
+      <button class="btn" onclick="dlHub()" title="Full hub config with all device peers — apply on the VPS (contains the hub private key; download is logged)"><i class="ti ti-download"></i> Download hub wg0.conf</button>
+      <button class="btn" onclick="regenWg()" title="Replace the hub keypair — every device's config must then be re-downloaded and re-applied"><i class="ti ti-refresh"></i> Regenerate hub key</button></div>
       <div id="hubout"></div>
     </div>
     <div class="help">After saving the WireGuard subnet, open a device → Management overlay → Provision on WireGuard to assign it a non-overlapping IP and download its config. Apply the device's <span class="mono">[Peer]</span> stanza to your hub.</div>
@@ -1537,7 +1537,7 @@ async function renderSettings() {
       <div class="grid2">${field('Bench WiFi SSID', 'prov_wifi_ssid', s.prov_wifi_ssid, { ph: 'optional, for generic config' })}${field('Bench WiFi password', 'prov_wifi_password', '', { mono: true, ph: s.has_prov_wifi_password ? 'unchanged' : 'optional' })}</div>
       ${field('Generic admin password', 'prov_admin_password', '', { mono: true, ph: s.has_prov_admin_password ? 'unchanged' : 'admin password for fresh units' })}
       <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap"><button class="btn primary" onclick="saveProv()"><i class="ti ti-check"></i> Save</button>
-      <button class="btn" onclick="regenProv()"><i class="ti ti-refresh"></i> Regenerate token</button></div>
+      <button class="btn" onclick="regenProv()" title="Replace the provisioning token — configs already on routers keep the old token and will stop phoning home until re-loaded"><i class="ti ti-refresh"></i> Regenerate token</button></div>
       <div class="help">Set the public URL (reachable from devices' WAN over HTTPS). Per-device default configs are on each device's Config backups page; the provisioning node uses the generic config + these bench WiFi/admin defaults.</div>
     </div>
     <div class="card" style="padding:16px" id="mail">
@@ -1562,7 +1562,7 @@ async function renderSettings() {
       <h2 style="margin-bottom:12px"><i class="ti ti-server-cog"></i> Provisioning nodes (Netinstall benches)</h2>
       ${nodes.map(n => `<div class="row"><i class="ti ti-server-2 sec-muted"></i>
         <div style="flex:1;min-width:0"><div>${esc(n.name)}</div><div class="small sec-muted">${esc(n.location || '')}${n.last_seen ? ' · last seen ' + esc(n.last_seen) : ' · never connected'}</div></div>
-        <button class="btn sm" onclick="delNode(${n.id})"><i class="ti ti-trash"></i></button></div>`).join('') || '<div class="row muted">No provisioning nodes yet</div>'}
+        <button class="btn sm" onclick="delNode(${n.id})" title="Delete this provisioning node (its token stops working)"><i class="ti ti-trash"></i></button></div>`).join('') || '<div class="row muted">No provisioning nodes yet</div>'}
       <div class="box" style="margin-top:10px"><div class="grid2">${field('Node name', 'nodename', '', { ph: 'e.g. Bench-1' })}${field('Location', 'nodeloc', '', { ph: 'optional' })}</div>
         <div style="display:flex;justify-content:flex-end"><button class="btn" onclick="addNode()"><i class="ti ti-plus"></i> Add node</button></div></div>
       <div id="nodeTok"></div>
@@ -1686,11 +1686,11 @@ async function renderBlocklist() {
     <div style="flex:1;min-width:0"><div class="mono">${esc(b.ip)}${label}</div>
       <div class="small sec-muted">${esc(b.reason || '')}${b.source ? ' · ' + esc(b.source) : ''} · ${b.hits} hit${b.hits == 1 ? '' : 's'} · ${esc(b.last_seen || '')}</div></div>
     <button class="btn sm" onclick="toggleBlock(${b.id},${b.active ? 0 : 1})">${b.active ? 'Disable' : 'Enable'}</button>
-    <button class="btn sm" onclick="delBlock(${b.id})"><i class="ti ti-trash"></i></button></div>`;
+    <button class="btn sm" onclick="delBlock(${b.id})" title="Delete this IP from the blocklist"><i class="ti ti-trash"></i></button></div>`;
   }).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Blocklist</h1>
-    <button class="btn" onclick="scanBlock()"><i class="ti ti-search"></i> Scan logs</button>
-    <button class="btn primary" onclick="pushBlock()"><i class="ti ti-upload"></i> Push to routers</button></div>
+    <button class="btn" onclick="scanBlock()" title="Read every router's log for failed-login attempts and add the source IPs here"><i class="ti ti-search"></i> Scan logs</button>
+    <button class="btn primary" onclick="pushBlock()" title="Sync this blocklist to every managed router's firewall now (also runs automatically)"><i class="ti ti-upload"></i> Push to routers</button></div>
     <div class="grid3" style="margin:16px 0">
       <div class="metric"><div class="l">Blocked on routers</div><div class="v" style="color:var(--danger)">${blocked}</div></div>
       <div class="metric"><div class="l">Below threshold</div><div class="v" style="color:var(--warning)">${pending}</div></div>
@@ -1730,7 +1730,7 @@ async function dlHub() {
     const out = $('#hubout');
     out.innerHTML = `<div style="margin-top:12px"><div class="small sec-muted" style="margin-bottom:4px">Hub config — put at <span class="mono">/etc/wireguard/wg0.conf</span> (${r.peers} peer(s))</div>
       <textarea id="hubcfg" readonly rows="8" style="font-family:var(--mono);font-size:12px"></textarea>
-      <button class="btn sm" id="hubdl" style="margin-top:8px"><i class="ti ti-download"></i> Download wg0.conf</button></div>`;
+      <button class="btn sm" id="hubdl" style="margin-top:8px" title="Contains the hub private key — handle carefully"><i class="ti ti-download"></i> Download wg0.conf</button></div>`;
     $('#hubcfg').value = r.config;
     $('#hubdl').addEventListener('click', () => {
       const a = document.createElement('a');
@@ -1774,14 +1774,14 @@ async function renderDeviceBackups(id) {
       <div style="flex:1;min-width:0"><div>${esc(b.created_at)} ${b.source ? `<span class="tag">${esc(b.source)}</span>` : ''}</div>
         <div class="small sec-muted">${ok ? (fmtSize(b.size) + ' · ' + (b.format || 'rsc')) : ('Failed · ' + esc(b.error || ''))}</div></div>
       ${ok ? `<a class="btn sm" href="/api/backups/${b.id}/download" title="Download"><i class="ti ti-download"></i></a>` : ''}
-      <button class="btn sm" onclick="delBackup(${b.id},${id})"><i class="ti ti-trash"></i></button></div>`;
+      <button class="btn sm" onclick="delBackup(${b.id},${id})" title="Delete this backup file"><i class="ti ti-trash"></i></button></div>`;
   }).join('');
   view().innerHTML = `
     <div class="crumb" onclick="location.hash='#/device/${id}'"><i class="ti ti-chevron-left"></i> ${esc(d.name)}</div>
     <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1><i class="ti ti-archive"></i> Config backups</h1></div>
       <div class="small sec-muted" style="margin-top:3px">${esc(d.name)} · automatic weekly · kept 6 months</div></div>
-      <div style="display:flex;gap:8px"><button class="btn" onclick="diagnoseBackup(${id})"><i class="ti ti-stethoscope"></i> Diagnose</button>
-      <button class="btn primary" onclick="backupNow(${id})"><i class="ti ti-player-record"></i> Back up now</button></div></div>
+      <div style="display:flex;gap:8px"><button class="btn" onclick="diagnoseBackup(${id})" title="Troubleshoot: run each backup step and show the raw router responses"><i class="ti ti-stethoscope"></i> Diagnose</button>
+      <button class="btn primary" onclick="backupNow(${id})" title="Export this router's config and save a copy here now"><i class="ti ti-player-record"></i> Back up now</button></div></div>
     <div id="bakDiag"></div>
     <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No backups yet. Weekly backups run automatically — or click Back up now.</div>'}</div>
     <div class="help">RouterOS text export (.rsc). Download to keep offline or to restore on the device. Backups older than 6 months are removed automatically.</div>
@@ -1890,7 +1890,7 @@ async function renderDeviceWifi(id) {
       <button class="btn" onclick="loadWifiClients(${id})"><i class="ti ti-refresh"></i> Refresh</button></div>
 
     <div class="card" style="margin-top:14px"><div class="hd"><h2><i class="ti ti-access-point"></i> Networks</h2>
-      <button class="btn sm" onclick="manageWifi(${id})"><i class="ti ti-eye"></i> Reveal &amp; edit</button></div>
+      <button class="btn sm" onclick="manageWifi(${id})" title="Show the live WiFi names/passwords from the router and edit them (reveal is logged)"><i class="ti ti-eye"></i> Reveal &amp; edit</button></div>
       <div id="wifiBody">${radios.length ? radios.map(r => `<div class="row"><i class="ti ti-wifi sec-muted"></i>
         <div style="flex:1;min-width:0"><div><span class="mono">${esc(r.ssid || '(no SSID)')}</span> ${r.band ? `<span class="tag">${esc(r.band)}</span>` : ''}${r.disabled ? ' <span class="small muted">(disabled)</span>' : ''}</div>
         <div class="small mono sec-muted">${esc(r.iface)} · password ${r.hasPassword ? '••••••' : '—'}</div></div></div>`).join('') : '<div class="row muted">No WiFi radios found — Poll the device first.</div>'}</div>
@@ -1960,7 +1960,7 @@ async function showWg(id) {
       <textarea id="wgcfg" readonly rows="8" style="font-family:var(--mono);font-size:12px"></textarea>
       <div class="small sec-muted" style="margin:8px 0 4px">Add this [Peer] to the hub</div>
       <textarea id="wgpeer" readonly rows="4" style="font-family:var(--mono);font-size:12px"></textarea>
-      <button class="btn sm" id="wgdl" style="margin-top:8px"><i class="ti ti-download"></i> Download .conf</button></div>`;
+      <button class="btn sm" id="wgdl" style="margin-top:8px" title="WireGuard config to load on the device (contains its private key)"><i class="ti ti-download"></i> Download .conf</button></div>`;
     $('#wgcfg').value = r.config;
     $('#wgpeer').value = r.server_peer;
     $('#wgdl').addEventListener('click', () => {
