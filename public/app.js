@@ -6,6 +6,23 @@ const isPriv = () => CURRENT_USER && ['noc', 'admin'].includes(CURRENT_USER.role
 const isAdmin = () => CURRENT_USER && CURRENT_USER.role === 'admin';
 const esc = (s) => (s == null ? '' : String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])));
 
+// ---------- Theme (auto = follow device, or force light/dark; saved per device) ----------
+const THEMES = ['auto', 'light', 'dark'];
+const THEME_META = { auto: ['ti-sun-moon', 'Theme: auto (follows device)'], light: ['ti-sun', 'Theme: light'], dark: ['ti-moon', 'Theme: dark'] };
+function getTheme() { try { const t = localStorage.getItem('theme'); return THEMES.includes(t) ? t : 'auto'; } catch { return 'auto'; } }
+function applyTheme(t) {
+  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+  const b = $('#themeBtn');
+  if (b) { b.innerHTML = `<i class="ti ${THEME_META[t][0]}"></i>`; b.title = THEME_META[t][1] + ' — click to change'; }
+}
+function cycleTheme() {
+  const t = THEMES[(THEMES.indexOf(getTheme()) + 1) % THEMES.length];
+  try { localStorage.setItem('theme', t); } catch {}
+  applyTheme(t);
+  toast(THEME_META[t][1]);
+}
+
 async function api(path, opts = {}) {
   opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
   const r = await fetch('/api' + path, opts);
@@ -74,7 +91,7 @@ function loc(s) {
 
 // ---------- Router ----------
 window.addEventListener('hashchange', route);
-window.addEventListener('DOMContentLoaded', init);
+window.addEventListener('DOMContentLoaded', () => { applyTheme(getTheme()); init(); });
 
 async function init() {
   try { CURRENT_USER = await api('/me'); }

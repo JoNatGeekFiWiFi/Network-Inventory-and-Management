@@ -4,11 +4,19 @@
   --success:#3b6d11; --success-bg:#eaf3de; --warning:#854f0b; --warning-bg:#faeeda; --danger:#a32d2d; --danger-bg:#fcebeb;
   --radius:8px; --radius-lg:12px; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  color-scheme:light;
 }
+/* Theme: html[data-theme] forces light/dark (set from the toggle, saved per device);
+   without it, the device's prefers-color-scheme decides ("auto"). */
+:root[data-theme="dark"]{ --bg:#1a1a18; --surface:#242422; --surface2:#2c2c2a; --text:#f1f1ef; --text2:#b4b2a9; --text3:#888780;
+  --border:rgba(255,255,255,.14); --border2:rgba(255,255,255,.26); --info:#85b7eb; --info-bg:#0c447c;
+  --success:#97c459; --success-bg:#27500a; --warning:#ef9f27; --warning-bg:#633806; --danger:#f09595; --danger-bg:#791f1f;
+  color-scheme:dark; }
 @media (prefers-color-scheme: dark){
-  :root{ --bg:#1a1a18; --surface:#242422; --surface2:#2c2c2a; --text:#f1f1ef; --text2:#b4b2a9; --text3:#888780;
+  :root:not([data-theme="light"]){ --bg:#1a1a18; --surface:#242422; --surface2:#2c2c2a; --text:#f1f1ef; --text2:#b4b2a9; --text3:#888780;
     --border:rgba(255,255,255,.14); --border2:rgba(255,255,255,.26); --info:#85b7eb; --info-bg:#0c447c;
-    --success:#97c459; --success-bg:#27500a; --warning:#ef9f27; --warning-bg:#633806; --danger:#f09595; --danger-bg:#791f1f; }
+    --success:#97c459; --success-bg:#27500a; --warning:#ef9f27; --warning-bg:#633806; --danger:#f09595; --danger-bg:#791f1f;
+    color-scheme:dark; }
 }
 *{box-sizing:border-box}
 body{margin:0;font-family:var(--sans);background:var(--bg);color:var(--text);font-size:15px}
