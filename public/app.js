@@ -619,7 +619,7 @@ async function renderInventory() {
       <div style="flex:1;min-width:0"><div>${esc(d.name)} ${d.manufacturer || d.model ? `· ${esc(d.manufacturer || '')} ${esc(d.model || '')}` : ''}</div>
         <div class="small mono sec-muted">SN ${esc(d.serial || '—')}${d.mac ? ' · ' + esc(d.mac) : ''} · enrolled ${esc(d.enrolled_at || '')}</div></div>
       <a class="btn sm" href="#/device/${d.id}/edit"><i class="ti ti-settings"></i> Set up</a>
-      <button class="btn sm" onclick="clearEnroll(${d.id})" title="Mark set up"><i class="ti ti-check"></i></button></div>`).join('')}
+      <button class="btn sm" onclick="clearEnroll(${d.id})" title="Remove from this pending list (device stays in inventory)"><i class="ti ti-check"></i> Mark set up</button></div>`).join('')}
     <div class="help" style="padding:8px 14px">Auto-enrolled from the provisioning bench. Assign each to a site/POP and set its details; assigning (or clicking ✓) clears it from this list.</div></div>` : '';
   const rows = devs.map(d => `<div class="row rowlink" onclick="location.hash='#/device/${d.id}'">
     <i class="ti ti-${iconFor(d.device_type)} sec-muted"></i>
@@ -1114,7 +1114,7 @@ async function renderUsers() {
     <span class="roletag">${esc(u.role)}</span>
     ${u.active ? '' : '<span class="pill s-down"><span class="dot" style="background:var(--danger)"></span>inactive</span>'}
     <a class="btn sm" href="#/users/${u.id}/edit"><i class="ti ti-edit"></i></a>
-    ${u.id === CURRENT_USER.id ? '' : `<button class="btn sm" onclick="delUser(${u.id})" title="Delete this user"><i class="ti ti-trash"></i></button>`}
+    ${u.id === CURRENT_USER.id ? '' : `<button class="btn sm" onclick="delUser(${u.id})" title="Delete this user"><i class="ti ti-trash"></i> Delete</button>`}
   </div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Users</h1><a class="btn" href="#/users/new"><i class="ti ti-plus"></i> Add user</a></div>
     <div class="card" style="margin-top:14px">${rows}</div>
@@ -1163,7 +1163,7 @@ async function renderModels() {
     <div style="flex:1;min-width:0"><div>${esc(m.manufacturer)} ${esc(m.model)}</div>
       <div class="small sec-muted">${esc(m.device_type || '—')}${m.has_wifi ? ' · WiFi' : ''}${m.has_cellular ? ' · Cellular' : ''}</div></div>
     <a class="btn sm" href="#/models/${m.id}/edit"><i class="ti ti-edit"></i></a>
-    <button class="btn sm" onclick="delModel(${m.id})" title="Delete this model"><i class="ti ti-trash"></i></button></div>`).join('');
+    <button class="btn sm" onclick="delModel(${m.id})" title="Delete this model"><i class="ti ti-trash"></i> Delete</button></div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Models</h1><a class="btn" href="#/models/new"><i class="ti ti-plus"></i> Add model</a></div>
     <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No models yet</div>'}</div>
     <div class="help">The hardware catalog — what shows up in the Model picker when adding devices. NOC/Admin only.</div>`;
@@ -1318,7 +1318,7 @@ async function renderPackages() {
     <i class="ti ti-package sec-muted"></i>
     <div style="flex:1;min-width:0"><div>${esc(p.name || p.filename)} ${p.arch ? `<span class="tag">${esc(p.arch)}</span>` : ''}${p.version ? ` <span class="small sec-muted">${esc(p.version)}</span>` : ''}</div>
       <div class="small mono sec-muted">${esc(p.filename)} · ${fmtSize(p.size)}${p.notes ? ' · ' + esc(p.notes) : ''}</div></div>
-    <button class="btn sm" onclick="delPackage(${p.id})" title="Delete this package file"><i class="ti ti-trash"></i></button></div>`).join('');
+    <button class="btn sm" onclick="delPackage(${p.id})" title="Delete this package file"><i class="ti ti-trash"></i> Delete</button></div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Packages</h1></div>
     <div class="small sec-muted" style="margin:-6px 0 14px">RouterOS <span class="mono">.npk</span> packages routers can auto-install during zero-touch provisioning.</div>
     <div class="card" style="padding:16px" id="pf">
@@ -1393,10 +1393,10 @@ function accessRow(r) {
       ${r.on_site
         ? `<button class="btn sm" style="color:var(--warning)" onclick="checkVisit(${r.id},'checkout')"><i class="ti ti-logout"></i> Check out</button>`
         : `<button class="btn sm" style="color:var(--success)" onclick="checkVisit(${r.id},'checkin')"><i class="ti ti-login"></i> Check in</button>`}
-      ${r.visit_count ? `<button class="btn sm" onclick="visitHistory(${r.id})" title="Visit history"><i class="ti ti-history"></i></button>` : ''}
+      ${r.visit_count ? `<button class="btn sm" onclick="visitHistory(${r.id})" title="Show every past check-in/out for this visitor"><i class="ti ti-history"></i> History</button>` : ''}
       ${r.status !== 'approved' ? `<button class="btn sm" style="color:var(--success)" onclick="setAccess(${r.id},'approved')"><i class="ti ti-check"></i> Approve</button>` : ''}
       ${r.status !== 'denied' ? `<button class="btn sm" style="color:var(--danger)" onclick="setAccess(${r.id},'denied')"><i class="ti ti-x"></i> Deny</button>` : ''}
-      <button class="btn sm" onclick="delAccess(${r.id})" title="Delete this visitor record (and ID photo)"><i class="ti ti-trash"></i></button>
+      <button class="btn sm" onclick="delAccess(${r.id})" title="Delete this visitor record (and ID photo)"><i class="ti ti-trash"></i> Delete</button>
     </div></div>`;
 }
 function renderAccessRows() {
@@ -1562,7 +1562,7 @@ async function renderSettings() {
       <h2 style="margin-bottom:12px"><i class="ti ti-server-cog"></i> Provisioning nodes (Netinstall benches)</h2>
       ${nodes.map(n => `<div class="row"><i class="ti ti-server-2 sec-muted"></i>
         <div style="flex:1;min-width:0"><div>${esc(n.name)}</div><div class="small sec-muted">${esc(n.location || '')}${n.last_seen ? ' · last seen ' + esc(n.last_seen) : ' · never connected'}</div></div>
-        <button class="btn sm" onclick="delNode(${n.id})" title="Delete this provisioning node (its token stops working)"><i class="ti ti-trash"></i></button></div>`).join('') || '<div class="row muted">No provisioning nodes yet</div>'}
+        <button class="btn sm" onclick="delNode(${n.id})" title="Delete this provisioning node (its token stops working)"><i class="ti ti-trash"></i> Delete</button></div>`).join('') || '<div class="row muted">No provisioning nodes yet</div>'}
       <div class="box" style="margin-top:10px"><div class="grid2">${field('Node name', 'nodename', '', { ph: 'e.g. Bench-1' })}${field('Location', 'nodeloc', '', { ph: 'optional' })}</div>
         <div style="display:flex;justify-content:flex-end"><button class="btn" onclick="addNode()"><i class="ti ti-plus"></i> Add node</button></div></div>
       <div id="nodeTok"></div>
@@ -1686,7 +1686,7 @@ async function renderBlocklist() {
     <div style="flex:1;min-width:0"><div class="mono">${esc(b.ip)}${label}</div>
       <div class="small sec-muted">${esc(b.reason || '')}${b.source ? ' · ' + esc(b.source) : ''} · ${b.hits} hit${b.hits == 1 ? '' : 's'} · ${esc(b.last_seen || '')}</div></div>
     <button class="btn sm" onclick="toggleBlock(${b.id},${b.active ? 0 : 1})">${b.active ? 'Disable' : 'Enable'}</button>
-    <button class="btn sm" onclick="delBlock(${b.id})" title="Delete this IP from the blocklist"><i class="ti ti-trash"></i></button></div>`;
+    <button class="btn sm" onclick="delBlock(${b.id})" title="Delete this IP from the blocklist"><i class="ti ti-trash"></i> Delete</button></div>`;
   }).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Blocklist</h1>
     <button class="btn" onclick="scanBlock()" title="Read every router's log for failed-login attempts and add the source IPs here"><i class="ti ti-search"></i> Scan logs</button>
@@ -1774,7 +1774,7 @@ async function renderDeviceBackups(id) {
       <div style="flex:1;min-width:0"><div>${esc(b.created_at)} ${b.source ? `<span class="tag">${esc(b.source)}</span>` : ''}</div>
         <div class="small sec-muted">${ok ? (fmtSize(b.size) + ' · ' + (b.format || 'rsc')) : ('Failed · ' + esc(b.error || ''))}</div></div>
       ${ok ? `<a class="btn sm" href="/api/backups/${b.id}/download" title="Download"><i class="ti ti-download"></i></a>` : ''}
-      <button class="btn sm" onclick="delBackup(${b.id},${id})" title="Delete this backup file"><i class="ti ti-trash"></i></button></div>`;
+      <button class="btn sm" onclick="delBackup(${b.id},${id})" title="Delete this backup file"><i class="ti ti-trash"></i> Delete</button></div>`;
   }).join('');
   view().innerHTML = `
     <div class="crumb" onclick="location.hash='#/device/${id}'"><i class="ti ti-chevron-left"></i> ${esc(d.name)}</div>
