@@ -286,9 +286,13 @@ Then add TLS with Let's Encrypt (`sudo certbot --nginx`) and restrict access (fi
 
 ### Updating
 
+One command — it backs up the database first, then pulls, installs, fixes ownership, restarts, and health-checks (printing rollback commands if the app doesn't come back up):
+
 ```bash
-cd /opt/netinv && git pull && npm install --omit=dev && sudo systemctl restart netinv
+sudo bash /opt/netinv/deploy/deploy.sh
 ```
+
+DB backups from deploys are kept in `<db dir>/deploy-backups/` (newest 14). The script reads `DB_PATH`/`PORT` from the systemd unit, so it backs up the real database wherever it lives.
 
 ## Backups
 
