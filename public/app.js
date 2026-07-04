@@ -188,13 +188,49 @@ async function renderSites() {
     <div class="card">${rows || '<div class="row muted">No sites yet</div>'}</div>`;
 }
 
+// ---------- Deletes (confirm → DELETE → navigate) ----------
+async function doDelete(path, okMsg, goto) {
+  try { await api(path, { method: 'DELETE' }); toast(okMsg); if (typeof goto === 'function') goto(); else location.hash = goto; }
+  catch (e) { toast(e.message); }
+}
+function delSite(id, name) {
+  if (confirm(`Delete site "${name}"?\n\nIts connections, notes and access info are removed. Hardware stays in Inventory as unassigned.`))
+    doDelete('/sites/' + id, 'Site deleted', '#/sites');
+}
+function delAccount(id, name) {
+  if (confirm(`Delete account "${name}"?\n\nContacts and previous-ISP records go with it. (Blocked while customers or sites still use it.)`))
+    doDelete('/accounts/' + id, 'Account deleted', '#/accounts');
+}
+function delCust(id, name) {
+  if (confirm(`Delete customer "${name}"?\n\n(Blocked while it still has sites.)`))
+    doDelete('/customers/' + id, 'Customer deleted', '#/customers');
+}
+function delPop(id, name) {
+  if (confirm(`Delete POP "${name}"?\n\n(Blocked while devices or site connections still use it.)`))
+    doDelete('/pops/' + id, 'POP deleted', '#/pops');
+}
+function delDevice(id, name) {
+  if (confirm(`Delete device "${name}"?\n\nIts stored credentials, telemetry and backup history are removed. This cannot be undone.`))
+    doDelete('/devices/' + id, 'Device deleted', '#/inventory');
+}
+function delConn(id, siteId) {
+  if (confirm('Delete this connection?')) doDelete('/connections/' + id, 'Connection deleted', () => renderSite(siteId));
+}
+function delSiteNote(id, siteId) {
+  if (confirm('Delete this note and its attachments?')) doDelete('/site-notes/' + id, 'Note deleted', () => renderNotes(siteId));
+}
+function delPopNote(id, popId) {
+  if (confirm('Delete this note and its attachments?')) doDelete('/pop-notes/' + id, 'Note deleted', () => renderPopNotes(popId));
+}
+
 async function renderSite(id) {
   const s = await api('/sites/' + id);
   const connCards = s.connections.map(c => {
     const ipline = c.ip_type === 'Static' ? `Static · ${esc(c.static_ip || '')}` : `Dynamic · ${esc(c.current_ip || '')}`;
     return `<div class="metric" style="background:var(--surface);border:.5px solid var(--border)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <span class="small sec-muted">${esc(c.role)} ${c.wan_port ? '· <b>' + (c.role === 'Primary' ? 'WAN1' : 'WAN2') + '</b>' : ''}</span>${statusPill(c.status)}</div>
+        <span class="small sec-muted">${esc(c.role)} ${c.wan_port ? '· <b>' + (c.role === 'Primary' ? 'WAN1' : 'WAN2') + '</b>' : ''}</span>
+        <span style="display:flex;align-items:center;gap:6px">${statusPill(c.status)}${isPriv() ? `<button class="btn sm" onclick="delConn(${c.id}, ${s.id})" title="Delete this connection"><i class="ti ti-trash"></i> Delete</button>` : ''}</span></div>
       <div style="font-weight:500">${esc(c.served_label || '—')}</div>
       <div class="small sec-muted">${c.wan_port ? '<span class="wan"><i class="ti ti-plug"></i> ' + esc(c.wan_port) + '</span> &nbsp;' : ''}${ipline}</div>
     </div>`;
@@ -218,7 +254,7 @@ async function renderSite(id) {
     <div class="head"><div class="t">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(s.name)}</h1>${statusPill(s.status)}</div>
       <div class="small sec-muted" style="margin-top:3px">${s.customer ? `<i class="ti ti-user"></i> <a class="iplink" href="#/customer/${s.customer.id}">${esc(s.customer.name)}</a> &nbsp;·&nbsp; ` : ''}<i class="ti ti-building"></i> <a class="iplink" href="#/account/${s.account.id}">${esc(s.account.name)}</a> &nbsp;·&nbsp; <i class="ti ti-map-pin"></i> ${loc(s)}</div>
-    </div><a class="btn" href="#/site/${s.id}/edit"><i class="ti ti-edit"></i> Edit</a></div>
+    </div><a class="btn" href="#/site/${s.id}/edit"><i class="ti ti-edit"></i> Edit</a>${isPriv() ? `<button class="btn" onclick="delSite(${s.id}, ${esc(JSON.stringify(s.name))})" title="Delete this site — hardware becomes unassigned"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
 
     <div class="grid2" style="margin:16px 0">
       <div class="metric"><div class="l"><i class="ti ti-shield-lock"></i> Management IP</div><div class="mono" style="font-size:15px;font-weight:500">${s.current_mgmt_ip ? `<a class="iplink" href="https://${esc(s.current_mgmt_ip)}" target="_blank">${esc(s.current_mgmt_ip)} <i class="ti ti-external-link" style="font-size:11px"></i></a>` : '—'}</div></div>
@@ -269,7 +305,7 @@ async function renderPop(id) {
     <div class="crumb" onclick="location.hash='#/pops'"><i class="ti ti-chevron-left"></i> POP sites</div>
     <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(p.name)}</h1>${p.code ? `<span class="tag">${esc(p.code)}</span>` : ''}${statusPill(p.status)}</div>
       <div class="small sec-muted" style="margin-top:3px"><i class="ti ti-map-pin"></i> ${where}</div></div>
-      ${isPriv() ? `<a class="btn" href="#/pop/${p.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}</div>
+      ${isPriv() ? `<a class="btn" href="#/pop/${p.id}/edit"><i class="ti ti-edit"></i> Edit</a><button class="btn" onclick="delPop(${p.id}, ${esc(JSON.stringify(p.name))})" title="Delete this POP (blocked while devices or connections use it)"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
     <div class="grid2" style="margin:16px 0">
       <div class="metric"><div class="l"><i class="ti ti-shield-lock"></i> Management IP</div><div class="mono" style="font-size:15px;font-weight:500">${p.current_mgmt_ip ? `<a class="iplink" href="https://${esc(p.current_mgmt_ip)}" target="_blank">${esc(p.current_mgmt_ip)} <i class="ti ti-external-link" style="font-size:11px"></i></a>` : '—'}</div></div>
       <div class="metric"><div class="l"><i class="ti ti-world"></i> Public IP</div><div class="mono" style="font-size:15px;font-weight:500">${esc(p.current_public_ip || '—')}</div></div>
@@ -297,7 +333,8 @@ async function renderPopNotes(id) {
   const notes = p.notes.map(n => `<div class="card" style="margin-bottom:12px"><div class="note" style="border:0">
     <div class="av">${initials(n.author)}</div>
     <div style="flex:1"><div class="small"><b>${esc(n.author)}</b> <span class="muted">· ${esc(n.created_at)} · ${esc(n.author_role || '')}</span></div>
-    ${n.body ? `<div class="sec-muted" style="margin-top:4px">${esc(n.body)}</div>` : ''}${attachmentsHtml(n.attachments, true)}</div></div>`).join('');
+    ${n.body ? `<div class="sec-muted" style="margin-top:4px">${esc(n.body)}</div>` : ''}${attachmentsHtml(n.attachments, true)}</div>
+    ${isPriv() ? `<button class="btn sm" style="flex:none" onclick="delPopNote(${n.id}, ${id})" title="Delete this note and its attachments"><i class="ti ti-trash"></i> Delete</button>` : ''}</div></div>`).join('');
   view().innerHTML = `<div class="crumb" onclick="location.hash='#/pop/${id}'"><i class="ti ti-chevron-left"></i> ${esc(p.name)}</div>
     <h1>POP notes</h1><div class="small sec-muted" style="margin-bottom:14px">${esc(p.name)}${p.code ? ' · ' + esc(p.code) : ''}</div>
     ${accessCard}
@@ -420,7 +457,8 @@ async function renderNotes(id) {
   const notes = s.notes.map(n => `<div class="card" style="margin-bottom:12px"><div class="note" style="border:0">
     <div class="av">${initials(n.author)}</div>
     <div style="flex:1"><div class="small"><b>${esc(n.author)}</b> <span class="muted">· ${esc(n.created_at)} · ${esc(n.author_role || '')}</span></div>
-    ${n.body ? `<div class="sec-muted" style="margin-top:4px">${esc(n.body)}</div>` : ''}${attachmentsHtml(n.attachments, true)}</div></div>`).join('');
+    ${n.body ? `<div class="sec-muted" style="margin-top:4px">${esc(n.body)}</div>` : ''}${attachmentsHtml(n.attachments, true)}</div>
+    ${isPriv() ? `<button class="btn sm" style="flex:none" onclick="delSiteNote(${n.id}, ${id})" title="Delete this note and its attachments"><i class="ti ti-trash"></i> Delete</button>` : ''}</div></div>`).join('');
 
   view().innerHTML = `
     <div class="crumb" onclick="location.hash='#/site/${id}'"><i class="ti ti-chevron-left"></i> ${esc(s.name)}</div>
@@ -515,7 +553,7 @@ async function renderCustomer(id) {
     <div class="head"><div class="av" style="width:46px;height:46px;border-radius:8px;font-size:16px">${initials(a.name)}</div>
       <div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(a.name)}</h1>${statusPill(a.status)}</div>
       <div class="small mono sec-muted" style="margin-top:3px">${esc(a.account_number || '')}</div></div>
-      ${isPriv() ? `<a class="btn" href="#/account/${a.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}</div>
+      ${isPriv() ? `<a class="btn" href="#/account/${a.id}/edit"><i class="ti ti-edit"></i> Edit</a><button class="btn" onclick="delAccount(${a.id}, ${esc(JSON.stringify(a.name))})" title="Delete this account (blocked while customers or sites use it)"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
     <div class="grid3" style="margin:16px 0">
       <div class="metric"><div class="l">Customers</div><div class="v">${a.customers.length}</div></div>
       <div class="metric"><div class="l">Sites</div><div class="v">${a.sites.length}</div></div>
@@ -554,7 +592,7 @@ async function renderCust(id) {
     <div class="head"><div class="av" style="width:46px;height:46px;border-radius:8px;font-size:16px">${initials(c.name)}</div>
       <div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(c.name)}</h1>${statusPill(c.status)}</div>
       <div class="small sec-muted" style="margin-top:5px">Served by: ${acctLinks}</div></div>
-      ${isPriv() ? `<a class="btn" href="#/customer/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}</div>
+      ${isPriv() ? `<a class="btn" href="#/customer/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a><button class="btn" onclick="delCust(${c.id}, ${esc(JSON.stringify(c.name))})" title="Delete this customer (blocked while it has sites)"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
     <div class="grid3" style="margin:16px 0">
       <div class="metric"><div class="l">Sites</div><div class="v">${c.sites.length}</div></div>
       <div class="metric"><div class="l">Devices</div><div class="v">${c.device_count}</div></div>
@@ -723,7 +761,7 @@ async function renderDevice(id) {
     <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(d.name)}</h1>${statusPill(d.online ? 'Online' : 'Offline')}</div>
       <div class="small sec-muted" style="margin-top:3px">${esc(d.manufacturer || '')} ${esc(d.model || '')} · ${esc(d.assigned_label || 'unassigned')}</div></div>
       ${d.mgmt_address ? `<a class="btn" href="https://${esc(d.mgmt_address)}" target="_blank"><i class="ti ti-external-link"></i> Console</a>` : ''}
-      <a class="btn" href="#/device/${d.id}/edit"><i class="ti ti-edit"></i> Edit</a></div>
+      <a class="btn" href="#/device/${d.id}/edit"><i class="ti ti-edit"></i> Edit</a>${isPriv() ? `<button class="btn" onclick="delDevice(${d.id}, ${esc(JSON.stringify(d.name))})" title="Delete this device and its stored credentials/telemetry"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
 
     ${d.management_mode === 'provider' ? '' : `
     <div class="card"><div class="hd"><h2><i class="ti ti-arrows-up-down"></i> WAN traffic</h2><div class="seg" style="flex:none" id="wanrng">

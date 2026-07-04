@@ -1370,6 +1370,10 @@ app.put('/api/accounts/:id', requireNoc, (req, res) => {
 });
 
 app.delete('/api/accounts/:id', requireNoc, (req, res) => {
+  // deleting an account would cascade to its sites — refuse while anything still depends on it
+  const ns = db.prepare('SELECT COUNT(*) AS n FROM sites WHERE account_id=?').get(req.params.id).n;
+  const nc = db.prepare('SELECT COUNT(*) AS n FROM account_customers WHERE account_id=?').get(req.params.id).n;
+  if (ns + nc > 0) return res.status(409).json({ error: `In use by ${nc} customer(s) and ${ns} site(s) — reassign or delete those first` });
   db.prepare('DELETE FROM accounts WHERE id=?').run(req.params.id);
   audit(req, 'delete', 'account#' + req.params.id);
   res.json({ ok: true });
@@ -1500,8 +1504,21 @@ app.delete('/api/customers/:id', requireNoc, (req, res) => {
 });
 
 app.delete('/api/sites/:id', (req, res) => {
+  const s = db.prepare('SELECT * FROM sites WHERE id=?').get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  // hardware survives the site: back to unassigned (connections/notes/access cascade away)
+  db.prepare("UPDATE devices SET assigned_type=NULL, assigned_site_id=NULL, associated_connection_id=NULL WHERE assigned_type='site' AND assigned_site_id=?").run(s.id);
   db.prepare('DELETE FROM sites WHERE id=?').run(req.params.id);
-  audit(req, 'delete', 'site#' + req.params.id);
+  audit(req, 'delete', 'site#' + req.params.id, s.name);
+  res.json({ ok: true });
+});
+
+app.delete('/api/connections/:id', requireNoc, (req, res) => {
+  const c = db.prepare('SELECT * FROM connections WHERE id=?').get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'not found' });
+  db.prepare('UPDATE devices SET associated_connection_id=NULL WHERE associated_connection_id=?').run(c.id);
+  db.prepare('DELETE FROM connections WHERE id=?').run(c.id);
+  audit(req, 'delete', 'connection#' + c.id, 'site#' + c.site_id);
   res.json({ ok: true });
 });
 
@@ -1644,6 +1661,29 @@ app.post('/api/sites/:id/notes', (req, res) => {
     .run(req.params.id, b.author || 'tester', role(req), N(b.body));
   audit(req, 'note', 'site#' + req.params.id);
   res.json({ ok: true, id: info.lastInsertRowid });
+});
+// delete a note (+ its attachment files); NOC/Admin only
+function deleteNoteAttachments(noteId) {
+  for (const a of db.prepare('SELECT * FROM note_attachments WHERE note_id=?').all(noteId)) {
+    try { unlinkSync(join(UPLOADS_DIR, a.stored_name)); } catch {}
+    db.prepare('DELETE FROM note_attachments WHERE id=?').run(a.id);
+  }
+}
+app.delete('/api/site-notes/:id', requireNoc, (req, res) => {
+  const n = db.prepare('SELECT * FROM site_notes WHERE id=?').get(req.params.id);
+  if (!n) return res.status(404).json({ error: 'not found' });
+  deleteNoteAttachments(n.id);
+  db.prepare('DELETE FROM site_notes WHERE id=?').run(n.id);
+  audit(req, 'delete', 'site#' + n.site_id, 'note#' + n.id);
+  res.json({ ok: true });
+});
+app.delete('/api/pop-notes/:id', requireNoc, (req, res) => {
+  const n = db.prepare('SELECT * FROM pop_notes WHERE id=?').get(req.params.id);
+  if (!n) return res.status(404).json({ error: 'not found' });
+  deleteNoteAttachments(n.id);
+  db.prepare('DELETE FROM pop_notes WHERE id=?').run(n.id);
+  audit(req, 'delete', 'pop#' + n.pop_id, 'note#' + n.id);
+  res.json({ ok: true });
 });
 
 // pinned site access (sensitive — NOC/Admin only)
