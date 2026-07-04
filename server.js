@@ -5,6 +5,7 @@ import { dirname, join, extname } from 'node:path';
 import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync, copyFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, backfillAccountCustomers, UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR } from './db.js';
+import { importModelCatalog } from './model-catalog.js';
 import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie } from './auth.js';
 import { hashPassword, verifyPassword } from './hash.js';
 import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseCidr } from './wg.js';
@@ -124,6 +125,7 @@ migrate();
 if (isEmpty()) { seed(); console.log('Database seeded on first run.'); }
 backfillCustomers();
 backfillAccountCustomers();
+{ const n = importModelCatalog(db); if (n) console.log(`Model catalog: added ${n} device model(s).`); }
 
 // ---- helpers ----
 const N = (v, d = null) => (v === undefined ? d : v); // null-coalesce for SQLite binding

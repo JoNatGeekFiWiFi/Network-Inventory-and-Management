@@ -1162,8 +1162,13 @@ async function renderModels() {
     <a class="btn sm" href="#/models/${m.id}/edit" title="Edit this model's details"><i class="ti ti-edit"></i> Edit</a>
     <button class="btn sm" onclick="delModel(${m.id})" title="Delete this model"><i class="ti ti-trash"></i> Delete</button></div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Models</h1><a class="btn" href="#/models/new"><i class="ti ti-plus"></i> Add model</a></div>
-    <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No models yet</div>'}</div>
+    <input id="mfilter" placeholder="Filter ${models.length} models — try 'hAP', 'USW', 'LTU'…" style="margin-top:12px"/>
+    <div class="card" id="mlist" style="margin-top:12px">${rows || '<div class="row muted">No models yet</div>'}</div>
     <div class="help">The hardware catalog — what shows up in the Model picker when adding devices. NOC/Admin only.</div>`;
+  $('#mfilter').addEventListener('input', () => {
+    const q = $('#mfilter').value.trim().toLowerCase();
+    for (const r of document.querySelectorAll('#mlist .row')) r.style.display = (!q || r.textContent.toLowerCase().includes(q)) ? '' : 'none';
+  });
 }
 async function formModel(q) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
