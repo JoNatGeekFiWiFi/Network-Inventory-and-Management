@@ -75,6 +75,16 @@ cd /opt/netinv && git pull && npm install && chown -R netinv:netinv /opt/netinv 
 - `wg.js`, `hash.js`, `auth.js` — WireGuard keygen/IPAM, scrypt, sessions.
 - `README.md`, `cloud-init.yaml`, `push-to-github.sh`, `deploy/` — deploy tooling.
 
+## Session 2026-07-01 → 07-02
+
+17. **Project review.** Full code + session-log review; findings logged (role-gating gaps on device/site writes, plaintext secrets, login rate limiting, nginx `client_max_body_size`, broken `npm run reset`) — security fixes deferred while testing.
+18. **Theme control.** Light/Dark/Auto segmented slider in the top bar (saved per device, pre-paint apply, works on the login screen).
+19. **Button labels.** Every icon-only button/anchor got visible text + explanatory hover titles (Delete/Edit/Download/History/Mark set up); dangerous actions warn in their tooltip.
+20. **Deploy tooling.** `deploy/deploy.sh` (DB backup → pull → install → chown → restart → health-check, prints rollback commands); `push-to-github.sh` now prompts for a commit message so each deploy is identifiable.
+21. **Model catalog.** `model-catalog.js` — 283 MikroTik + Ubiquiti models (routers, switches, APs, CPE, LTE/5G; antennas skipped) imported idempotently at startup; Models page got a filter box; "Ubiquiti UniFi" manufacturer normalized to "Ubiquiti".
+22. **Delete/management options.** Delete buttons (NOC/Admin) on sites, accounts, customers, POPs, devices, connections and notes. New endpoints: `DELETE /api/connections/:id`, site-note + pop-note deletes. Site delete unassigns hardware instead of orphaning it; account delete refuses while customers/sites depend on it.
+23. **Standalone billing (replaces the brief Invoice Ninja-mirror approach — decided against connecting to IN).** Invoices live in the platform (`bill_*` tables); Stripe only processes card + ACH payments. Products catalog, invoice create/edit (line items, tax, due dates, sequential numbering), send via SMTP with a public tokenized pay page (`/pay/<token>` → Stripe Checkout, card + `us_bank_account`), signature-verified `/stripe/webhook` marks invoices paid (idempotent per payment-intent; handles async ACH settlement), manual payments (check/cash), void/delete lifecycle, recurring schedules generated hourly by the sampler (auto-email or draft), customers got a `billing_email`, customer pages show their invoices, one-click JSON backup + restore. Setup: Settings → Billing & Stripe (company name, numbering, `sk_` key, `whsec_` secret; webhook endpoint `<public URL>/stripe/webhook` with the 3 checkout events).
+
 ## Notes / caveats
 - Backups, provisioning phone-home, DHCP/WiFi/version polling, and batch ops were verified for plumbing/logic in a sandbox but the live RouterOS calls require the VPS to be on the management overlay (they can't reach real routers from the build sandbox).
 - Email requires a working SMTP server configured in Settings.

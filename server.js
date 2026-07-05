@@ -3,7 +3,7 @@ import express from 'express';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, extname } from 'node:path';
 import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync, copyFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, backfillAccountCustomers, UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR } from './db.js';
 import { importModelCatalog } from './model-catalog.js';
 import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie } from './auth.js';
@@ -117,6 +117,8 @@ async function pushBlocklistToDevice(d) {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
+// Stripe webhook needs the RAW body for signature verification, so it registers before the JSON parser
+app.post('/stripe/webhook', express.raw({ type: '*/*', limit: '1mb' }), (req, res) => stripeWebhook(req, res));
 app.use(express.json({ limit: '60mb' })); // raised so base64 note attachments + .npk package uploads fit
 
 // First-run: create schema + seed if empty
@@ -274,7 +276,12 @@ app.get('/api/settings', requireNoc, (req, res) => {
     has_prov_admin_password: !!getSetting('prov_admin_password'),
     has_prov_wifi_password: !!getSetting('prov_wifi_password'),
     has_zt_api_token: !!getSetting('zt_api_token'),
-    has_wg_server_priv: !!getSetting('wg_server_priv')
+    has_wg_server_priv: !!getSetting('wg_server_priv'),
+    has_stripe_secret: !!getSetting('stripe_secret'),
+    has_stripe_webhook_secret: !!getSetting('stripe_webhook_secret'),
+    bill_company: getSetting('bill_company') || '',
+    bill_prefix: getSetting('bill_prefix') || 'INV-',
+    bill_next: getSetting('bill_next') || '1001'
   });
 });
 app.put('/api/settings', requireNoc, (req, res) => {
@@ -283,6 +290,11 @@ app.put('/api/settings', requireNoc, (req, res) => {
   if (b.smtp_secure !== undefined) setSetting('smtp_secure', b.smtp_secure ? '1' : '0');
   if (b.smtp_pass) setSetting('smtp_pass', String(b.smtp_pass));
   if (b.zt_api_token) setSetting('zt_api_token', String(b.zt_api_token).trim());
+  if (b.bill_company !== undefined) setSetting('bill_company', String(b.bill_company).trim());
+  if (b.bill_prefix !== undefined) setSetting('bill_prefix', String(b.bill_prefix).trim() || 'INV-');
+  if (b.bill_next !== undefined && parseInt(b.bill_next, 10) > 0) setSetting('bill_next', String(parseInt(b.bill_next, 10)));
+  if (b.stripe_secret) setSetting('stripe_secret', String(b.stripe_secret).trim());
+  if (b.stripe_webhook_secret) setSetting('stripe_webhook_secret', String(b.stripe_webhook_secret).trim());
   if (b.allow_auto_enroll !== undefined) setSetting('allow_auto_enroll', b.allow_auto_enroll ? '1' : '0');
   if (b.prov_admin_password) setSetting('prov_admin_password', String(b.prov_admin_password));
   if (b.prov_wifi_password) setSetting('prov_wifi_password', String(b.prov_wifi_password));
@@ -1476,7 +1488,7 @@ app.post('/api/customers', requireNoc, (req, res) => {
   const ids = accountIdsFrom(b);
   if (!ids.length) return res.status(400).json({ error: 'Pick at least one account' });
   if (!b.name) return res.status(400).json({ error: 'Customer name required' });
-  const info = db.prepare('INSERT INTO customers (account_id,name,status,notes) VALUES (?,?,?,?)').run(ids[0], N(b.name), b.status || 'Active', N(b.notes));
+  const info = db.prepare('INSERT INTO customers (account_id,name,status,notes,billing_email) VALUES (?,?,?,?,?)').run(ids[0], N(b.name), b.status || 'Active', N(b.notes), N(b.billing_email));
   setCustomerAccounts(info.lastInsertRowid, ids);
   audit(req, 'create', 'customer#' + info.lastInsertRowid, b.name);
   res.json({ id: info.lastInsertRowid });
@@ -1485,7 +1497,7 @@ app.put('/api/customers/:id', requireNoc, (req, res) => {
   const b = req.body || {};
   const ex = db.prepare('SELECT * FROM customers WHERE id=?').get(req.params.id);
   if (!ex) return res.status(404).json({ error: 'not found' });
-  db.prepare('UPDATE customers SET name=?, status=?, notes=? WHERE id=?').run(N(b.name, ex.name), N(b.status, ex.status), N(b.notes), req.params.id);
+  db.prepare('UPDATE customers SET name=?, status=?, notes=?, billing_email=? WHERE id=?').run(N(b.name, ex.name), N(b.status, ex.status), N(b.notes), N(b.billing_email, ex.billing_email), req.params.id);
   if (b.account_ids !== undefined || b.account_id !== undefined) {
     const ids = accountIdsFrom(b);
     if (!ids.length) return res.status(400).json({ error: 'A customer must have at least one account' });
@@ -1911,6 +1923,436 @@ app.delete('/api/devices/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+
+// ---- billing: standalone invoicing (Stripe processes card/ACH; card data never touches this server) ----
+const r2 = v => Math.round(Number(v || 0) * 100) / 100;
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const esc2 = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function computeTotals(items, taxRate) {
+  const subtotal = r2(items.reduce((n, it) => n + Number(it.quantity || 1) * Number(it.unit_price || 0), 0));
+  const tax = r2(subtotal * (Number(taxRate || 0) / 100));
+  return { subtotal, tax, total: r2(subtotal + tax) };
+}
+function nextInvoiceNumber() {
+  const prefix = getSetting('bill_prefix') || 'INV-';
+  const seq = parseInt(getSetting('bill_next'), 10) || 1001;
+  setSetting('bill_next', String(seq + 1));
+  return prefix + seq;
+}
+function cleanItems(raw) {
+  return (Array.isArray(raw) ? raw : []).map(it => ({
+    description: String(it.description || '').slice(0, 400),
+    quantity: Number(it.quantity) > 0 ? Number(it.quantity) : 1,
+    unit_price: r2(it.unit_price)
+  })).filter(it => it.description || it.unit_price);
+}
+function insertInvoice({ customer_id, email, date, due_date, tax_rate, notes, items, status }) {
+  const t = computeTotals(items, tax_rate);
+  const info = db.prepare(`INSERT INTO bill_invoices (number,customer_id,email,date,due_date,status,tax_rate,subtotal,tax,total,balance,notes,pay_token)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(nextInvoiceNumber(), customer_id, N(email), date || todayStr(), N(due_date), status || 'draft',
+         Number(tax_rate || 0), t.subtotal, t.tax, t.total, t.total, N(notes), randomBytes(18).toString('hex'));
+  const ins = db.prepare('INSERT INTO bill_items (invoice_id,description,quantity,unit_price,amount) VALUES (?,?,?,?,?)');
+  for (const it of items) ins.run(info.lastInsertRowid, it.description, it.quantity, it.unit_price, r2(it.quantity * it.unit_price));
+  return info.lastInsertRowid;
+}
+function loadInvoice(id) {
+  const inv = db.prepare(`SELECT i.*, c.name AS customer_name, c.billing_email FROM bill_invoices i LEFT JOIN customers c ON c.id=i.customer_id WHERE i.id=?`).get(id);
+  if (!inv) return null;
+  inv.items = db.prepare('SELECT * FROM bill_items WHERE invoice_id=? ORDER BY id').all(id);
+  inv.payments = db.prepare('SELECT * FROM bill_payments WHERE invoice_id=? ORDER BY date, id').all(id);
+  const pub = (getSetting('public_base_url') || '').replace(/\/+$/, '');
+  inv.pay_url = pub && inv.pay_token ? `${pub}/pay/${inv.pay_token}` : null;
+  return inv;
+}
+// Record a payment and roll the invoice status forward. Idempotent per Stripe payment-intent.
+function applyPayment(invId, { amount, method, reference, stripe_pi, date, notes }) {
+  const inv = db.prepare('SELECT * FROM bill_invoices WHERE id=?').get(invId);
+  if (!inv) throw Object.assign(new Error('invoice not found'), { http: 404 });
+  if (stripe_pi && db.prepare('SELECT id FROM bill_payments WHERE stripe_pi=?').get(stripe_pi)) return { duplicate: true };
+  const amt = r2(amount);
+  if (!(amt > 0)) throw Object.assign(new Error('amount must be > 0'), { http: 400 });
+  db.prepare('INSERT INTO bill_payments (invoice_id,date,amount,method,reference,stripe_pi,notes) VALUES (?,?,?,?,?,?,?)')
+    .run(invId, date || todayStr(), amt, method || 'other', N(reference), N(stripe_pi), N(notes));
+  const balance = r2(Math.max(0, inv.balance - amt));
+  const status = balance <= 0 ? 'paid' : 'partial';
+  db.prepare('UPDATE bill_invoices SET balance=?, status=? WHERE id=?').run(balance, status, invId);
+  return { balance, status };
+}
+// Email an invoice (uses the SMTP settings) with the public pay link when available
+function emailInvoice(inv) {
+  const to = inv.email || inv.billing_email;
+  if (!to) return false;
+  const company = getSetting('bill_company') || 'Network Inventory';
+  const lines = inv.items.map(it => ` - ${it.description}  x${it.quantity}  $${it.amount.toFixed(2)}`).join('\n');
+  const rows = inv.items.map(it => `<tr><td style="padding:4px 12px 4px 0">${esc2(it.description)}</td><td align="center">${it.quantity}</td><td align="right">$${it.amount.toFixed(2)}</td></tr>`).join('');
+  const payBit = inv.pay_url ? `\n\nPay online (card or bank/ACH): ${inv.pay_url}` : '';
+  const payBtn = inv.pay_url ? `<p style="margin:18px 0"><a href="${inv.pay_url}" style="background:#378ADD;color:#fff;padding:11px 22px;border-radius:8px;text-decoration:none">Pay invoice online</a><br><span style="color:#777;font-size:12px">Card or bank transfer (ACH), processed securely by Stripe.</span></p>` : '';
+  mailSafe({
+    to, subject: `Invoice ${inv.number} from ${company} — $${inv.total.toFixed(2)}${inv.due_date ? ' due ' + inv.due_date : ''}`,
+    text: `Invoice ${inv.number} from ${company}\nDate: ${inv.date}${inv.due_date ? '\nDue: ' + inv.due_date : ''}\n\n${lines}\n\nTotal: $${inv.total.toFixed(2)}\nBalance due: $${inv.balance.toFixed(2)}${payBit}${inv.notes ? '\n\n' + inv.notes : ''}`,
+    html: `<h2>Invoice ${esc2(inv.number)}</h2><p>${esc2(company)} · ${esc2(inv.date)}${inv.due_date ? ' · due <b>' + esc2(inv.due_date) + '</b>' : ''}</p>
+      <table style="border-collapse:collapse">${rows}<tr><td style="padding:8px 12px 0 0"><b>Total</b></td><td></td><td align="right"><b>$${inv.total.toFixed(2)}</b></td></tr></table>
+      ${payBtn}${inv.notes ? `<p style="color:#555">${esc2(inv.notes)}</p>` : ''}`
+  });
+  return true;
+}
+// ---- Stripe (REST via fetch; no SDK) ----
+async function stripeReq(method, path, params) {
+  const key = getSetting('stripe_secret');
+  if (!key) throw Object.assign(new Error('Set the Stripe secret key in Settings first'), { http: 400 });
+  const r = await fetch('https://api.stripe.com' + path, {
+    method,
+    headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params ? new URLSearchParams(params).toString() : undefined
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error('Stripe: ' + ((j.error && j.error.message) || ('HTTP ' + r.status))), { http: 502 });
+  return j;
+}
+function verifyStripeSig(rawBody, sigHeader, secret) {
+  if (!sigHeader || !secret) return false;
+  let t = null; const v1s = [];
+  for (const part of String(sigHeader).split(',')) {
+    const [k, v] = part.split('=');
+    if (k === 't') t = v; else if (k === 'v1') v1s.push(v);
+  }
+  if (!t || !v1s.length) return false;
+  if (Math.abs(Date.now() / 1000 - Number(t)) > 300) return false; // 5 min replay tolerance
+  const expected = createHmac('sha256', secret).update(`${t}.${rawBody}`).digest('hex');
+  return v1s.some(v => { try { return v.length === expected.length && timingSafeEqual(Buffer.from(v), Buffer.from(expected)); } catch { return false; } });
+}
+function stripeWebhook(req, res) {
+  const raw = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : String(req.body || '');
+  if (!verifyStripeSig(raw, req.headers['stripe-signature'], getSetting('stripe_webhook_secret'))) return res.status(400).json({ error: 'bad signature' });
+  let ev; try { ev = JSON.parse(raw); } catch { return res.status(400).json({ error: 'bad payload' }); }
+  try {
+    if (['checkout.session.completed', 'checkout.session.async_payment_succeeded'].includes(ev.type)) {
+      const s = ev.data.object;
+      const invId = Number(s.metadata && s.metadata.invoice_id);
+      // cards are paid at completion; ACH completes now and settles later via async_payment_succeeded
+      if (invId && s.payment_status === 'paid') {
+        const out = applyPayment(invId, { amount: (s.amount_total || 0) / 100, method: 'stripe', reference: s.payment_intent, stripe_pi: s.payment_intent });
+        if (!out.duplicate) db.prepare('INSERT INTO audit_log (actor,role,action,target,details) VALUES (?,?,?,?,?)')
+          .run('stripe', 'system', 'payment', 'invoice#' + invId, `$${((s.amount_total || 0) / 100).toFixed(2)} via Stripe (${ev.type})`);
+      }
+    } else if (ev.type === 'checkout.session.async_payment_failed') {
+      const s = ev.data.object;
+      const invId = Number(s.metadata && s.metadata.invoice_id);
+      if (invId) db.prepare('INSERT INTO audit_log (actor,role,action,target,details) VALUES (?,?,?,?,?)')
+        .run('stripe', 'system', 'payment_failed', 'invoice#' + invId, 'ACH payment failed');
+    }
+    res.json({ received: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+}
+// ---- billing API (NOC/Admin) ----
+app.get('/api/billing/summary', requireNoc, (req, res) => {
+  const today = todayStr();
+  const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  res.json({
+    stripe: !!getSetting('stripe_secret'),
+    outstanding: db.prepare("SELECT COALESCE(SUM(balance),0) v FROM bill_invoices WHERE status IN ('sent','partial')").get().v,
+    overdue: db.prepare("SELECT COALESCE(SUM(balance),0) v FROM bill_invoices WHERE status IN ('sent','partial') AND due_date IS NOT NULL AND due_date<?").get(today).v,
+    overdue_count: db.prepare("SELECT COUNT(*) v FROM bill_invoices WHERE status IN ('sent','partial') AND due_date IS NOT NULL AND due_date<?").get(today).v,
+    collected_30d: db.prepare('SELECT COALESCE(SUM(amount),0) v FROM bill_payments WHERE date>=?').get(monthAgo).v,
+    draft_count: db.prepare("SELECT COUNT(*) v FROM bill_invoices WHERE status='draft'").get().v
+  });
+});
+app.get('/api/billing/products', requireNoc, (req, res) => {
+  res.json(db.prepare('SELECT * FROM bill_products WHERE active=1 ORDER BY name').all());
+});
+app.post('/api/billing/products', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!b.name) return res.status(400).json({ error: 'Name required' });
+  const info = db.prepare('INSERT INTO bill_products (name,description,price) VALUES (?,?,?)').run(b.name, N(b.description), r2(b.price));
+  audit(req, 'create', 'product#' + info.lastInsertRowid, b.name);
+  res.json({ id: info.lastInsertRowid });
+});
+app.put('/api/billing/products/:id', requireNoc, (req, res) => {
+  const b = req.body || {};
+  const ex = db.prepare('SELECT * FROM bill_products WHERE id=?').get(req.params.id);
+  if (!ex) return res.status(404).json({ error: 'not found' });
+  db.prepare('UPDATE bill_products SET name=?, description=?, price=? WHERE id=?')
+    .run(N(b.name, ex.name), N(b.description, ex.description), b.price === undefined ? ex.price : r2(b.price), req.params.id);
+  audit(req, 'edit', 'product#' + req.params.id, b.name || ex.name);
+  res.json({ ok: true });
+});
+app.delete('/api/billing/products/:id', requireNoc, (req, res) => {
+  db.prepare('UPDATE bill_products SET active=0 WHERE id=?').run(req.params.id); // soft delete: past invoice lines stay intact
+  audit(req, 'delete', 'product#' + req.params.id);
+  res.json({ ok: true });
+});
+app.get('/api/billing/invoices', requireNoc, (req, res) => {
+  const q = '%' + String(req.query.q || '').trim() + '%';
+  let sql = `SELECT i.id, i.number, i.customer_id, i.date, i.due_date, i.status, i.total, i.balance, c.name AS customer_name
+    FROM bill_invoices i LEFT JOIN customers c ON c.id=i.customer_id WHERE (i.number LIKE ? OR c.name LIKE ?)`;
+  const args = [q, q];
+  if (req.query.status) { sql += ' AND i.status=?'; args.push(String(req.query.status)); }
+  sql += ' ORDER BY i.id DESC LIMIT 300';
+  res.json(db.prepare(sql).all(...args));
+});
+app.get('/api/billing/invoices/:id', requireNoc, (req, res) => {
+  const inv = loadInvoice(req.params.id);
+  if (!inv) return res.status(404).json({ error: 'not found' });
+  res.json(inv);
+});
+app.post('/api/billing/invoices', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!b.customer_id) return res.status(400).json({ error: 'Pick a customer' });
+  const items = cleanItems(b.items);
+  if (!items.length) return res.status(400).json({ error: 'Add at least one line item' });
+  const id = insertInvoice({ customer_id: Number(b.customer_id), email: b.email, date: b.date, due_date: b.due_date, tax_rate: b.tax_rate, notes: b.notes, items, status: 'draft' });
+  let emailed = false;
+  if (b.send) {
+    emailed = emailInvoice(loadInvoice(id));
+    db.prepare("UPDATE bill_invoices SET status='sent', sent_at=datetime('now') WHERE id=?").run(id);
+  }
+  const num = db.prepare('SELECT number FROM bill_invoices WHERE id=?').get(id).number;
+  audit(req, 'create', 'invoice#' + id, num + (b.send ? ' (sent)' : ' (draft)'));
+  res.json({ id, number: num, emailed });
+});
+app.put('/api/billing/invoices/:id', requireNoc, (req, res) => {
+  const b = req.body || {};
+  const inv = db.prepare('SELECT * FROM bill_invoices WHERE id=?').get(req.params.id);
+  if (!inv) return res.status(404).json({ error: 'not found' });
+  if (inv.status !== 'draft') return res.status(409).json({ error: 'Only draft invoices can be edited' });
+  const items = cleanItems(b.items);
+  if (!items.length) return res.status(400).json({ error: 'Add at least one line item' });
+  const t = computeTotals(items, b.tax_rate === undefined ? inv.tax_rate : b.tax_rate);
+  db.prepare('UPDATE bill_invoices SET customer_id=?, email=?, date=?, due_date=?, tax_rate=?, subtotal=?, tax=?, total=?, balance=?, notes=? WHERE id=?')
+    .run(Number(b.customer_id || inv.customer_id), N(b.email, inv.email), b.date || inv.date, N(b.due_date, inv.due_date),
+         Number(b.tax_rate === undefined ? inv.tax_rate : b.tax_rate), t.subtotal, t.tax, t.total, t.total, N(b.notes, inv.notes), inv.id);
+  db.prepare('DELETE FROM bill_items WHERE invoice_id=?').run(inv.id);
+  const ins = db.prepare('INSERT INTO bill_items (invoice_id,description,quantity,unit_price,amount) VALUES (?,?,?,?,?)');
+  for (const it of items) ins.run(inv.id, it.description, it.quantity, it.unit_price, r2(it.quantity * it.unit_price));
+  audit(req, 'edit', 'invoice#' + inv.id, inv.number);
+  res.json({ ok: true });
+});
+app.post('/api/billing/invoices/:id/send', requireNoc, (req, res) => {
+  const inv = loadInvoice(req.params.id);
+  if (!inv) return res.status(404).json({ error: 'not found' });
+  if (['paid', 'void'].includes(inv.status)) return res.status(409).json({ error: 'Invoice is ' + inv.status });
+  const emailed = emailInvoice(inv);
+  if (inv.status === 'draft') db.prepare("UPDATE bill_invoices SET status='sent', sent_at=datetime('now') WHERE id=?").run(inv.id);
+  audit(req, 'edit', 'invoice#' + inv.id, inv.number + (emailed ? ' emailed' : ' marked sent (no email on file)'));
+  res.json({ ok: true, emailed });
+});
+app.post('/api/billing/invoices/:id/pay', requireNoc, (req, res) => {
+  const b = req.body || {};
+  try {
+    const out = applyPayment(Number(req.params.id), { amount: b.amount, method: b.method || 'other', reference: b.reference, date: b.date, notes: b.notes });
+    audit(req, 'payment', 'invoice#' + req.params.id, `$${r2(b.amount).toFixed(2)} ${b.method || 'other'}${b.reference ? ' · ' + b.reference : ''}`);
+    res.json({ ok: true, ...out });
+  } catch (e) { res.status(e.http || 500).json({ error: e.message }); }
+});
+app.post('/api/billing/invoices/:id/void', requireNoc, (req, res) => {
+  const inv = db.prepare('SELECT * FROM bill_invoices WHERE id=?').get(req.params.id);
+  if (!inv) return res.status(404).json({ error: 'not found' });
+  if (inv.status === 'paid') return res.status(409).json({ error: 'Paid invoices cannot be voided' });
+  db.prepare("UPDATE bill_invoices SET status='void', balance=0 WHERE id=?").run(inv.id);
+  audit(req, 'edit', 'invoice#' + inv.id, inv.number + ' voided');
+  res.json({ ok: true });
+});
+app.delete('/api/billing/invoices/:id', requireNoc, (req, res) => {
+  const inv = db.prepare('SELECT * FROM bill_invoices WHERE id=?').get(req.params.id);
+  if (!inv) return res.status(404).json({ error: 'not found' });
+  if (!['draft', 'void'].includes(inv.status)) return res.status(409).json({ error: 'Only draft or void invoices can be deleted — void it first' });
+  db.prepare('DELETE FROM bill_items WHERE invoice_id=?').run(inv.id);
+  db.prepare('DELETE FROM bill_payments WHERE invoice_id=?').run(inv.id);
+  db.prepare('DELETE FROM bill_invoices WHERE id=?').run(inv.id);
+  audit(req, 'delete', 'invoice#' + inv.id, inv.number);
+  res.json({ ok: true });
+});
+app.get('/api/billing/payments', requireNoc, (req, res) => {
+  res.json(db.prepare(`SELECT p.*, i.number AS invoice_number, c.name AS customer_name
+    FROM bill_payments p JOIN bill_invoices i ON i.id=p.invoice_id LEFT JOIN customers c ON c.id=i.customer_id
+    ORDER BY p.date DESC, p.id DESC LIMIT 300`).all());
+});
+// ---- recurring schedules ----
+const FREQS = { weekly: 'Weekly', monthly: 'Monthly', quarterly: 'Quarterly', semiannual: 'Every 6 months', yearly: 'Yearly' };
+const FREQ_MONTHS = { monthly: 1, quarterly: 3, semiannual: 6, yearly: 12 };
+function advanceDate(dateStr, freq) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  if (freq === 'weekly') d.setUTCDate(d.getUTCDate() + 7);
+  else d.setUTCMonth(d.getUTCMonth() + (FREQ_MONTHS[freq] || 1));
+  return d.toISOString().slice(0, 10);
+}
+app.get('/api/billing/recurring', requireNoc, (req, res) => {
+  const rows = db.prepare(`SELECT r.*, c.name AS customer_name FROM bill_recurring r LEFT JOIN customers c ON c.id=r.customer_id ORDER BY r.active DESC, c.name`).all();
+  for (const r of rows) {
+    try { r.items = JSON.parse(r.items_json); } catch { r.items = []; }
+    r.amount = computeTotals(r.items, r.tax_rate).total;
+    r.frequency_label = FREQS[r.frequency] || r.frequency;
+    delete r.items_json;
+  }
+  res.json(rows);
+});
+app.post('/api/billing/recurring', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!b.customer_id) return res.status(400).json({ error: 'Pick a customer' });
+  const items = cleanItems(b.items);
+  if (!items.length) return res.status(400).json({ error: 'Add at least one line item' });
+  if (!b.next_date) return res.status(400).json({ error: 'Set the next invoice date' });
+  const freq = FREQS[b.frequency] ? b.frequency : 'monthly';
+  const info = db.prepare('INSERT INTO bill_recurring (customer_id,frequency,next_date,tax_rate,items_json,auto_send,active) VALUES (?,?,?,?,?,?,1)')
+    .run(Number(b.customer_id), freq, b.next_date, Number(b.tax_rate || 0), JSON.stringify(items), b.auto_send === false ? 0 : 1);
+  audit(req, 'create', 'recurring#' + info.lastInsertRowid, `customer#${b.customer_id} ${freq}`);
+  res.json({ id: info.lastInsertRowid });
+});
+app.put('/api/billing/recurring/:id', requireNoc, (req, res) => {
+  const b = req.body || {};
+  const ex = db.prepare('SELECT * FROM bill_recurring WHERE id=?').get(req.params.id);
+  if (!ex) return res.status(404).json({ error: 'not found' });
+  const items = b.items !== undefined ? cleanItems(b.items) : null;
+  db.prepare('UPDATE bill_recurring SET customer_id=?, frequency=?, next_date=?, tax_rate=?, items_json=?, auto_send=?, active=? WHERE id=?')
+    .run(Number(b.customer_id || ex.customer_id), FREQS[b.frequency] ? b.frequency : ex.frequency, b.next_date || ex.next_date,
+         Number(b.tax_rate === undefined ? ex.tax_rate : b.tax_rate), items ? JSON.stringify(items) : ex.items_json,
+         b.auto_send === undefined ? ex.auto_send : (b.auto_send ? 1 : 0),
+         b.active === undefined ? ex.active : (b.active ? 1 : 0), ex.id);
+  audit(req, 'edit', 'recurring#' + ex.id);
+  res.json({ ok: true });
+});
+app.delete('/api/billing/recurring/:id', requireNoc, (req, res) => {
+  db.prepare('DELETE FROM bill_recurring WHERE id=?').run(req.params.id);
+  audit(req, 'delete', 'recurring#' + req.params.id);
+  res.json({ ok: true });
+});
+// Generate invoices for due schedules (sampler runs this hourly; button exposes it too)
+function runRecurringBilling() {
+  const due = db.prepare('SELECT * FROM bill_recurring WHERE active=1 AND next_date<=?').all(todayStr());
+  let made = 0;
+  for (const r of due) {
+    let items = []; try { items = JSON.parse(r.items_json); } catch {}
+    if (!items.length) continue;
+    const cust = db.prepare('SELECT billing_email FROM customers WHERE id=?').get(r.customer_id) || {};
+    const id = insertInvoice({ customer_id: r.customer_id, email: cust.billing_email, date: r.next_date, due_date: advanceDate(r.next_date, 'monthly'), tax_rate: r.tax_rate, items, status: r.auto_send ? 'sent' : 'draft' });
+    if (r.auto_send) { emailInvoice(loadInvoice(id)); db.prepare("UPDATE bill_invoices SET sent_at=datetime('now') WHERE id=?").run(id); }
+    db.prepare('UPDATE bill_recurring SET next_date=? WHERE id=?').run(advanceDate(r.next_date, r.frequency), r.id);
+    db.prepare('INSERT INTO audit_log (actor,role,action,target,details) VALUES (?,?,?,?,?)')
+      .run('system', 'system', 'create', 'invoice#' + id, 'recurring#' + r.id + (r.auto_send ? ' (auto-sent)' : ' (draft)'));
+    made++;
+  }
+  return made;
+}
+app.post('/api/billing/recurring/run', requireNoc, (req, res) => {
+  const made = runRecurringBilling();
+  audit(req, 'edit', 'billing', `recurring run: ${made} invoice(s) generated`);
+  res.json({ made });
+});
+app.post('/api/billing/stripe-test', requireNoc, async (req, res) => {
+  try {
+    const j = await stripeReq('GET', '/v1/balance');
+    res.json({ ok: true, livemode: !!j.livemode, currency: (j.available && j.available[0] && j.available[0].currency) || 'usd' });
+  } catch (e) { res.status(e.http || 502).json({ error: e.message }); }
+});
+// per-customer billing rollup (customer page card)
+app.get('/api/customers/:id/billing', requireNoc, (req, res) => {
+  const invoices = db.prepare('SELECT id, number, date, due_date, status, total, balance FROM bill_invoices WHERE customer_id=? ORDER BY id DESC LIMIT 12').all(req.params.id);
+  const outstanding = db.prepare("SELECT COALESCE(SUM(balance),0) v FROM bill_invoices WHERE customer_id=? AND status IN ('sent','partial')").get(req.params.id).v;
+  res.json({ any: invoices.length > 0, outstanding, invoices });
+});
+// full billing backup / restore (all bill_* tables + numbering)
+app.get('/api/billing/backup', requireNoc, (req, res) => {
+  const dump = {
+    format: 'netinv-billing-backup', version: 2, exported_at: new Date().toISOString(),
+    bill_prefix: getSetting('bill_prefix') || 'INV-', bill_next: getSetting('bill_next') || '1001',
+    products: db.prepare('SELECT * FROM bill_products').all(),
+    invoices: db.prepare('SELECT * FROM bill_invoices').all(),
+    items: db.prepare('SELECT * FROM bill_items').all(),
+    payments: db.prepare('SELECT * FROM bill_payments').all(),
+    recurring: db.prepare('SELECT * FROM bill_recurring').all()
+  };
+  audit(req, 'billing_backup', 'billing', `${dump.invoices.length} invoices, ${dump.payments.length} payments`);
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="billing-backup-${todayStr()}.json"`);
+  res.send(JSON.stringify(dump));
+});
+app.post('/api/billing/restore', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (b.format !== 'netinv-billing-backup' || b.version !== 2 || !Array.isArray(b.invoices)) return res.status(400).json({ error: 'Not a billing backup file' });
+  db.exec('BEGIN');
+  try {
+    const tables = { bill_products: b.products, bill_invoices: b.invoices, bill_items: b.items, bill_payments: b.payments, bill_recurring: b.recurring };
+    const counts = {};
+    for (const [table, rows] of Object.entries(tables)) {
+      db.exec(`DELETE FROM ${table}`);
+      const list = Array.isArray(rows) ? rows : [];
+      if (list.length) {
+        const cols = Object.keys(list[0]);
+        const ins = db.prepare(`INSERT INTO ${table} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`);
+        for (const row of list) ins.run(...cols.map(c => row[c] === undefined ? null : row[c]));
+      }
+      counts[table.replace('bill_', '')] = list.length;
+    }
+    if (b.bill_prefix) setSetting('bill_prefix', String(b.bill_prefix));
+    if (b.bill_next) setSetting('bill_next', String(b.bill_next));
+    db.exec('COMMIT');
+    audit(req, 'billing_restore', 'billing', Object.entries(counts).map(([k, v]) => `${k}:${v}`).join(' '));
+    res.json({ ok: true, counts });
+  } catch (e) { db.exec('ROLLBACK'); res.status(500).json({ error: 'Restore failed: ' + e.message }); }
+});
+// ---- public pay page (tokenized link; no login) ----
+function payPage(inv, msg) {
+  const company = esc2(getSetting('bill_company') || 'Network Inventory');
+  const canPay = inv.balance > 0 && inv.status !== 'void' && !!getSetting('stripe_secret');
+  const rows = inv.items.map(it => `<tr><td>${esc2(it.description)}</td><td align="center">${it.quantity}</td><td align="right">$${it.amount.toFixed(2)}</td></tr>`).join('');
+  const statusTxt = inv.status === 'void' ? 'VOID' : inv.balance <= 0 ? 'PAID — thank you' : (inv.status === 'partial' ? `$${inv.balance.toFixed(2)} remaining` : `$${inv.balance.toFixed(2)} due${inv.due_date ? ' by ' + esc2(inv.due_date) : ''}`);
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Invoice ${esc2(inv.number)}</title>
+<style>:root{--bg:#0f1216;--card:#171c22;--line:#2a323c;--text:#e6eaf0;--muted:#9aa6b2;--accent:#378ADD;--ok:#1D9E75}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.5}
+.wrap{max-width:560px;margin:0 auto;padding:28px 18px 60px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px}
+h1{font-size:20px;margin:0 0 2px}.sub{color:var(--muted);font-size:14px;margin:0 0 18px}table{width:100%;border-collapse:collapse;font-size:14px}
+td{padding:7px 0;border-bottom:1px solid var(--line)}.tot td{border-bottom:0;padding-top:12px;font-weight:600}
+.status{display:inline-block;margin:14px 0;padding:6px 14px;border-radius:20px;font-weight:600;font-size:14px;background:#0e1318;border:1px solid var(--line)}
+.paid{color:var(--ok)}.due{color:#f0ad4e}.msg{margin:0 0 14px;padding:10px 14px;border-radius:9px;background:#0e1318;border:1px solid var(--line);font-size:14px}
+.pay{width:100%;margin-top:18px;padding:13px;border:0;border-radius:10px;background:var(--accent);color:#fff;font-size:16px;font-weight:600;cursor:pointer}
+.hint{color:var(--muted);font-size:12px;margin-top:8px;text-align:center}</style></head><body><div class="wrap"><div class="card">
+<h1>Invoice ${esc2(inv.number)}</h1><p class="sub">${company} · ${esc2(inv.date)}${inv.customer_name ? ' · ' + esc2(inv.customer_name) : ''}</p>
+${msg ? `<div class="msg">${msg}</div>` : ''}
+<table>${rows}${inv.tax > 0 ? `<tr><td>Tax (${inv.tax_rate}%)</td><td></td><td align="right">$${inv.tax.toFixed(2)}</td></tr>` : ''}<tr class="tot"><td>Total</td><td></td><td align="right">$${inv.total.toFixed(2)}</td></tr></table>
+<div class="status ${inv.balance <= 0 ? 'paid' : 'due'}">${statusTxt}</div>
+${inv.notes ? `<p class="sub">${esc2(inv.notes)}</p>` : ''}
+${canPay ? `<button class="pay" onclick="pay(this)">Pay $${inv.balance.toFixed(2)} online</button><div class="hint">Card or US bank transfer (ACH) — processed securely by Stripe. This site never sees your card or bank details.</div>` : ''}
+</div></div>
+<script>async function pay(btn){btn.disabled=true;btn.textContent='Redirecting to secure payment…';
+try{const r=await fetch(location.pathname+'/checkout',{method:'POST'});const j=await r.json();
+if(j.url)location.href=j.url;else{alert(j.error||'Could not start payment');btn.disabled=false;btn.textContent='Pay online';}}
+catch(e){alert('Could not start payment');btn.disabled=false;btn.textContent='Pay online';}}</script></body></html>`;
+}
+const invByToken = (token) => { const row = db.prepare('SELECT id FROM bill_invoices WHERE pay_token=?').get(String(token || '')); return row ? loadInvoice(row.id) : null; };
+app.get('/pay/:token', (req, res) => {
+  const inv = invByToken(req.params.token);
+  if (!inv) return res.status(404).type('text/plain').send('Invoice not found');
+  let msg = null;
+  if (req.query.result === 'success') msg = inv.balance <= 0 ? 'Payment received — thank you!' : 'Payment submitted. Bank (ACH) payments take a few business days to clear; this page will update once it does.';
+  else if (req.query.result === 'cancel') msg = 'Payment was cancelled — you can try again below.';
+  res.type('html').send(payPage(inv, msg));
+});
+app.post('/pay/:token/checkout', async (req, res) => {
+  const inv = invByToken(req.params.token);
+  if (!inv) return res.status(404).json({ error: 'not found' });
+  if (inv.balance <= 0 || inv.status === 'void') return res.status(409).json({ error: 'Nothing to pay on this invoice' });
+  const pub = (getSetting('public_base_url') || '').replace(/\/+$/, '');
+  if (!pub) return res.status(400).json({ error: 'Online payment not configured' });
+  try {
+    const company = getSetting('bill_company') || 'Invoice';
+    const session = await stripeReq('POST', '/v1/checkout/sessions', {
+      mode: 'payment',
+      'payment_method_types[0]': 'card',
+      'payment_method_types[1]': 'us_bank_account',
+      'line_items[0][price_data][currency]': 'usd',
+      'line_items[0][price_data][product_data][name]': `Invoice ${inv.number} — ${company}`,
+      'line_items[0][price_data][unit_amount]': String(Math.round(inv.balance * 100)),
+      'line_items[0][quantity]': '1',
+      success_url: `${pub}/pay/${inv.pay_token}?result=success`,
+      cancel_url: `${pub}/pay/${inv.pay_token}?result=cancel`,
+      'metadata[invoice_id]': String(inv.id),
+      ...(inv.email || inv.billing_email ? { customer_email: inv.email || inv.billing_email } : {})
+    });
+    res.json({ url: session.url });
+  } catch (e) { res.status(e.http || 502).json({ error: e.message }); }
+});
+
 // ---- audit ----
 app.get('/api/audit', (req, res) => {
   res.json(db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 200').all());
@@ -2011,6 +2453,10 @@ async function sampleTick() {
         try { await runWeeklyBackups('auto'); } catch {}
         db.prepare("INSERT INTO settings (key,value) VALUES ('last_backup_run',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(new Date().toISOString());
       }
+    }
+    // recurring invoices: generate (and optionally email) any that have come due — once/hour is plenty
+    if (process.env.BILLING !== 'off' && _tickN % 60 === 1) {
+      try { runRecurringBilling(); } catch (e) { console.warn('recurring billing failed:', e.message); }
     }
     // end-of-day auto check-out of any visitors still on site (once per day, at/after the configured time)
     const acAt = getSetting('auto_checkout_at');

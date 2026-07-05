@@ -93,6 +93,22 @@ export function migrate() {
   // Visitor check-in / check-out log (comings and goings)
   db.exec("CREATE TABLE IF NOT EXISTS visits (id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER NOT NULL, check_in_at TEXT, check_in_by TEXT, check_out_at TEXT, check_out_by TEXT)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_visits ON visits(request_id)");
+  // Standalone billing (invoices live here; Stripe only processes card/ACH payments)
+  for (const t of ['inv_clients', 'inv_invoices', 'inv_payments', 'inv_products', 'inv_recurring']) db.exec(`DROP TABLE IF EXISTS ${t}`); // remove abandoned Invoice Ninja mirror
+  ensure('customers', 'billing_email', 'TEXT');
+  db.exec("CREATE TABLE IF NOT EXISTS bill_products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT, price REAL NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  db.exec(`CREATE TABLE IF NOT EXISTS bill_invoices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT UNIQUE NOT NULL, customer_id INTEGER NOT NULL,
+    email TEXT, date TEXT NOT NULL, due_date TEXT, status TEXT NOT NULL DEFAULT 'draft',  -- draft|sent|partial|paid|void
+    tax_rate REAL NOT NULL DEFAULT 0, subtotal REAL NOT NULL DEFAULT 0, tax REAL NOT NULL DEFAULT 0,
+    total REAL NOT NULL DEFAULT 0, balance REAL NOT NULL DEFAULT 0, notes TEXT,
+    pay_token TEXT UNIQUE, sent_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_billinv ON bill_invoices(customer_id, status)');
+  db.exec("CREATE TABLE IF NOT EXISTS bill_items (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_id INTEGER NOT NULL, description TEXT, quantity REAL NOT NULL DEFAULT 1, unit_price REAL NOT NULL DEFAULT 0, amount REAL NOT NULL DEFAULT 0)");
+  db.exec('CREATE INDEX IF NOT EXISTS idx_billitem ON bill_items(invoice_id)');
+  db.exec("CREATE TABLE IF NOT EXISTS bill_payments (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_id INTEGER NOT NULL, date TEXT NOT NULL, amount REAL NOT NULL, method TEXT NOT NULL DEFAULT 'other', reference TEXT, stripe_pi TEXT, notes TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  db.exec('CREATE INDEX IF NOT EXISTS idx_billpay ON bill_payments(invoice_id)');
+  db.exec("CREATE TABLE IF NOT EXISTS bill_recurring (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL, frequency TEXT NOT NULL DEFAULT 'monthly', next_date TEXT NOT NULL, tax_rate REAL NOT NULL DEFAULT 0, items_json TEXT NOT NULL DEFAULT '[]', auto_send INTEGER NOT NULL DEFAULT 1, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

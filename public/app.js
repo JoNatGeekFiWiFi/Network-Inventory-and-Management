@@ -62,6 +62,7 @@ function setupHeader() {
   $('#navBlock').style.display = isPriv() ? '' : 'none';
   $('#navBatch').style.display = isPriv() ? '' : 'none';
   $('#navAccess').style.display = isPriv() ? '' : 'none';
+  $('#navBilling').style.display = isPriv() ? '' : 'none';
   $('#navPackages').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
 }
@@ -135,6 +136,11 @@ async function route() {
     if (p[0] === 'device' && p[2] === 'wifi') { setNav('inventory'); return await renderDeviceWifi(p[1]); }
     if (p[0] === 'device' && p[2] === 'backups') { setNav('inventory'); return await renderDeviceBackups(p[1]); }
     if (p[0] === 'device') { setNav('inventory'); return await renderDevice(p[1]); }
+    if (p[0] === 'billing' && p[1] === 'new') { setNav('billing'); return await formInvoice({}); }
+    if (p[0] === 'billing' && p[1] === 'invoice' && p[3] === 'edit') { setNav('billing'); return await formInvoice({ id: p[2] }); }
+    if (p[0] === 'billing' && p[1] === 'recurring' && p[2] === 'new') { setNav('billing'); return await formRecurring({}); }
+    if (p[0] === 'billing' && p[1] === 'recurring' && p[3] === 'edit') { setNav('billing'); return await formRecurring({ id: p[2] }); }
+    if (p[0] === 'billing') { setNav('billing'); return await renderBilling(); }
     if (p[0] === 'activity') { setNav('activity'); return await renderActivity(); }
     if (p[0] === 'users' && p[1] === 'new') { setNav('users'); return await formUser({}); }
     if (p[0] === 'users' && p[2] === 'edit') { setNav('users'); return await formUser({ id: p[1] }); }
@@ -581,6 +587,8 @@ async function renderCustomerList() {
 }
 async function renderCust(id) {
   const c = await api('/customers/' + id);
+  let bill = null;
+  if (isPriv()) { try { bill = await api('/customers/' + id + '/billing'); } catch {} }
   const sites = c.sites.map(s => `<div class="row rowlink" onclick="location.hash='#/site/${s.id}'">
     <span class="dot" style="flex:none;background:${pillFor(s.needs_attention ? 'Standby' : 'Up')[1]}"></span>
     <div style="flex:1;min-width:0"><div>${esc(s.name)}</div><div class="small mono sec-muted">mgmt ${esc(s.current_mgmt_ip || '—')} · pub ${esc(s.current_public_ip || '—')}</div></div>
@@ -599,6 +607,11 @@ async function renderCust(id) {
       <div class="metric"><div class="l">Needs attention</div><div class="v" style="color:var(--warning)">${c.needs_attention}</div></div>
     </div>
     ${c.notes ? `<div class="card" style="padding:12px 14px"><div class="small sec-muted">${esc(c.notes)}</div></div>` : ''}
+    ${bill && bill.any ? `<div class="card"><div class="hd"><h2><i class="ti ti-file-invoice"></i> Billing</h2>
+      <div style="display:flex;align-items:center;gap:10px">${bill.outstanding > 0 ? `<span class="mono" style="color:var(--warning)">${fmtMoney(bill.outstanding)} outstanding</span>` : '<span class="pill s-up">Settled</span>'}<a class="btn sm" href="#/billing">All billing</a></div></div>
+      ${bill.invoices.map(i => `<div class="row"><i class="ti ti-file-invoice sec-muted"></i>
+        <div style="flex:1;min-width:0"><div><b>${esc(i.number)}</b></div><div class="small sec-muted">${esc(i.date)}${i.due_date ? ' · due ' + esc(i.due_date) : ''}</div></div>
+        <span class="mono">${fmtMoney(i.total)}</span>${invPill(i)}</div>`).join('')}</div>` : ''}
     <div class="card"><div class="hd"><h2>Sites · ${c.sites.length}</h2><a class="btn sm" href="#/site/new?customer=${c.id}"><i class="ti ti-plus"></i> Add site</a></div>${sites || '<div class="row muted">No sites yet</div>'}</div>`;
 }
 async function formCust(q) {
@@ -617,6 +630,7 @@ async function formCust(q) {
         <div id="custAccts" style="max-height:200px;overflow:auto;border:.5px solid var(--border);border-radius:8px"></div>
         <div class="help">A customer can be served by more than one account. Pick all that apply.</div></div>
       ${field('Status', 'status', c.status, { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}
+      ${field('Billing email (invoices go here)', 'billing_email', c.billing_email || '', { mono: true, ph: 'billing@customer.com' })}
       ${field('Notes', 'notes', c.notes, { type: 'textarea' })}
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
       <button class="btn primary" onclick="saveCust(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
@@ -1580,6 +1594,22 @@ async function renderSettings() {
       <button class="btn" onclick="regenProv()" title="Replace the provisioning token — configs already on routers keep the old token and will stop phoning home until re-loaded"><i class="ti ti-refresh"></i> Regenerate token</button></div>
       <div class="help">Set the public URL (reachable from devices' WAN over HTTPS). Per-device default configs are on each device's Config backups page; the provisioning node uses the generic config + these bench WiFi/admin defaults.</div>
     </div>
+    <div class="card" style="padding:16px" id="billcfg">
+      <h2 style="margin-bottom:12px"><i class="ti ti-file-invoice"></i> Billing &amp; Stripe</h2>
+      <div class="grid2">${field('Company name (on invoices/emails)', 'bill_company', s.bill_company, { ph: 'GeekFi WiFi' })}${field('Invoice number prefix', 'bill_prefix', s.bill_prefix, { mono: true })}</div>
+      ${field('Next invoice number', 'bill_next', s.bill_next, { mono: true })}
+      ${field('Stripe secret key', 'stripe_secret', '', { mono: true, ph: s.has_stripe_secret ? 'unchanged' : 'sk_live_… (Stripe → Developers → API keys)' })}
+      ${field('Stripe webhook signing secret', 'stripe_webhook_secret', '', { mono: true, ph: s.has_stripe_webhook_secret ? 'unchanged' : 'whsec_… (add the endpoint first, see below)' })}
+      <div class="help">Invoices live in this platform; Stripe only processes card &amp; ACH payments — card data never touches this server. In Stripe → Developers → Webhooks, add endpoint <span class="mono">${esc((s.public_base_url || 'https://your-domain') + '/stripe/webhook')}</span> with events <span class="mono">checkout.session.completed</span>, <span class="mono">checkout.session.async_payment_succeeded</span>, <span class="mono">checkout.session.async_payment_failed</span>, then paste its signing secret above so online payments mark invoices paid automatically.</div>
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+        <button class="btn primary" onclick="saveBillingCfg()"><i class="ti ti-check"></i> Save</button>
+        <button class="btn" onclick="testStripe()" title="Verify the secret key against the Stripe API">Test Stripe</button>
+        <a class="btn" href="/api/billing/backup" title="Download all invoices, payments, products and schedules as one JSON file"><i class="ti ti-download"></i> Download backup</a>
+        <button class="btn" onclick="$('#billRestoreFile').click()" title="Load a billing backup file (replaces current billing data)"><i class="ti ti-upload"></i> Restore backup</button>
+        <input type="file" id="billRestoreFile" accept="application/json,.json" style="display:none" onchange="restoreBilling(this)"/>
+      </div>
+      <div id="billout"></div>
+    </div>
     <div class="card" style="padding:16px" id="mail">
       <h2 style="margin-bottom:12px"><i class="ti ti-mail"></i> Email notifications</h2>
       <div class="grid2">${field('SMTP host', 'smtp_host', s.smtp_host, { mono: true, ph: 'smtp.example.com' })}${field('SMTP port', 'smtp_port', s.smtp_port, { mono: true, ph: '587' })}</div>
@@ -2009,4 +2039,271 @@ async function showWg(id) {
       a.download = 'wg-' + id + '.conf'; a.click();
     });
   } catch (e) { toast(e.message); }
+}
+
+// ---------- Billing (standalone; Stripe processes card/ACH) ----------
+const fmtMoney = (n) => '$' + Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const BILL_PILL = { paid: 's-up', partial: 's-warn', sent: 's-warn', draft: '', void: 's-down' };
+const isOverdueInv = (i) => (i.status === 'sent' || i.status === 'partial') && i.balance > 0 && i.due_date && i.due_date < new Date().toISOString().slice(0, 10);
+function invPill(i) {
+  if (isOverdueInv(i)) return '<span class="pill s-down">Overdue</span>';
+  const s = i.status || '';
+  return `<span class="pill ${BILL_PILL[s] || ''}">${esc(s[0] ? s[0].toUpperCase() + s.slice(1) : '')}</span>`;
+}
+async function renderBilling() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const s = await api('/billing/summary');
+  window._billTab = window._billTab || 'invoices';
+  view().innerHTML = `
+    <div class="head"><div class="t"><h1>Billing</h1>
+      <div class="small sec-muted" style="margin-top:3px">Invoices live here · Stripe processes cards &amp; ACH${s.stripe ? '' : ' · <a class="iplink" href="#/settings">connect Stripe in Settings</a>'}</div></div>
+      <a class="btn primary" href="#/billing/new"><i class="ti ti-plus"></i> New invoice</a></div>
+    <div class="grid3" style="margin:16px 0">
+      <div class="metric"><div class="l">Outstanding</div><div class="v">${fmtMoney(s.outstanding)}</div></div>
+      <div class="metric"><div class="l">Overdue (${s.overdue_count})</div><div class="v" style="color:var(--danger)">${fmtMoney(s.overdue)}</div></div>
+      <div class="metric"><div class="l">Collected · 30 days</div><div class="v" style="color:var(--success)">${fmtMoney(s.collected_30d)}</div></div>
+    </div>
+    <div class="seg" style="margin-bottom:14px">
+      ${['invoices', 'payments', 'recurring', 'products'].map(t => `<button class="segbtn${window._billTab === t ? ' on' : ''}" data-bt="${t}" onclick="billTab('${t}')">${t[0].toUpperCase() + t.slice(1)}</button>`).join('')}
+    </div>
+    <div id="billbody"><div class="loading">Loading…</div></div>`;
+  await billTab(window._billTab);
+}
+async function billTab(tab) {
+  window._billTab = tab;
+  document.querySelectorAll('[data-bt]').forEach(b => b.classList.toggle('on', b.dataset.bt === tab));
+  const body = $('#billbody'); if (!body) return;
+  try {
+    if (tab === 'invoices') {
+      body.innerHTML = `<div style="display:flex;gap:8px;margin-bottom:10px">
+        <input id="billq" placeholder="Search number or customer…" style="flex:1"/>
+        <select id="billst" style="width:auto"><option value="">All statuses</option>
+          <option value="draft">Draft</option><option value="sent">Sent</option><option value="partial">Partial</option><option value="paid">Paid</option><option value="void">Void</option></select>
+        </div><div class="card" id="billinv"></div>`;
+      const load = async () => {
+        const rows = await api('/billing/invoices?q=' + encodeURIComponent($('#billq').value.trim()) + '&status=' + $('#billst').value);
+        $('#billinv').innerHTML = rows.map(i => `<div class="row rowlink" onclick="toggleInvoice(${i.id})">
+          <i class="ti ti-file-invoice sec-muted"></i>
+          <div style="flex:1;min-width:0"><div><b>${esc(i.number)}</b> · ${esc(i.customer_name || '?')}</div>
+            <div class="small sec-muted">${esc(i.date)}${i.due_date ? ' · due ' + esc(i.due_date) : ''}</div></div>
+          <div class="stat"><span class="mono">${fmtMoney(i.total)}</span>${i.balance > 0 && i.status !== 'void' ? `<span class="small mono" style="color:var(--warning)">${fmtMoney(i.balance)} due</span>` : ''}</div>
+          ${invPill(i)}</div><div id="invdet-${i.id}"></div>`).join('') || '<div class="row muted">No invoices yet — create one with New invoice</div>';
+      };
+      $('#billq').addEventListener('input', () => { clearTimeout(window._billT); window._billT = setTimeout(load, 250); });
+      $('#billst').addEventListener('change', load);
+      await load();
+    } else if (tab === 'payments') {
+      const rows = await api('/billing/payments');
+      const M = { stripe: 'Stripe', stripe_ach: 'Stripe ACH', check: 'Check', cash: 'Cash', other: 'Other' };
+      body.innerHTML = `<div class="card">${rows.map(p => `<div class="row">
+        <i class="ti ti-credit-card sec-muted"></i>
+        <div style="flex:1;min-width:0"><div>${esc(p.customer_name || '?')} · <span class="small mono">${esc(p.invoice_number)}</span></div>
+          <div class="small sec-muted">${esc(p.date)} · ${esc(M[p.method] || p.method)}${p.reference ? ' · ' + esc(p.reference) : ''}</div></div>
+        <span class="mono" style="color:var(--success)">${fmtMoney(p.amount)}</span></div>`).join('') || '<div class="row muted">No payments recorded yet</div>'}</div>`;
+    } else if (tab === 'recurring') {
+      const rows = await api('/billing/recurring');
+      body.innerHTML = `<div style="display:flex;gap:8px;margin-bottom:10px;justify-content:flex-end">
+          <button class="btn sm" onclick="runRecurring()" title="Generate invoices for any schedules that are due today">Run due now</button>
+          <a class="btn sm" href="#/billing/recurring/new"><i class="ti ti-plus"></i> New recurring</a></div>
+        <div class="card">${rows.map(r => `<div class="row">
+        <i class="ti ti-repeat sec-muted"></i>
+        <div style="flex:1;min-width:0"><div>${esc(r.customer_name || '?')} · ${fmtMoney(r.amount)}</div>
+          <div class="small sec-muted">${esc(r.frequency_label)} · next ${esc(r.next_date)}${r.auto_send ? ' · auto-emails' : ' · creates draft'}</div></div>
+        ${r.active ? '<span class="pill s-up">Active</span>' : '<span class="pill">Paused</span>'}
+        <a class="btn sm" href="#/billing/recurring/${r.id}/edit" title="Edit this schedule"><i class="ti ti-edit"></i> Edit</a>
+        <button class="btn sm" onclick="toggleRecurring(${r.id}, ${r.active ? 0 : 1})" title="${r.active ? 'Stop generating invoices (keeps the schedule)' : 'Resume generating invoices'}">${r.active ? 'Pause' : 'Resume'}</button>
+        <button class="btn sm" onclick="delRecurring(${r.id})" title="Delete this schedule (existing invoices stay)"><i class="ti ti-trash"></i> Delete</button></div>`).join('') || '<div class="row muted">No recurring schedules — use New recurring for monthly service billing</div>'}</div>`;
+    } else if (tab === 'products') {
+      const rows = await api('/billing/products');
+      body.innerHTML = `<div style="display:flex;gap:8px;margin-bottom:10px;justify-content:flex-end"><button class="btn sm" onclick="addProduct()"><i class="ti ti-plus"></i> New product</button></div>
+        <div class="card">${rows.map(p => `<div class="row">
+        <i class="ti ti-package sec-muted"></i>
+        <div style="flex:1;min-width:0"><div>${esc(p.name)}</div><div class="small sec-muted">${esc(p.description || '')}</div></div>
+        <span class="mono">${fmtMoney(p.price)}</span>
+        <button class="btn sm" onclick="editProduct(${p.id}, ${esc(JSON.stringify(p.name))}, ${esc(JSON.stringify(p.description || ''))}, ${p.price})" title="Edit this product"><i class="ti ti-edit"></i> Edit</button>
+        <button class="btn sm" onclick="delProduct(${p.id})" title="Remove from the catalog (past invoices keep their lines)"><i class="ti ti-trash"></i> Delete</button></div>`).join('') || '<div class="row muted">No products yet — add your service plans (e.g. "Fiber 1G — $99/mo") for quick invoicing</div>'}</div>`;
+    }
+  } catch (e) { body.innerHTML = `<div class="card" style="padding:16px;color:var(--danger)">${esc(e.message)}</div>`; }
+}
+async function toggleInvoice(id) {
+  const det = $('#invdet-' + id); if (!det) return;
+  if (det.innerHTML) { det.innerHTML = ''; return; }
+  try {
+    const i = await api('/billing/invoices/' + id);
+    const items = i.items.map(it => `<div class="kv"><span class="small">${esc(it.description)} <span class="muted">× ${it.quantity}</span></span><span class="mono small">${fmtMoney(it.amount)}</span></div>`).join('');
+    const pays = i.payments.map(p => `<div class="kv"><span class="small" style="color:var(--success)">Payment · ${esc(p.date)} · ${esc(p.method)}${p.reference ? ' · ' + esc(p.reference) : ''}</span><span class="mono small" style="color:var(--success)">-${fmtMoney(p.amount)}</span></div>`).join('');
+    const actions = [];
+    if (i.status === 'draft') actions.push(`<a class="btn sm" href="#/billing/invoice/${i.id}/edit"><i class="ti ti-edit"></i> Edit</a>`);
+    if (!['paid', 'void'].includes(i.status)) actions.push(`<button class="btn sm" onclick="sendInvoice(${i.id})" title="Email it to the customer with the pay link (marks it Sent)"><i class="ti ti-send"></i> ${i.status === 'draft' ? 'Send' : 'Resend'}</button>`);
+    if (i.balance > 0 && i.status !== 'void') actions.push(`<button class="btn sm" onclick="recordPayment(${i.id}, ${i.balance})" title="Record a check/cash/manual payment"><i class="ti ti-cash"></i> Record payment</button>`);
+    if (i.pay_url && i.balance > 0 && i.status !== 'void') actions.push(`<button class="btn sm" onclick="copyText(${esc(JSON.stringify(i.pay_url))})" title="Copy the public payment link (card / ACH via Stripe)"><i class="ti ti-link"></i> Copy pay link</button>`);
+    if (!['paid', 'void'].includes(i.status)) actions.push(`<button class="btn sm" onclick="voidInvoice(${i.id})" title="Cancel this invoice (kept for records)">Void</button>`);
+    if (['draft', 'void'].includes(i.status)) actions.push(`<button class="btn sm" onclick="delInvoice(${i.id})" title="Delete permanently"><i class="ti ti-trash"></i> Delete</button>`);
+    det.innerHTML = `<div style="padding:4px 14px 12px 40px;background:var(--surface2)">
+      ${items}${i.tax > 0 ? `<div class="kv"><span class="small">Tax (${i.tax_rate}%)</span><span class="mono small">${fmtMoney(i.tax)}</span></div>` : ''}
+      <div class="kv"><span class="small"><b>Total</b></span><span class="mono small"><b>${fmtMoney(i.total)}</b></span></div>
+      ${pays}${i.balance > 0 && i.status !== 'void' ? `<div class="kv"><span class="small"><b>Balance due</b></span><span class="mono small" style="color:var(--warning)"><b>${fmtMoney(i.balance)}</b></span></div>` : ''}
+      ${i.notes ? `<div class="small sec-muted" style="margin-top:6px">${esc(i.notes)}</div>` : ''}
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">${actions.join('')}</div></div>`;
+  } catch (e) { toast(e.message); }
+}
+function copyText(t) { navigator.clipboard.writeText(t).then(() => toast('Copied'), () => prompt('Copy this link:', t)); }
+async function sendInvoice(id) {
+  try { const r = await api('/billing/invoices/' + id + '/send', { method: 'POST' }); toast(r.emailed ? 'Invoice emailed' : 'Marked sent — no billing email on file, copy the pay link instead'); billTab('invoices'); } catch (e) { toast(e.message); }
+}
+async function recordPayment(id, balance) {
+  const amt = parseFloat(prompt(`Payment amount (balance ${fmtMoney(balance)}):`, balance));
+  if (!(amt > 0)) return;
+  const method = (prompt('Method — check / cash / other:', 'check') || 'other').toLowerCase();
+  const reference = prompt('Reference (check #, memo — optional):') || '';
+  try { const r = await api('/billing/invoices/' + id + '/pay', { method: 'POST', body: JSON.stringify({ amount: amt, method: ['check', 'cash'].includes(method) ? method : 'other', reference }) }); toast(r.status === 'paid' ? 'Paid in full' : 'Partial payment recorded'); billTab('invoices'); } catch (e) { toast(e.message); }
+}
+async function voidInvoice(id) {
+  if (!confirm('Void this invoice? It stays on record but is no longer collectible.')) return;
+  try { await api('/billing/invoices/' + id + '/void', { method: 'POST' }); toast('Voided'); billTab('invoices'); } catch (e) { toast(e.message); }
+}
+async function delInvoice(id) {
+  if (!confirm('Permanently delete this invoice?')) return;
+  try { await api('/billing/invoices/' + id, { method: 'DELETE' }); toast('Deleted'); billTab('invoices'); } catch (e) { toast(e.message); }
+}
+async function runRecurring() {
+  try { const r = await api('/billing/recurring/run', { method: 'POST' }); toast(r.made ? r.made + ' invoice(s) generated' : 'Nothing due'); billTab('recurring'); } catch (e) { toast(e.message); }
+}
+async function toggleRecurring(id, active) {
+  try { await api('/billing/recurring/' + id, { method: 'PUT', body: JSON.stringify({ active: !!active }) }); billTab('recurring'); } catch (e) { toast(e.message); }
+}
+async function delRecurring(id) {
+  if (!confirm('Delete this recurring schedule? Invoices already generated stay.')) return;
+  try { await api('/billing/recurring/' + id, { method: 'DELETE' }); toast('Deleted'); billTab('recurring'); } catch (e) { toast(e.message); }
+}
+async function addProduct() {
+  const name = prompt('Product / service name (e.g. "Fiber 1G"):'); if (!name) return;
+  const price = parseFloat(prompt('Price:', '0')) || 0;
+  const description = prompt('Description (optional):') || '';
+  try { await api('/billing/products', { method: 'POST', body: JSON.stringify({ name, price, description }) }); toast('Added'); billTab('products'); } catch (e) { toast(e.message); }
+}
+async function editProduct(id, name, description, price) {
+  const n = prompt('Name:', name); if (!n) return;
+  const p = parseFloat(prompt('Price:', price)); const d = prompt('Description:', description) || '';
+  try { await api('/billing/products/' + id, { method: 'PUT', body: JSON.stringify({ name: n, price: isNaN(p) ? price : p, description: d }) }); toast('Saved'); billTab('products'); } catch (e) { toast(e.message); }
+}
+async function delProduct(id) {
+  if (!confirm('Remove this product from the catalog?')) return;
+  try { await api('/billing/products/' + id, { method: 'DELETE' }); toast('Removed'); billTab('products'); } catch (e) { toast(e.message); }
+}
+// ---- invoice / recurring form (shared line-item editor) ----
+function renderItemRows() {
+  const rows = window._items.map((it, i) => `<div style="display:flex;gap:8px;margin-bottom:6px">
+    <input placeholder="Description" value="${esc(it.description)}" oninput="window._items[${i}].description=this.value;itemTotals()" style="flex:3"/>
+    <input type="number" min="0" step="any" title="Quantity" value="${it.quantity}" oninput="window._items[${i}].quantity=parseFloat(this.value)||0;itemTotals()" style="flex:1"/>
+    <input type="number" min="0" step="any" title="Unit price" value="${it.unit_price}" oninput="window._items[${i}].unit_price=parseFloat(this.value)||0;itemTotals()" style="flex:1;font-family:var(--mono)"/>
+    <button class="btn sm" onclick="window._items.splice(${i},1);renderItemRows()" title="Remove line"><i class="ti ti-x"></i></button></div>`).join('');
+  $('#itemrows').innerHTML = rows + `<div style="display:flex;gap:8px;margin-top:4px;align-items:center">
+    <button class="btn sm" onclick="window._items.push({description:'',quantity:1,unit_price:0});renderItemRows()"><i class="ti ti-plus"></i> Add line</button>
+    ${window._products.length ? `<select id="prodpick" style="width:auto" onchange="pickProduct(this)"><option value="">Add from products…</option>${window._products.map(p => `<option value="${p.id}">${esc(p.name)} — ${fmtMoney(p.price)}</option>`).join('')}</select>` : ''}
+    <div style="flex:1"></div><div class="small sec-muted">Subtotal <b class="mono" id="itemsub"></b></div></div>`;
+  itemTotals();
+}
+function itemTotals() {
+  const sub = window._items.reduce((n, it) => n + (it.quantity || 0) * (it.unit_price || 0), 0);
+  const el = $('#itemsub'); if (el) el.textContent = fmtMoney(sub);
+}
+function pickProduct(sel) {
+  const p = window._products.find(x => x.id === Number(sel.value)); sel.value = '';
+  if (p) { window._items.push({ description: p.name + (p.description ? ' — ' + p.description : ''), quantity: 1, unit_price: p.price }); renderItemRows(); }
+}
+async function formInvoice(q) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const [custs, products] = await Promise.all([api('/customers'), api('/billing/products')]);
+  let inv = { customer_id: '', email: '', date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 0, notes: '', items: [{ description: '', quantity: 1, unit_price: 0 }] };
+  if (q.id) inv = await api('/billing/invoices/' + q.id);
+  window._items = inv.items.map(it => ({ description: it.description, quantity: it.quantity, unit_price: it.unit_price }));
+  window._products = products;
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/billing'"><i class="ti ti-chevron-left"></i> Billing</div>
+    <h1>${q.id ? 'Edit invoice ' + esc(inv.number) : 'New invoice'}</h1>
+    <div class="card" style="margin-top:14px;padding:16px" id="f">
+      <div class="grid2">
+        <div class="fld"><label class="fl">Customer</label><select name="customer_id">${custs.map(c => `<option value="${c.id}" ${c.id == inv.customer_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
+        ${field('Email invoice to (blank = customer billing email)', 'email', inv.email || '', { mono: true, ph: 'billing@customer.com' })}
+      </div>
+      <div class="grid2">${field('Invoice date', 'date', inv.date, { type: 'date' })}${field('Due date', 'due_date', inv.due_date || '', { type: 'date' })}</div>
+      ${field('Tax rate %', 'tax_rate', inv.tax_rate || 0, { type: 'number' })}
+      <div class="fld"><label class="fl">Line items (description · qty · unit price)</label><div id="itemrows"></div></div>
+      ${field('Notes (shown on the invoice)', 'notes', inv.notes || '', { type: 'textarea' })}
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px">
+        <button class="btn" onclick="location.hash='#/billing'">Cancel</button>
+        <button class="btn" onclick="saveInvoice(${q.id || 'null'}, false)" title="Save without emailing — you can send it later"><i class="ti ti-device-floppy"></i> Save draft</button>
+        <button class="btn primary" onclick="saveInvoice(${q.id || 'null'}, true)" title="Save and email it to the customer with the online pay link"><i class="ti ti-send"></i> Save &amp; send</button></div>
+    </div>`;
+  renderItemRows();
+}
+async function saveInvoice(id, send) {
+  const d = collect('#f');
+  d.items = window._items; d.send = send;
+  try {
+    if (id) {
+      await api('/billing/invoices/' + id, { method: 'PUT', body: JSON.stringify(d) });
+      if (send) await api('/billing/invoices/' + id + '/send', { method: 'POST' });
+      toast(send ? 'Saved & sent' : 'Saved');
+    } else {
+      const r = await api('/billing/invoices', { method: 'POST', body: JSON.stringify(d) });
+      toast(r.number + (send ? (r.emailed ? ' sent' : ' created — no email on file, copy the pay link') : ' saved as draft'));
+    }
+    location.hash = '#/billing';
+  } catch (e) { toast(e.message); }
+}
+async function formRecurring(q) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const [custs, products] = await Promise.all([api('/customers'), api('/billing/products')]);
+  let r = { customer_id: '', frequency: 'monthly', next_date: new Date().toISOString().slice(0, 10), tax_rate: 0, auto_send: 1, items: [{ description: '', quantity: 1, unit_price: 0 }] };
+  if (q.id) { const all = await api('/billing/recurring'); r = all.find(x => x.id === Number(q.id)) || r; }
+  window._items = r.items.map(it => ({ description: it.description, quantity: it.quantity, unit_price: it.unit_price }));
+  window._products = products;
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/billing'"><i class="ti ti-chevron-left"></i> Billing</div>
+    <h1>${q.id ? 'Edit' : 'New'} recurring invoice</h1>
+    <div class="card" style="margin-top:14px;padding:16px" id="f">
+      <div class="grid2">
+        <div class="fld"><label class="fl">Customer</label><select name="customer_id">${custs.map(c => `<option value="${c.id}" ${c.id == r.customer_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
+        ${field('Frequency', 'frequency', r.frequency, { type: 'select', options: [{ v: 'weekly', l: 'Weekly' }, { v: 'monthly', l: 'Monthly' }, { v: 'quarterly', l: 'Quarterly' }, { v: 'semiannual', l: 'Every 6 months' }, { v: 'yearly', l: 'Yearly' }] })}
+      </div>
+      <div class="grid2">${field('Next invoice date', 'next_date', r.next_date, { type: 'date' })}${field('Tax rate %', 'tax_rate', r.tax_rate || 0, { type: 'number' })}</div>
+      <label class="row" style="cursor:pointer;padding:6px 0"><input type="checkbox" id="autoSend" ${r.auto_send ? 'checked' : ''} style="width:auto"/>
+        <div style="flex:1"><div>Auto-send</div><div class="small sec-muted">Email each invoice (with the pay link) as it's generated. Off = invoices appear as drafts for review.</div></div></label>
+      <div class="fld"><label class="fl">Line items</label><div id="itemrows"></div></div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px">
+        <button class="btn" onclick="location.hash='#/billing'">Cancel</button>
+        <button class="btn primary" onclick="saveRecurring(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div>
+    </div>`;
+  renderItemRows();
+}
+async function saveRecurring(id) {
+  const d = collect('#f');
+  d.items = window._items; d.auto_send = $('#autoSend').checked;
+  try {
+    if (id) await api('/billing/recurring/' + id, { method: 'PUT', body: JSON.stringify(d) });
+    else await api('/billing/recurring', { method: 'POST', body: JSON.stringify(d) });
+    toast('Saved'); window._billTab = 'recurring'; location.hash = '#/billing';
+  } catch (e) { toast(e.message); }
+}
+// ---- settings card actions ----
+async function saveBillingCfg() {
+  const d = collect('#billcfg');
+  if (!d.stripe_secret) delete d.stripe_secret;
+  if (!d.stripe_webhook_secret) delete d.stripe_webhook_secret;
+  try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
+}
+async function testStripe() {
+  const out = $('#billout'); out.innerHTML = '<div class="loading">Testing…</div>';
+  try { const r = await api('/billing/stripe-test', { method: 'POST' }); out.innerHTML = `<div class="help" style="color:var(--success)">Connected — ${r.livemode ? 'LIVE mode' : 'test mode'} (${esc(r.currency.toUpperCase())})</div>`; }
+  catch (e) { out.innerHTML = `<div class="help" style="color:var(--danger)">${esc(e.message)}</div>`; }
+}
+async function restoreBilling(input) {
+  const f = input.files && input.files[0]; if (!f) return;
+  input.value = '';
+  if (!confirm(`Restore billing from "${f.name}"?\n\nThis REPLACES all invoices, payments, products and recurring schedules with the file's contents.`)) return;
+  try {
+    const data = JSON.parse(await f.text());
+    const r = await api('/billing/restore', { method: 'POST', body: JSON.stringify(data) });
+    toast(`Restored: ${r.counts.invoices} invoices, ${r.counts.payments} payments`);
+  } catch (e) { toast('Restore failed: ' + (e.message || 'bad file')); }
 }
