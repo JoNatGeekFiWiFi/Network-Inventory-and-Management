@@ -112,6 +112,20 @@ export function migrate() {
   db.exec("CREATE TABLE IF NOT EXISTS bill_payments (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_id INTEGER NOT NULL, date TEXT NOT NULL, amount REAL NOT NULL, method TEXT NOT NULL DEFAULT 'other', reference TEXT, stripe_pi TEXT, notes TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
   db.exec('CREATE INDEX IF NOT EXISTS idx_billpay ON bill_payments(invoice_id)');
   db.exec("CREATE TABLE IF NOT EXISTS bill_recurring (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL, frequency TEXT NOT NULL DEFAULT 'monthly', next_date TEXT NOT NULL, tax_rate REAL NOT NULL DEFAULT 0, items_json TEXT NOT NULL DEFAULT '[]', auto_send INTEGER NOT NULL DEFAULT 1, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  // Quotes (mirror invoices; can convert to an invoice)
+  db.exec(`CREATE TABLE IF NOT EXISTS bill_quotes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT UNIQUE NOT NULL, customer_id INTEGER NOT NULL,
+    email TEXT, date TEXT NOT NULL, expiry_date TEXT, status TEXT NOT NULL DEFAULT 'draft',  -- draft|sent|accepted|declined|expired|converted
+    tax_rate REAL NOT NULL DEFAULT 0, subtotal REAL NOT NULL DEFAULT 0, tax REAL NOT NULL DEFAULT 0, total REAL NOT NULL DEFAULT 0,
+    notes TEXT, terms TEXT, view_token TEXT UNIQUE, converted_invoice_id INTEGER, sent_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_billquote ON bill_quotes(customer_id, status)');
+  db.exec("CREATE TABLE IF NOT EXISTS bill_quote_items (id INTEGER PRIMARY KEY AUTOINCREMENT, quote_id INTEGER NOT NULL, description TEXT, quantity REAL NOT NULL DEFAULT 1, unit_price REAL NOT NULL DEFAULT 0, amount REAL NOT NULL DEFAULT 0, taxable INTEGER NOT NULL DEFAULT 1)");
+  db.exec('CREATE INDEX IF NOT EXISTS idx_billqitem ON bill_quote_items(quote_id)');
+  // Customer portal auth
+  ensure('customers', 'portal_password', 'TEXT');   // scrypt hash
+  ensure('customers', 'portal_enabled', 'INTEGER NOT NULL DEFAULT 0');
+  db.exec("CREATE TABLE IF NOT EXISTS portal_sessions (token TEXT PRIMARY KEY, customer_id INTEGER NOT NULL, expires_at TEXT NOT NULL)");
+  db.exec("CREATE TABLE IF NOT EXISTS portal_login_tokens (token TEXT PRIMARY KEY, customer_id INTEGER NOT NULL, expires_at TEXT NOT NULL)");
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

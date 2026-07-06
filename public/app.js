@@ -140,6 +140,8 @@ async function route() {
     if (p[0] === 'billing' && p[1] === 'invoice' && p[3] === 'edit') { setNav('billing'); return await formInvoice({ id: p[2] }); }
     if (p[0] === 'billing' && p[1] === 'recurring' && p[2] === 'new') { setNav('billing'); return await formRecurring({}); }
     if (p[0] === 'billing' && p[1] === 'recurring' && p[3] === 'edit') { setNav('billing'); return await formRecurring({ id: p[2] }); }
+    if (p[0] === 'billing' && p[1] === 'quote' && p[2] === 'new') { setNav('billing'); return await formQuote({}); }
+    if (p[0] === 'billing' && p[1] === 'quote' && p[3] === 'edit') { setNav('billing'); return await formQuote({ id: p[2] }); }
     if (p[0] === 'billing') { setNav('billing'); return await renderBilling(); }
     if (p[0] === 'activity') { setNav('activity'); return await renderActivity(); }
     if (p[0] === 'users' && p[1] === 'new') { setNav('users'); return await formUser({}); }
@@ -662,8 +664,13 @@ async function formCust(q) {
         <div id="custAccts" style="max-height:200px;overflow:auto;border:.5px solid var(--border);border-radius:8px"></div>
         <div class="help">A customer can be served by more than one account. Pick all that apply.</div></div>
       ${field('Status', 'status', c.status, { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}
-      ${field('Billing email (invoices go here)', 'billing_email', c.billing_email || '', { mono: true, ph: 'billing@customer.com' })}
+      ${field('Billing email (invoices + portal login)', 'billing_email', c.billing_email || '', { mono: true, ph: 'billing@customer.com' })}
       ${field('Notes', 'notes', c.notes, { type: 'textarea' })}
+      ${q.id ? `<div class="fld" style="border-top:.5px solid var(--border);padding-top:12px;margin-top:6px">
+        <label class="row" style="cursor:pointer;padding:0"><input type="checkbox" id="portalEnabled" ${c.portal_enabled ? 'checked' : ''} style="width:auto"/>
+          <div style="flex:1"><div>Enable customer portal login</div><div class="small sec-muted">Customer signs in at <span class="mono">/portal</span> with their billing email — to view invoices, quotes &amp; account.</div></div></label>
+        ${field('Set portal password', 'portal_password', '', { mono: true, ph: c.has_portal_password ? 'unchanged (or type to reset)' : 'optional — they can also use an email login link' })}
+      </div>` : '<div class="help">Save the customer first, then edit it to enable portal login.</div>'}
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
       <button class="btn primary" onclick="saveCust(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
   renderCustAccts();
@@ -682,6 +689,8 @@ async function saveCust(id) {
   d.account_ids = Array.from(window._custAcctSel || []);
   if (!d.account_ids.length) { toast('Pick at least one account'); return; }
   if (!d.name) { toast('Enter a customer name'); return; }
+  if ($('#portalEnabled')) d.portal_enabled = $('#portalEnabled').checked;
+  if (!d.portal_password) delete d.portal_password;
   try {
     if (id) { await api('/customers/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/customer/' + id; }
     else { const r = await api('/customers', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/customer/' + r.id; }
@@ -2109,7 +2118,7 @@ async function renderBilling() {
       <div class="metric"><div class="l">Collected · 30 days</div><div class="v" style="color:var(--success)">${fmtMoney(s.collected_30d)}</div></div>
     </div>
     <div class="seg" style="margin-bottom:14px">
-      ${['invoices', 'payments', 'recurring', 'products'].map(t => `<button class="segbtn${window._billTab === t ? ' on' : ''}" data-bt="${t}" onclick="billTab('${t}')">${t[0].toUpperCase() + t.slice(1)}</button>`).join('')}
+      ${['invoices', 'quotes', 'payments', 'recurring', 'products'].map(t => `<button class="segbtn${window._billTab === t ? ' on' : ''}" data-bt="${t}" onclick="billTab('${t}')">${t[0].toUpperCase() + t.slice(1)}</button>`).join('')}
     </div>
     <div id="billbody"><div class="loading">Loading…</div></div>`;
   await billTab(window._billTab);
@@ -2137,6 +2146,23 @@ async function billTab(tab) {
       $('#billq').addEventListener('input', () => { clearTimeout(window._billT); window._billT = setTimeout(load, 250); });
       $('#billst').addEventListener('change', load);
       await load();
+    } else if (tab === 'quotes') {
+      body.innerHTML = `<div style="display:flex;gap:8px;margin-bottom:10px">
+        <input id="qq" placeholder="Search number or customer…" style="flex:1"/>
+        <select id="qst" style="width:auto"><option value="">All statuses</option>
+          <option value="draft">Draft</option><option value="sent">Sent</option><option value="accepted">Accepted</option><option value="declined">Declined</option><option value="converted">Converted</option><option value="expired">Expired</option></select>
+        <a class="btn sm" href="#/billing/quote/new"><i class="ti ti-plus"></i> New quote</a></div><div class="card" id="qlist"></div>`;
+      const loadQ = async () => {
+        const rows = await api('/billing/quotes?q=' + encodeURIComponent($('#qq').value.trim()) + '&status=' + $('#qst').value);
+        $('#qlist').innerHTML = rows.map(qr => `<div class="row rowlink" onclick="toggleQuote(${qr.id})">
+          <i class="ti ti-file-text sec-muted"></i>
+          <div style="flex:1;min-width:0"><div><b>${esc(qr.number)}</b> · ${esc(qr.customer_name || '?')}</div>
+            <div class="small sec-muted">${esc(qr.date)}${qr.expiry_date ? ' · valid until ' + esc(qr.expiry_date) : ''}</div></div>
+          <div class="stat"><span class="mono">${fmtMoney(qr.total)}</span></div>${quotePill(qr.status)}</div><div id="qdet-${qr.id}"></div>`).join('') || '<div class="row muted">No quotes yet — create one with New quote</div>';
+      };
+      $('#qq').addEventListener('input', () => { clearTimeout(window._qT); window._qT = setTimeout(loadQ, 250); });
+      $('#qst').addEventListener('change', loadQ);
+      await loadQ();
     } else if (tab === 'payments') {
       const rows = await api('/billing/payments');
       const M = { stripe: 'Stripe', stripe_ach: 'Stripe ACH', check: 'Check', cash: 'Cash', other: 'Other' };
@@ -2301,6 +2327,73 @@ async function saveInvoice(id, send) {
       toast(r.number + (send ? (r.emailed ? ' sent' : ' created — no email on file, copy the pay link') : ' saved as draft'));
     }
     location.hash = '#/billing';
+  } catch (e) { toast(e.message); }
+}
+const QUOTE_PILL = { accepted: 's-up', sent: 's-warn', draft: '', declined: 's-down', converted: 's-up', expired: 's-down' };
+function quotePill(s) { return `<span class="pill ${QUOTE_PILL[s] || ''}">${esc(s ? s[0].toUpperCase() + s.slice(1) : '')}</span>`; }
+async function toggleQuote(id) {
+  const det = $('#qdet-' + id); if (!det) return;
+  if (det.innerHTML) { det.innerHTML = ''; return; }
+  try {
+    const qr = await api('/billing/quotes/' + id);
+    const items = qr.items.map(it => `<div class="kv"><span class="small">${esc(it.description)} <span class="muted">× ${it.quantity}${it.taxable === 0 && qr.tax_rate > 0 ? ' · no tax' : ''}</span></span><span class="mono small">${fmtMoney(it.amount)}</span></div>`).join('');
+    const actions = [];
+    if (!['converted', 'accepted'].includes(qr.status)) actions.push(`<a class="btn sm" href="#/billing/quote/${qr.id}/edit"><i class="ti ti-edit"></i> Edit</a>`);
+    if (qr.status !== 'converted') actions.push(`<button class="btn sm" onclick="sendQuote(${qr.id})" title="Email the quote to the customer"><i class="ti ti-send"></i> ${qr.status === 'draft' ? 'Send' : 'Resend'}</button>`);
+    if (qr.view_url) actions.push(`<button class="btn sm" onclick="copyText(${esc(JSON.stringify(qr.view_url))})" title="Copy the public quote link"><i class="ti ti-link"></i> Copy link</button>`);
+    if (['draft', 'sent'].includes(qr.status)) { actions.push(`<button class="btn sm" style="color:var(--success)" onclick="setQuoteStatus(${qr.id},'accepted')" title="Mark accepted"><i class="ti ti-check"></i> Accept</button>`); actions.push(`<button class="btn sm" style="color:var(--danger)" onclick="setQuoteStatus(${qr.id},'declined')" title="Mark declined"><i class="ti ti-x"></i> Decline</button>`); }
+    if (qr.status !== 'converted') actions.push(`<button class="btn sm primary" onclick="convertQuote(${qr.id})" title="Create a draft invoice from this quote"><i class="ti ti-file-invoice"></i> Convert to invoice</button>`);
+    actions.push(`<button class="btn sm" onclick="delQuote(${qr.id})" title="Delete this quote"><i class="ti ti-trash"></i> Delete</button>`);
+    det.innerHTML = `<div style="padding:4px 14px 12px 40px;background:var(--surface2)">
+      ${items}${qr.tax > 0 ? `<div class="kv"><span class="small">Tax (${qr.tax_rate}%)</span><span class="mono small">${fmtMoney(qr.tax)}</span></div>` : ''}
+      <div class="kv"><span class="small"><b>Total</b></span><span class="mono small"><b>${fmtMoney(qr.total)}</b></span></div>
+      ${qr.notes ? `<div class="small sec-muted" style="margin-top:6px">${esc(qr.notes)}</div>` : ''}
+      ${qr.converted_invoice_id ? `<div class="small" style="color:var(--success);margin-top:6px">Converted to an invoice</div>` : ''}
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">${actions.join('')}</div></div>`;
+  } catch (e) { toast(e.message); }
+}
+async function sendQuote(id) { try { const r = await api('/billing/quotes/' + id + '/send', { method: 'POST' }); toast(r.emailed ? 'Quote emailed' : 'Marked sent — no billing email on file, copy the link'); billTab('quotes'); } catch (e) { toast(e.message); } }
+async function setQuoteStatus(id, status) { try { await api('/billing/quotes/' + id + '/status', { method: 'POST', body: JSON.stringify({ status }) }); toast(status); billTab('quotes'); } catch (e) { toast(e.message); } }
+async function convertQuote(id) { if (!confirm('Create a draft invoice from this quote?')) return; try { const r = await api('/billing/quotes/' + id + '/convert', { method: 'POST' }); toast('Created invoice ' + r.invoice_number); window._billTab = 'invoices'; billTab('invoices'); } catch (e) { toast(e.message); } }
+async function delQuote(id) { if (!confirm('Delete this quote?')) return; try { await api('/billing/quotes/' + id, { method: 'DELETE' }); toast('Deleted'); billTab('quotes'); } catch (e) { toast(e.message); } }
+async function formQuote(q) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const [custs, products] = await Promise.all([api('/customers'), api('/billing/products')]);
+  let qr = { customer_id: '', email: '', date: new Date().toISOString().slice(0, 10), expiry_date: '', tax_rate: 0, notes: '', items: [{ description: '', quantity: 1, unit_price: 0, taxable: 1 }] };
+  if (q.id) qr = await api('/billing/quotes/' + q.id);
+  window._items = qr.items.map(it => ({ description: it.description, quantity: it.quantity, unit_price: it.unit_price, taxable: it.taxable === 0 ? 0 : 1 }));
+  window._products = products;
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/billing'"><i class="ti ti-chevron-left"></i> Billing</div>
+    <h1>${q.id ? 'Edit quote ' + esc(qr.number) : 'New quote'}</h1>
+    <div class="card" style="margin-top:14px;padding:16px" id="f">
+      <div class="grid2">
+        <div class="fld"><label class="fl">Customer</label><select name="customer_id">${custs.map(c => `<option value="${c.id}" ${c.id == qr.customer_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
+        ${field('Email quote to (blank = customer billing email)', 'email', qr.email || '', { mono: true, ph: 'billing@customer.com' })}
+      </div>
+      <div class="grid2">${field('Quote date', 'date', qr.date, { type: 'date' })}${field('Valid until', 'expiry_date', qr.expiry_date || '', { type: 'date' })}</div>
+      ${field('Tax rate %', 'tax_rate', qr.tax_rate || 0, { type: 'number' })}
+      <div class="fld"><label class="fl">Line items (description · qty · unit price)</label><div id="itemrows"></div></div>
+      ${field('Notes (shown on the quote)', 'notes', qr.notes || '', { type: 'textarea' })}
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px">
+        <button class="btn" onclick="location.hash='#/billing'">Cancel</button>
+        <button class="btn" onclick="saveQuote(${q.id || 'null'}, false)" title="Save without emailing"><i class="ti ti-device-floppy"></i> Save draft</button>
+        <button class="btn primary" onclick="saveQuote(${q.id || 'null'}, true)" title="Save and email the quote to the customer"><i class="ti ti-send"></i> Save &amp; send</button></div>
+    </div>`;
+  renderItemRows();
+}
+async function saveQuote(id, send) {
+  const d = collect('#f');
+  d.items = window._items; d.send = send;
+  try {
+    if (id) {
+      await api('/billing/quotes/' + id, { method: 'PUT', body: JSON.stringify(d) });
+      if (send) await api('/billing/quotes/' + id + '/send', { method: 'POST' });
+      toast(send ? 'Saved & sent' : 'Saved');
+    } else {
+      const r = await api('/billing/quotes', { method: 'POST', body: JSON.stringify(d) });
+      toast(r.number + (send ? (r.emailed ? ' sent' : ' created — no email on file, copy the link') : ' saved as draft'));
+    }
+    window._billTab = 'quotes'; location.hash = '#/billing';
   } catch (e) { toast(e.message); }
 }
 async function formRecurring(q) {

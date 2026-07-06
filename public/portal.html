@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Customer Portal</title>
+  <style>
+    :root { --bg:#0f1216; --card:#171c22; --card2:#0e1318; --line:#2a323c; --text:#e6eaf0; --muted:#9aa6b2; --accent:#378ADD; --ok:#1D9E75; --warn:#f0ad4e; --danger:#dc3545; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; line-height:1.5; }
+    .wrap { max-width:680px; margin:0 auto; padding:24px 16px 60px; }
+    .top { display:flex; align-items:center; gap:12px; margin-bottom:18px; }
+    .top h1 { font-size:19px; margin:0; flex:1; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px; margin-bottom:14px; }
+    h2 { font-size:15px; margin:0 0 10px; }
+    label { display:block; font-size:13px; color:var(--muted); margin:12px 0 5px; }
+    input { width:100%; padding:11px 12px; border-radius:9px; border:1px solid var(--line); background:var(--card2); color:var(--text); font-size:15px; }
+    input:focus { outline:none; border-color:var(--accent); }
+    .btn { padding:11px 16px; border:0; border-radius:9px; background:var(--accent); color:#fff; font-size:15px; font-weight:600; cursor:pointer; text-decoration:none; display:inline-block; }
+    .btn.sm { padding:7px 12px; font-size:13px; }
+    .btn.ghost { background:var(--card2); border:1px solid var(--line); color:var(--text); }
+    .row { display:flex; align-items:center; gap:10px; padding:11px 0; border-bottom:1px solid var(--line); }
+    .row:last-child { border-bottom:0; }
+    .row .g { flex:1; min-width:0; }
+    .muted { color:var(--muted); } .small { font-size:12.5px; }
+    .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .pill { display:inline-block; padding:3px 10px; border-radius:20px; font-size:12px; border:1px solid var(--line); }
+    .pill.up { color:var(--ok); border-color:var(--ok); } .pill.warn { color:var(--warn); border-color:var(--warn); } .pill.down { color:var(--danger); border-color:var(--danger); }
+    .tabs { display:flex; gap:6px; margin-bottom:14px; }
+    .tab { flex:1; padding:9px; text-align:center; border-radius:9px; background:var(--card2); border:1px solid var(--line); cursor:pointer; font-size:14px; }
+    .tab.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .err { color:var(--danger); font-size:14px; min-height:18px; margin-top:10px; }
+    .ok { color:var(--ok); font-size:14px; margin-top:10px; }
+    a.link { color:var(--accent); text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="app"><div class="card">Loading…</div></div>
+  <script>
+    const $ = s => document.querySelector(s);
+    const app = () => $('#app');
+    const money = n => '$' + Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    let ME = null, TAB = 'invoices';
+
+    async function boot() {
+      try { const r = await fetch('/portal/api/me'); if (r.ok) { ME = await r.json(); return dashboard(); } } catch {}
+      login();
+    }
+    function login() {
+      app().innerHTML = `<div class="top"><h1>Customer Portal</h1></div>
+        <div class="card"><h2>Sign in</h2>
+          <label>Email</label><input id="email" type="email" autocomplete="email"/>
+          <label>Password</label><input id="pw" type="password" autocomplete="current-password"/>
+          <div style="margin-top:16px"><button class="btn" style="width:100%" id="signin">Sign in</button></div>
+          <div class="err" id="err"></div>
+          <div style="margin-top:14px;text-align:center"><a class="link" href="#" id="magic">Email me a login link instead</a></div>
+          <div class="ok" id="okmsg"></div>
+        </div>`;
+      $('#signin').onclick = async () => {
+        $('#err').textContent = '';
+        try {
+          const r = await fetch('/portal/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: $('#email').value.trim(), password: $('#pw').value }) });
+          const j = await r.json(); if (!r.ok) throw new Error(j.error || 'Sign in failed');
+          boot();
+        } catch (e) { $('#err').textContent = e.message; }
+      };
+      $('#magic').onclick = async (e) => {
+        e.preventDefault(); $('#err').textContent = ''; $('#okmsg').textContent = '';
+        const email = $('#email').value.trim(); if (!email) { $('#err').textContent = 'Enter your email first.'; return; }
+        try { await fetch('/portal/login-link', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }) }); $('#okmsg').textContent = 'If that email is on file, a login link is on its way.'; } catch { $('#err').textContent = 'Could not send link.'; }
+      };
+    }
+    async function dashboard() {
+      app().innerHTML = `<div class="top"><h1>${esc(ME.company)}</h1><button class="btn ghost sm" id="logout">Sign out</button></div>
+        <div class="card" style="padding:14px 18px"><div>Welcome, <b>${esc(ME.name)}</b></div><div class="small muted">${esc(ME.email || '')}</div></div>
+        <div class="tabs">
+          <div class="tab ${TAB === 'invoices' ? 'on' : ''}" data-t="invoices">Invoices</div>
+          <div class="tab ${TAB === 'quotes' ? 'on' : ''}" data-t="quotes">Quotes</div>
+          <div class="tab ${TAB === 'account' ? 'on' : ''}" data-t="account">Account</div>
+        </div><div id="body"><div class="card">Loading…</div></div>`;
+      $('#logout').onclick = async () => { await fetch('/portal/logout', { method: 'POST' }); ME = null; login(); };
+      document.querySelectorAll('.tab').forEach(t => t.onclick = () => { TAB = t.dataset.t; dashboard(); });
+      renderTab();
+    }
+    async function renderTab() {
+      const body = $('#body');
+      try {
+        if (TAB === 'invoices') {
+          const rows = await (await fetch('/portal/api/invoices')).json();
+          body.innerHTML = `<div class="card">${rows.map(i => `<div class="row">
+            <div class="g"><div><b>${esc(i.number)}</b> · ${money(i.total)}</div><div class="small muted">${esc(i.date)}${i.due_date ? ' · due ' + esc(i.due_date) : ''}${i.balance > 0 && i.status !== 'paid' ? ' · ' + money(i.balance) + ' due' : ''}</div></div>
+            ${statusPill(i.status)}${i.pay_url ? `<a class="btn sm" href="${i.pay_url}">Pay</a>` : ''}</div>`).join('') || '<div class="row muted">No invoices yet.</div>'}</div>`;
+        } else if (TAB === 'quotes') {
+          const rows = await (await fetch('/portal/api/quotes')).json();
+          body.innerHTML = `<div class="card">${rows.map(q => `<div class="row">
+            <div class="g"><div><b>${esc(q.number)}</b> · ${money(q.total)}</div><div class="small muted">${esc(q.date)}${q.expiry_date ? ' · valid until ' + esc(q.expiry_date) : ''}</div></div>
+            ${statusPill(q.status)}${q.view_url ? `<a class="btn sm ghost" href="${q.view_url}">View</a>` : ''}</div>`).join('') || '<div class="row muted">No quotes yet.</div>'}</div>`;
+        } else {
+          const a = await (await fetch('/portal/api/account')).json();
+          body.innerHTML = `<div class="card"><h2>Accounts</h2>${(a.accounts || []).map(x => `<div class="row"><div class="g">${esc(x.name)}</div></div>`).join('') || '<div class="row muted">—</div>'}</div>
+            <div class="card"><h2>Sites</h2>${(a.sites || []).map(s => `<div class="row"><div class="g"><div>${esc(s.name)}</div><div class="small muted">${esc(s.service_address || '')}</div></div><span class="pill">${esc(s.status || '')}</span></div>`).join('') || '<div class="row muted">No sites on file.</div>'}</div>`;
+        }
+      } catch (e) { body.innerHTML = `<div class="card">${esc(e.message)}</div>`; }
+    }
+    function statusPill(s) {
+      const cls = { paid: 'up', accepted: 'up', active: 'up', sent: 'warn', partial: 'warn', draft: '', overdue: 'down', declined: 'down', void: 'down', expired: 'down' }[s] || '';
+      return `<span class="pill ${cls}">${esc(s ? s[0].toUpperCase() + s.slice(1) : '')}</span>`;
+    }
+    boot();
+  </script>
+</body>
+</html>

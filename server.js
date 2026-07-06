@@ -284,8 +284,8 @@ app.get('/api/settings', requireNoc, (req, res) => {
     bill_company: getSetting('bill_company') || '',
     bill_prefix: getSetting('bill_prefix') || 'INV-',
     bill_next: getSetting('bill_next') || '1001',
-    bill_terms_invoice: getSetting('bill_terms_invoice') || '',
-    bill_terms_recurring: getSetting('bill_terms_recurring') || ''
+    quote_prefix: getSetting('quote_prefix') || 'QUO-',
+    quote_next: getSetting('quote_next') || '1001'
   });
 });
 app.put('/api/settings', requireNoc, (req, res) => {
@@ -298,10 +298,10 @@ app.put('/api/settings', requireNoc, (req, res) => {
   if (b.bill_company !== undefined) setSetting('bill_company', String(b.bill_company).trim());
   if (b.bill_prefix !== undefined) setSetting('bill_prefix', String(b.bill_prefix).trim() || 'INV-');
   if (b.bill_next !== undefined && parseInt(b.bill_next, 10) > 0) setSetting('bill_next', String(parseInt(b.bill_next, 10)));
+  if (b.quote_prefix !== undefined) setSetting('quote_prefix', String(b.quote_prefix).trim() || 'QUO-');
+  if (b.quote_next !== undefined && parseInt(b.quote_next, 10) > 0) setSetting('quote_next', String(parseInt(b.quote_next, 10)));
   if (b.stripe_secret) setSetting('stripe_secret', String(b.stripe_secret).trim());
   if (b.stripe_webhook_secret) setSetting('stripe_webhook_secret', String(b.stripe_webhook_secret).trim());
-  if (b.bill_terms_invoice !== undefined) setSetting('bill_terms_invoice', String(b.bill_terms_invoice).trim());
-  if (b.bill_terms_recurring !== undefined) setSetting('bill_terms_recurring', String(b.bill_terms_recurring).trim());
   if (b.allow_auto_enroll !== undefined) setSetting('allow_auto_enroll', b.allow_auto_enroll ? '1' : '0');
   if (b.prov_admin_password) setSetting('prov_admin_password', String(b.prov_admin_password));
   if (b.prov_wifi_password) setSetting('prov_wifi_password', String(b.prov_wifi_password));
@@ -1492,6 +1492,7 @@ app.get('/api/customers/:id', (req, res) => {
   c.sites = db.prepare('SELECT * FROM sites WHERE customer_id=?').all(c.id).map(withSiteSummary);
   c.device_count = c.sites.reduce((n, s) => n + s.device_total, 0);
   c.needs_attention = c.sites.filter(s => s.needs_attention).length;
+  c.has_portal_password = !!c.portal_password; delete c.portal_password;
   res.json(c);
 });
 app.post('/api/customers', requireNoc, (req, res) => {
@@ -1514,6 +1515,8 @@ app.put('/api/customers/:id', requireNoc, (req, res) => {
     if (!ids.length) return res.status(400).json({ error: 'A customer must have at least one account' });
     setCustomerAccounts(req.params.id, ids);
   }
+  if (b.portal_enabled !== undefined) db.prepare('UPDATE customers SET portal_enabled=? WHERE id=?').run(b.portal_enabled ? 1 : 0, req.params.id);
+  if (b.portal_password) db.prepare('UPDATE customers SET portal_password=? WHERE id=?').run(hashPassword(String(b.portal_password)), req.params.id);
   audit(req, 'edit', 'customer#' + req.params.id, b.name);
   res.json({ ok: true });
 });
@@ -1960,12 +1963,12 @@ function cleanItems(raw) {
     taxable: (it.taxable === 0 || it.taxable === false) ? 0 : 1
   })).filter(it => it.description || it.unit_price);
 }
-function insertInvoice({ customer_id, email, date, due_date, tax_rate, notes, items, status }) {
+function insertInvoice({ customer_id, email, date, due_date, tax_rate, notes, items, status, terms }) {
   const t = computeTotals(items, tax_rate);
-  const info = db.prepare(`INSERT INTO bill_invoices (number,customer_id,email,date,due_date,status,tax_rate,subtotal,tax,total,balance,notes,pay_token)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+  const info = db.prepare(`INSERT INTO bill_invoices (number,customer_id,email,date,due_date,status,tax_rate,subtotal,tax,total,balance,notes,terms,pay_token)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(nextInvoiceNumber(), customer_id, N(email), date || todayStr(), N(due_date), status || 'draft',
-         Number(tax_rate || 0), t.subtotal, t.tax, t.total, t.total, N(notes), randomBytes(18).toString('hex'));
+         Number(tax_rate || 0), t.subtotal, t.tax, t.total, t.total, N(notes), N(terms), randomBytes(18).toString('hex'));
   const ins = db.prepare('INSERT INTO bill_items (invoice_id,description,quantity,unit_price,amount,taxable) VALUES (?,?,?,?,?,?)');
   for (const it of items) ins.run(info.lastInsertRowid, it.description, it.quantity, it.unit_price, r2(it.quantity * it.unit_price), it.taxable);
   return info.lastInsertRowid;
@@ -2116,7 +2119,7 @@ app.post('/api/billing/invoices', requireNoc, (req, res) => {
   if (!b.customer_id) return res.status(400).json({ error: 'Pick a customer' });
   const items = cleanItems(b.items);
   if (!items.length) return res.status(400).json({ error: 'Add at least one line item' });
-  const id = insertInvoice({ customer_id: Number(b.customer_id), email: b.email, date: b.date, due_date: b.due_date, tax_rate: b.tax_rate, notes: b.notes, items, status: 'draft' });
+  const id = insertInvoice({ customer_id: Number(b.customer_id), email: b.email, date: b.date, due_date: b.due_date, tax_rate: b.tax_rate, notes: b.notes, items, status: 'draft', terms: getSetting('invoice_terms') });
   let emailed = false;
   if (b.send) {
     emailed = emailInvoice(loadInvoice(id));
@@ -2240,7 +2243,7 @@ function runRecurringBilling() {
     let items = []; try { items = JSON.parse(r.items_json); } catch {}
     if (!items.length) continue;
     const cust = db.prepare('SELECT billing_email FROM customers WHERE id=?').get(r.customer_id) || {};
-    const id = insertInvoice({ customer_id: r.customer_id, email: cust.billing_email, date: r.next_date, due_date: advanceDate(r.next_date, 'monthly'), tax_rate: r.tax_rate, items, status: r.auto_send ? 'sent' : 'draft' });
+    const id = insertInvoice({ customer_id: r.customer_id, email: cust.billing_email, date: r.next_date, due_date: advanceDate(r.next_date, 'monthly'), tax_rate: r.tax_rate, items, status: r.auto_send ? 'sent' : 'draft', terms: getSetting('recurring_invoice_terms') || getSetting('invoice_terms') });
     if (r.auto_send) { emailInvoice(loadInvoice(id)); db.prepare("UPDATE bill_invoices SET sent_at=datetime('now') WHERE id=?").run(id); }
     db.prepare('UPDATE bill_recurring SET next_date=? WHERE id=?').run(advanceDate(r.next_date, r.frequency), r.id);
     db.prepare('INSERT INTO audit_log (actor,role,action,target,details) VALUES (?,?,?,?,?)')
@@ -2275,7 +2278,9 @@ app.get('/api/billing/backup', requireNoc, (req, res) => {
     invoices: db.prepare('SELECT * FROM bill_invoices').all(),
     items: db.prepare('SELECT * FROM bill_items').all(),
     payments: db.prepare('SELECT * FROM bill_payments').all(),
-    recurring: db.prepare('SELECT * FROM bill_recurring').all()
+    recurring: db.prepare('SELECT * FROM bill_recurring').all(),
+    quotes: db.prepare('SELECT * FROM bill_quotes').all(),
+    quote_items: db.prepare('SELECT * FROM bill_quote_items').all()
   };
   audit(req, 'billing_backup', 'billing', `${dump.invoices.length} invoices, ${dump.payments.length} payments`);
   res.setHeader('Content-Type', 'application/json');
@@ -2287,7 +2292,7 @@ app.post('/api/billing/restore', requireNoc, (req, res) => {
   if (b.format !== 'netinv-billing-backup' || b.version !== 2 || !Array.isArray(b.invoices)) return res.status(400).json({ error: 'Not a billing backup file' });
   db.exec('BEGIN');
   try {
-    const tables = { bill_products: b.products, bill_invoices: b.invoices, bill_items: b.items, bill_payments: b.payments, bill_recurring: b.recurring };
+    const tables = { bill_products: b.products, bill_invoices: b.invoices, bill_items: b.items, bill_payments: b.payments, bill_recurring: b.recurring, bill_quotes: b.quotes, bill_quote_items: b.quote_items };
     const counts = {};
     for (const [table, rows] of Object.entries(tables)) {
       db.exec(`DELETE FROM ${table}`);
@@ -2329,6 +2334,7 @@ ${msg ? `<div class="msg">${msg}</div>` : ''}
 <div class="status ${inv.balance <= 0 ? 'paid' : 'due'}">${statusTxt}</div>
 ${inv.notes ? `<p class="sub">${esc2(inv.notes)}</p>` : ''}
 ${canPay ? `<button class="pay" onclick="pay(this)">Pay $${inv.balance.toFixed(2)} online</button><div class="hint">Card or US bank transfer (ACH) — processed securely by Stripe. This site never sees your card or bank details.</div>` : ''}
+${inv.terms ? `<div style="margin-top:20px;padding-top:14px;border-top:1px solid var(--line)"><div style="color:var(--muted);font-size:12px;font-weight:600;margin-bottom:4px">TERMS &amp; BILLING AGREEMENT</div><div style="color:var(--muted);font-size:12px;white-space:pre-wrap">${esc2(inv.terms)}</div></div>` : ''}
 </div></div>
 <script>async function pay(btn){btn.disabled=true;btn.textContent='Redirecting to secure payment…';
 try{const r=await fetch(location.pathname+'/checkout',{method:'POST'});const j=await r.json();
@@ -2367,6 +2373,233 @@ app.post('/pay/:token/checkout', async (req, res) => {
     });
     res.json({ url: session.url });
   } catch (e) { res.status(e.http || 502).json({ error: e.message }); }
+});
+
+// ---- quotes (mirror invoices; convert to invoice) ----
+function nextQuoteNumber() {
+  const prefix = getSetting('quote_prefix') || 'QUO-';
+  const seq = parseInt(getSetting('quote_next'), 10) || 1001;
+  setSetting('quote_next', String(seq + 1));
+  return prefix + seq;
+}
+function insertQuote({ customer_id, email, date, expiry_date, tax_rate, notes, items, status, terms }) {
+  const t = computeTotals(items, tax_rate);
+  const info = db.prepare(`INSERT INTO bill_quotes (number,customer_id,email,date,expiry_date,status,tax_rate,subtotal,tax,total,notes,terms,view_token)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(nextQuoteNumber(), customer_id, N(email), date || todayStr(), N(expiry_date), status || 'draft',
+         Number(tax_rate || 0), t.subtotal, t.tax, t.total, N(notes), N(terms), randomBytes(18).toString('hex'));
+  const ins = db.prepare('INSERT INTO bill_quote_items (quote_id,description,quantity,unit_price,amount,taxable) VALUES (?,?,?,?,?,?)');
+  for (const it of items) ins.run(info.lastInsertRowid, it.description, it.quantity, it.unit_price, r2(it.quantity * it.unit_price), it.taxable);
+  return info.lastInsertRowid;
+}
+function loadQuote(id) {
+  const q = db.prepare(`SELECT q.*, c.name AS customer_name, c.billing_email FROM bill_quotes q LEFT JOIN customers c ON c.id=q.customer_id WHERE q.id=?`).get(id);
+  if (!q) return null;
+  q.items = db.prepare('SELECT * FROM bill_quote_items WHERE quote_id=? ORDER BY id').all(id);
+  const pub = (getSetting('public_base_url') || '').replace(/\/+$/, '');
+  q.view_url = pub && q.view_token ? `${pub}/quote/${q.view_token}` : null;
+  return q;
+}
+function emailQuote(q) {
+  const to = q.email || q.billing_email; if (!to) return false;
+  const company = getSetting('bill_company') || 'Network Inventory';
+  const lines = q.items.map(it => ` - ${it.description}  x${it.quantity}  $${it.amount.toFixed(2)}`).join('\n');
+  const rows = q.items.map(it => `<tr><td style="padding:4px 12px 4px 0">${esc2(it.description)}</td><td align="center">${it.quantity}</td><td align="right">$${it.amount.toFixed(2)}</td></tr>`).join('');
+  const viewBtn = q.view_url ? `<p style="margin:18px 0"><a href="${q.view_url}" style="background:#378ADD;color:#fff;padding:11px 22px;border-radius:8px;text-decoration:none">View &amp; respond to quote</a></p>` : '';
+  mailSafe({
+    to, subject: `Quote ${q.number} from ${company} — $${q.total.toFixed(2)}`,
+    text: `Quote ${q.number} from ${company}\nDate: ${q.date}${q.expiry_date ? '\nValid until: ' + q.expiry_date : ''}\n\n${lines}\n\nTotal: $${q.total.toFixed(2)}${q.view_url ? '\n\nView & respond: ' + q.view_url : ''}${q.notes ? '\n\n' + q.notes : ''}`,
+    html: `<h2>Quote ${esc2(q.number)}</h2><p>${esc2(company)} · ${esc2(q.date)}${q.expiry_date ? ' · valid until <b>' + esc2(q.expiry_date) + '</b>' : ''}</p>
+      <table style="border-collapse:collapse">${rows}<tr><td style="padding:8px 12px 0 0"><b>Total</b></td><td></td><td align="right"><b>$${q.total.toFixed(2)}</b></td></tr></table>${viewBtn}${q.notes ? `<p style="color:#555">${esc2(q.notes)}</p>` : ''}`
+  });
+  return true;
+}
+app.get('/api/billing/quotes', requireNoc, (req, res) => {
+  const q = '%' + String(req.query.q || '').trim() + '%';
+  const st = String(req.query.status || '');
+  let sql = `SELECT q.id, q.number, q.date, q.expiry_date, q.status, q.total, q.converted_invoice_id, c.name AS customer_name
+    FROM bill_quotes q LEFT JOIN customers c ON c.id=q.customer_id WHERE (q.number LIKE ? OR c.name LIKE ?)`;
+  const params = [q, q];
+  if (st) { sql += ' AND q.status=?'; params.push(st); }
+  sql += ' ORDER BY q.id DESC LIMIT 300';
+  res.json(db.prepare(sql).all(...params));
+});
+app.get('/api/billing/quotes/:id', requireNoc, (req, res) => {
+  const q = loadQuote(req.params.id); if (!q) return res.status(404).json({ error: 'not found' });
+  res.json(q);
+});
+app.post('/api/billing/quotes', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!b.customer_id) return res.status(400).json({ error: 'Pick a customer' });
+  const items = cleanItems(b.items);
+  if (!items.length) return res.status(400).json({ error: 'Add at least one line item' });
+  const id = insertQuote({ customer_id: Number(b.customer_id), email: b.email, date: b.date, expiry_date: b.expiry_date, tax_rate: b.tax_rate, notes: b.notes, items, status: 'draft', terms: getSetting('invoice_terms') });
+  let emailed = false;
+  if (b.send) { emailed = emailQuote(loadQuote(id)); db.prepare("UPDATE bill_quotes SET status='sent', sent_at=datetime('now') WHERE id=?").run(id); }
+  const num = db.prepare('SELECT number FROM bill_quotes WHERE id=?').get(id).number;
+  audit(req, 'create', 'quote#' + id, num + (b.send ? ' (sent)' : ' (draft)'));
+  res.json({ id, number: num, emailed });
+});
+app.put('/api/billing/quotes/:id', requireNoc, (req, res) => {
+  const b = req.body || {};
+  const q = db.prepare('SELECT * FROM bill_quotes WHERE id=?').get(req.params.id);
+  if (!q) return res.status(404).json({ error: 'not found' });
+  if (['converted', 'accepted'].includes(q.status)) return res.status(409).json({ error: 'This quote can no longer be edited' });
+  const items = cleanItems(b.items);
+  if (!items.length) return res.status(400).json({ error: 'Add at least one line item' });
+  const t = computeTotals(items, b.tax_rate === undefined ? q.tax_rate : b.tax_rate);
+  db.prepare('UPDATE bill_quotes SET customer_id=?, email=?, date=?, expiry_date=?, tax_rate=?, subtotal=?, tax=?, total=?, notes=? WHERE id=?')
+    .run(Number(b.customer_id || q.customer_id), N(b.email, q.email), b.date || q.date, N(b.expiry_date, q.expiry_date),
+         Number(b.tax_rate === undefined ? q.tax_rate : b.tax_rate), t.subtotal, t.tax, t.total, N(b.notes, q.notes), q.id);
+  db.prepare('DELETE FROM bill_quote_items WHERE quote_id=?').run(q.id);
+  const ins = db.prepare('INSERT INTO bill_quote_items (quote_id,description,quantity,unit_price,amount,taxable) VALUES (?,?,?,?,?,?)');
+  for (const it of items) ins.run(q.id, it.description, it.quantity, it.unit_price, r2(it.quantity * it.unit_price), it.taxable);
+  audit(req, 'edit', 'quote#' + q.id, q.number);
+  res.json({ ok: true });
+});
+app.post('/api/billing/quotes/:id/send', requireNoc, (req, res) => {
+  const q = loadQuote(req.params.id); if (!q) return res.status(404).json({ error: 'not found' });
+  if (['converted'].includes(q.status)) return res.status(409).json({ error: 'Quote already converted' });
+  const emailed = emailQuote(q);
+  if (q.status === 'draft') db.prepare("UPDATE bill_quotes SET status='sent', sent_at=datetime('now') WHERE id=?").run(q.id);
+  audit(req, 'edit', 'quote#' + q.id, q.number + (emailed ? ' emailed' : ' marked sent'));
+  res.json({ ok: true, emailed });
+});
+app.post('/api/billing/quotes/:id/status', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!['accepted', 'declined', 'sent', 'expired'].includes(b.status)) return res.status(400).json({ error: 'bad status' });
+  const q = db.prepare('SELECT * FROM bill_quotes WHERE id=?').get(req.params.id);
+  if (!q) return res.status(404).json({ error: 'not found' });
+  if (q.status === 'converted') return res.status(409).json({ error: 'Quote already converted' });
+  db.prepare('UPDATE bill_quotes SET status=? WHERE id=?').run(b.status, q.id);
+  audit(req, 'edit', 'quote#' + q.id, q.number + ' → ' + b.status);
+  res.json({ ok: true });
+});
+app.post('/api/billing/quotes/:id/convert', requireNoc, (req, res) => {
+  const q = loadQuote(req.params.id); if (!q) return res.status(404).json({ error: 'not found' });
+  if (q.status === 'converted') return res.status(409).json({ error: 'Quote already converted to invoice #' + q.converted_invoice_id });
+  const items = q.items.map(it => ({ description: it.description, quantity: it.quantity, unit_price: it.unit_price, taxable: it.taxable }));
+  if (!items.length) return res.status(400).json({ error: 'Quote has no line items' });
+  const invId = insertInvoice({ customer_id: q.customer_id, email: q.email || q.billing_email, date: todayStr(), tax_rate: q.tax_rate, notes: q.notes, items, status: 'draft', terms: getSetting('invoice_terms') });
+  db.prepare("UPDATE bill_quotes SET status='converted', converted_invoice_id=? WHERE id=?").run(invId, q.id);
+  const num = db.prepare('SELECT number FROM bill_invoices WHERE id=?').get(invId).number;
+  audit(req, 'edit', 'quote#' + q.id, q.number + ' → invoice ' + num);
+  res.json({ ok: true, invoice_id: invId, invoice_number: num });
+});
+app.delete('/api/billing/quotes/:id', requireNoc, (req, res) => {
+  const q = db.prepare('SELECT * FROM bill_quotes WHERE id=?').get(req.params.id);
+  if (!q) return res.status(404).json({ error: 'not found' });
+  db.prepare('DELETE FROM bill_quote_items WHERE quote_id=?').run(q.id);
+  db.prepare('DELETE FROM bill_quotes WHERE id=?').run(q.id);
+  audit(req, 'delete', 'quote#' + q.id, q.number);
+  res.json({ ok: true });
+});
+// public quote view (tokenized; no login) — accept/decline
+function quotePage(q, msg) {
+  const company = esc2(getSetting('bill_company') || 'Network Inventory');
+  const rows = q.items.map(it => `<tr><td>${esc2(it.description)}</td><td align="center">${it.quantity}</td><td align="right">$${it.amount.toFixed(2)}</td></tr>`).join('');
+  const canRespond = ['draft', 'sent'].includes(q.status);
+  const statusTxt = { accepted: 'Accepted — thank you', declined: 'Declined', converted: 'Accepted', expired: 'Expired' }[q.status] || (q.expiry_date ? 'Valid until ' + esc2(q.expiry_date) : 'Awaiting your response');
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Quote ${esc2(q.number)}</title>
+<style>:root{--bg:#0f1216;--card:#171c22;--line:#2a323c;--text:#e6eaf0;--muted:#9aa6b2;--accent:#378ADD;--ok:#1D9E75;--danger:#dc3545}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.5}
+.wrap{max-width:560px;margin:0 auto;padding:28px 18px 60px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px}
+h1{font-size:20px;margin:0 0 2px}.sub{color:var(--muted);font-size:14px;margin:0 0 18px}table{width:100%;border-collapse:collapse;font-size:14px}
+td{padding:7px 0;border-bottom:1px solid var(--line)}.tot td{border-bottom:0;padding-top:12px;font-weight:600}
+.status{display:inline-block;margin:14px 0;padding:6px 14px;border-radius:20px;font-weight:600;font-size:14px;background:#0e1318;border:1px solid var(--line)}
+.msg{margin:0 0 14px;padding:10px 14px;border-radius:9px;background:#0e1318;border:1px solid var(--line);font-size:14px}
+.btns{display:flex;gap:10px;margin-top:18px}.b{flex:1;padding:12px;border:0;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer}
+.acc{background:var(--ok);color:#fff}.dec{background:#0e1318;color:var(--text);border:1px solid var(--line)}</style></head><body><div class="wrap"><div class="card">
+<h1>Quote ${esc2(q.number)}</h1><p class="sub">${company} · ${esc2(q.date)}${q.customer_name ? ' · ' + esc2(q.customer_name) : ''}</p>
+${msg ? `<div class="msg">${msg}</div>` : ''}
+<table>${rows}${q.tax > 0 ? `<tr><td>Tax (${q.tax_rate}%)</td><td></td><td align="right">$${q.tax.toFixed(2)}</td></tr>` : ''}<tr class="tot"><td>Total</td><td></td><td align="right">$${q.total.toFixed(2)}</td></tr></table>
+<div class="status">${statusTxt}</div>
+${q.notes ? `<p class="sub">${esc2(q.notes)}</p>` : ''}
+${canRespond ? `<div class="btns"><button class="b acc" onclick="respond('accept',this)">Accept quote</button><button class="b dec" onclick="respond('decline',this)">Decline</button></div>` : ''}
+${q.terms ? `<div style="margin-top:20px;padding-top:14px;border-top:1px solid var(--line)"><div style="color:var(--muted);font-size:12px;font-weight:600;margin-bottom:4px">TERMS &amp; BILLING AGREEMENT</div><div style="color:var(--muted);font-size:12px;white-space:pre-wrap">${esc2(q.terms)}</div></div>` : ''}
+</div></div>
+<script>async function respond(action,btn){btn.disabled=true;btn.parentElement.querySelectorAll('button').forEach(b=>b.disabled=true);
+try{const r=await fetch(location.pathname+'/respond',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action})});const j=await r.json();
+if(j.ok)location.href=location.pathname+'?result='+action;else{alert(j.error||'Could not submit');btn.disabled=false;}}catch(e){alert('Could not submit');btn.disabled=false;}}</script></body></html>`;
+}
+const quoteByToken = (token) => { const row = db.prepare('SELECT id FROM bill_quotes WHERE view_token=?').get(String(token || '')); return row ? loadQuote(row.id) : null; };
+app.get('/quote/:token', (req, res) => {
+  const q = quoteByToken(req.params.token);
+  if (!q) return res.status(404).type('text/plain').send('Quote not found');
+  let msg = null;
+  if (req.query.result === 'accept') msg = 'Thank you — your acceptance has been recorded.';
+  else if (req.query.result === 'decline') msg = 'You have declined this quote.';
+  res.type('html').send(quotePage(q, msg));
+});
+app.post('/quote/:token/respond', express.json(), (req, res) => {
+  const q = quoteByToken(req.params.token);
+  if (!q) return res.status(404).json({ error: 'not found' });
+  if (!['draft', 'sent'].includes(q.status)) return res.status(409).json({ error: 'This quote can no longer be responded to' });
+  const action = (req.body || {}).action;
+  const status = action === 'accept' ? 'accepted' : action === 'decline' ? 'declined' : null;
+  if (!status) return res.status(400).json({ error: 'bad action' });
+  db.prepare('UPDATE bill_quotes SET status=? WHERE id=?').run(status, q.id);
+  db.prepare('INSERT INTO audit_log (actor,role,action,target,details) VALUES (?,?,?,?,?)').run(q.email || 'customer', 'public', 'quote_' + status, 'quote#' + q.id, q.number);
+  const notify = getSetting('access_notify_email') || getSetting('mail_from');
+  if (notify) mailSafe({ to: notify, subject: `Quote ${q.number} ${status}`, text: `Quote ${q.number} for ${q.customer_name || ''} was ${status}.`, html: `<p>Quote <b>${esc2(q.number)}</b> for ${esc2(q.customer_name || '')} was <b>${status}</b>.</p>` });
+  res.json({ ok: true, status });
+});
+
+// ---- customer portal (separate auth: password OR magic link) ----
+function portalCookie(res, token) { res.setHeader('Set-Cookie', `psid=${token}; HttpOnly; Path=/; Max-Age=${30 * 24 * 3600}; SameSite=Lax`); }
+function portalCustomer(req) {
+  const t = parseCookies(req).psid; if (!t) return null;
+  const s = db.prepare("SELECT customer_id FROM portal_sessions WHERE token=? AND expires_at>datetime('now')").get(t);
+  return s ? db.prepare('SELECT * FROM customers WHERE id=?').get(s.customer_id) : null;
+}
+function requirePortal(req, res, next) { const c = portalCustomer(req); if (!c) return res.status(401).json({ error: 'Please sign in' }); req.pcust = c; next(); }
+const pubBase = () => (getSetting('public_base_url') || '').replace(/\/+$/, '');
+app.get('/portal', (req, res) => res.sendFile(join(__dirname, 'public', 'portal.html')));
+app.post('/portal/login', (req, res) => {
+  const b = req.body || {}; const email = String(b.email || '').trim().toLowerCase();
+  const c = db.prepare("SELECT * FROM customers WHERE lower(billing_email)=? AND portal_enabled=1").get(email);
+  if (!c || !c.portal_password || !verifyPassword(String(b.password || ''), c.portal_password)) return res.status(401).json({ error: 'Invalid email or password' });
+  const token = randomBytes(24).toString('hex');
+  db.prepare("INSERT INTO portal_sessions (token,customer_id,expires_at) VALUES (?,?,datetime('now','+30 days'))").run(token, c.id);
+  portalCookie(res, token); res.json({ ok: true });
+});
+app.post('/portal/login-link', (req, res) => {
+  const email = String((req.body || {}).email || '').trim().toLowerCase();
+  const c = db.prepare("SELECT * FROM customers WHERE lower(billing_email)=? AND portal_enabled=1").get(email);
+  if (c && c.billing_email) {
+    const token = randomBytes(24).toString('hex');
+    db.prepare("INSERT INTO portal_login_tokens (token,customer_id,expires_at) VALUES (?,?,datetime('now','+30 minutes'))").run(token, c.id);
+    const link = pubBase() + '/portal/auth/' + token;
+    mailSafe({ to: c.billing_email, subject: 'Your account portal login link', text: `Sign in to your account portal:\n${link}\n\nThis link expires in 30 minutes.`, html: `<p><a href="${link}">Sign in to your account portal</a></p><p style="color:#777;font-size:12px">This link expires in 30 minutes. If you didn't request it, you can ignore this email.</p>` });
+  }
+  res.json({ ok: true }); // never reveal whether the email exists
+});
+app.get('/portal/auth/:token', (req, res) => {
+  const row = db.prepare("SELECT customer_id FROM portal_login_tokens WHERE token=? AND expires_at>datetime('now')").get(req.params.token);
+  if (!row) return res.status(400).type('text/plain').send('This login link is invalid or has expired.');
+  db.prepare('DELETE FROM portal_login_tokens WHERE token=?').run(req.params.token);
+  const token = randomBytes(24).toString('hex');
+  db.prepare("INSERT INTO portal_sessions (token,customer_id,expires_at) VALUES (?,?,datetime('now','+30 days'))").run(token, row.customer_id);
+  portalCookie(res, token); res.redirect('/portal');
+});
+app.post('/portal/logout', (req, res) => { const t = parseCookies(req).psid; if (t) db.prepare('DELETE FROM portal_sessions WHERE token=?').run(t); res.setHeader('Set-Cookie', 'psid=; HttpOnly; Path=/; Max-Age=0'); res.json({ ok: true }); });
+app.get('/portal/api/me', requirePortal, (req, res) => res.json({ name: req.pcust.name, email: req.pcust.billing_email, company: getSetting('bill_company') || 'Your provider' }));
+app.get('/portal/api/invoices', requirePortal, (req, res) => {
+  const pub = pubBase();
+  const rows = db.prepare("SELECT id,number,date,due_date,status,total,balance,pay_token FROM bill_invoices WHERE customer_id=? AND status!='void' ORDER BY id DESC").all(req.pcust.id);
+  res.json(rows.map(i => ({ id: i.id, number: i.number, date: i.date, due_date: i.due_date, status: i.status, total: i.total, balance: i.balance, pay_url: pub && i.pay_token && i.balance > 0 ? `${pub}/pay/${i.pay_token}` : null })));
+});
+app.get('/portal/api/quotes', requirePortal, (req, res) => {
+  const pub = pubBase();
+  const rows = db.prepare("SELECT id,number,date,expiry_date,status,total,view_token FROM bill_quotes WHERE customer_id=? ORDER BY id DESC").all(req.pcust.id);
+  res.json(rows.map(q => ({ id: q.id, number: q.number, date: q.date, expiry_date: q.expiry_date, status: q.status, total: q.total, view_url: pub && q.view_token ? `${pub}/quote/${q.view_token}` : null })));
+});
+app.get('/portal/api/account', requirePortal, (req, res) => {
+  res.json({
+    name: req.pcust.name,
+    accounts: customerAccounts(req.pcust.id),
+    sites: db.prepare('SELECT id,name,service_address,status FROM sites WHERE customer_id=? ORDER BY name').all(req.pcust.id)
+  });
 });
 
 // ---- audit ----
