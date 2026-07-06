@@ -1660,6 +1660,15 @@ async function renderSettings() {
       <div class="help">Any visitor still checked in at this time each day is automatically checked out (uses the server's local time). Manual check-out emails the visitor; auto check-out does not.</div>
       <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" onclick="saveAccessCfg()"><i class="ti ti-check"></i> Save</button></div>
     </div>
+    <div class="card" style="padding:16px" id="billing">
+      <h2 style="margin-bottom:12px"><i class="ti ti-file-invoice"></i> Billing agreements</h2>
+      <div class="fld"><label class="fl">Invoice terms / billing agreement</label>
+        <textarea name="invoice_terms" rows="6" placeholder="Terms &amp; billing agreement attached to one-time invoices…">${esc(s.invoice_terms || '')}</textarea></div>
+      <div class="fld"><label class="fl">Recurring invoice terms / billing agreement</label>
+        <textarea name="recurring_invoice_terms" rows="6" placeholder="Terms &amp; billing agreement attached to recurring / subscription invoices…">${esc(s.recurring_invoice_terms || '')}</textarea></div>
+      <div class="help">These are attached to the corresponding invoices (one-time vs recurring). Plain text — line breaks are preserved.</div>
+      <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" onclick="saveBilling()"><i class="ti ti-check"></i> Save</button></div>
+    </div>
     <div class="card" style="padding:16px" id="nodes">
       <h2 style="margin-bottom:12px"><i class="ti ti-server-cog"></i> Provisioning nodes (Netinstall benches)</h2>
       ${nodes.map(n => `<div class="row"><i class="ti ti-server-2 sec-muted"></i>
@@ -1694,6 +1703,10 @@ async function saveMail() {
 async function saveAccessCfg() {
   const d = collect('#accesscfg');
   try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
+}
+async function saveBilling() {
+  const d = collect('#billing');
+  try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Billing agreements saved'); } catch (e) { toast(e.message); }
 }
 async function sendTestMail() {
   const to = $('#mailTestTo').value.trim();

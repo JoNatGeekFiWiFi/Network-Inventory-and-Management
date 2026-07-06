@@ -108,6 +108,7 @@ export function migrate() {
   db.exec('CREATE INDEX IF NOT EXISTS idx_billitem ON bill_items(invoice_id)');
   ensure('bill_items', 'taxable', 'INTEGER NOT NULL DEFAULT 1');
   ensure('bill_products', 'taxable', 'INTEGER NOT NULL DEFAULT 1');
+  ensure('bill_invoices', 'terms', 'TEXT'); // billing agreement snapshotted at creation
   db.exec("CREATE TABLE IF NOT EXISTS bill_payments (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_id INTEGER NOT NULL, date TEXT NOT NULL, amount REAL NOT NULL, method TEXT NOT NULL DEFAULT 'other', reference TEXT, stripe_pi TEXT, notes TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
   db.exec('CREATE INDEX IF NOT EXISTS idx_billpay ON bill_payments(invoice_id)');
   db.exec("CREATE TABLE IF NOT EXISTS bill_recurring (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL, frequency TEXT NOT NULL DEFAULT 'monthly', next_date TEXT NOT NULL, tax_rate REAL NOT NULL DEFAULT 0, items_json TEXT NOT NULL DEFAULT '[]', auto_send INTEGER NOT NULL DEFAULT 1, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (datetime('now')))");

@@ -271,6 +271,8 @@ app.get('/api/settings', requireNoc, (req, res) => {
     mail_from: getSetting('mail_from') || '',
     access_notify_email: getSetting('access_notify_email') || '',
     auto_checkout_at: getSetting('auto_checkout_at') || '',
+    invoice_terms: getSetting('invoice_terms') || '',
+    recurring_invoice_terms: getSetting('recurring_invoice_terms') || '',
     has_smtp_pass: !!getSetting('smtp_pass'),
     has_provision_token: !!getSetting('provision_token'),
     has_prov_admin_password: !!getSetting('prov_admin_password'),
@@ -281,12 +283,15 @@ app.get('/api/settings', requireNoc, (req, res) => {
     has_stripe_webhook_secret: !!getSetting('stripe_webhook_secret'),
     bill_company: getSetting('bill_company') || '',
     bill_prefix: getSetting('bill_prefix') || 'INV-',
-    bill_next: getSetting('bill_next') || '1001'
+    bill_next: getSetting('bill_next') || '1001',
+    bill_terms_invoice: getSetting('bill_terms_invoice') || '',
+    bill_terms_recurring: getSetting('bill_terms_recurring') || ''
   });
 });
 app.put('/api/settings', requireNoc, (req, res) => {
   const b = req.body || {};
   for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns', 'backup_upload_base', 'public_base_url', 'prov_wifi_ssid', 'smtp_host', 'smtp_port', 'smtp_user', 'mail_from', 'access_notify_email', 'auto_checkout_at']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  for (const k of ['invoice_terms', 'recurring_invoice_terms']) if (b[k] !== undefined) setSetting(k, String(b[k])); // multi-line, don't trim internal formatting
   if (b.smtp_secure !== undefined) setSetting('smtp_secure', b.smtp_secure ? '1' : '0');
   if (b.smtp_pass) setSetting('smtp_pass', String(b.smtp_pass));
   if (b.zt_api_token) setSetting('zt_api_token', String(b.zt_api_token).trim());
@@ -295,6 +300,8 @@ app.put('/api/settings', requireNoc, (req, res) => {
   if (b.bill_next !== undefined && parseInt(b.bill_next, 10) > 0) setSetting('bill_next', String(parseInt(b.bill_next, 10)));
   if (b.stripe_secret) setSetting('stripe_secret', String(b.stripe_secret).trim());
   if (b.stripe_webhook_secret) setSetting('stripe_webhook_secret', String(b.stripe_webhook_secret).trim());
+  if (b.bill_terms_invoice !== undefined) setSetting('bill_terms_invoice', String(b.bill_terms_invoice).trim());
+  if (b.bill_terms_recurring !== undefined) setSetting('bill_terms_recurring', String(b.bill_terms_recurring).trim());
   if (b.allow_auto_enroll !== undefined) setSetting('allow_auto_enroll', b.allow_auto_enroll ? '1' : '0');
   if (b.prov_admin_password) setSetting('prov_admin_password', String(b.prov_admin_password));
   if (b.prov_wifi_password) setSetting('prov_wifi_password', String(b.prov_wifi_password));
