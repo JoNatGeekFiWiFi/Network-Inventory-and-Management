@@ -259,7 +259,7 @@ async function renderSite(id) {
     <div class="crumb" onclick="location.hash='#/sites'"><i class="ti ti-chevron-left"></i> Sites</div>
     <div class="head"><div class="t">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(s.name)}</h1>${statusPill(s.status)}</div>
-      <div class="small sec-muted" style="margin-top:3px">${s.customer ? `<i class="ti ti-user"></i> <a class="iplink" href="#/customer/${s.customer.id}">${esc(s.customer.name)}</a> &nbsp;·&nbsp; ` : ''}<i class="ti ti-building"></i> <a class="iplink" href="#/account/${s.account.id}">${esc(s.account.name)}</a> &nbsp;·&nbsp; <i class="ti ti-map-pin"></i> ${loc(s)}</div>
+      <div class="small sec-muted" style="margin-top:3px"><span id="custassign"><i class="ti ti-user"></i> ${s.customer ? `<a class="iplink" href="#/customer/${s.customer.id}">${esc(s.customer.name)}</a>` : '<span class="muted">no customer</span>'}${isPriv() ? ` <a class="iplink" style="cursor:pointer" onclick="assignCustomerUI(${s.id}, ${s.customer ? s.customer.id : 'null'})" title="Assign this site to a customer">(${s.customer ? 'change' : 'assign'})</a>` : ''}</span> &nbsp;·&nbsp; <i class="ti ti-building"></i> <a class="iplink" href="#/account/${s.account.id}">${esc(s.account.name)}</a> &nbsp;·&nbsp; <i class="ti ti-map-pin"></i> ${loc(s)}</div>
     </div><a class="btn" href="#/site/${s.id}/edit"><i class="ti ti-edit"></i> Edit</a>${isPriv() ? `<button class="btn" onclick="delSite(${s.id}, ${esc(JSON.stringify(s.name))})" title="Delete this site — hardware becomes unassigned"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
 
     <div class="grid2" style="margin:16px 0">
@@ -612,7 +612,39 @@ async function renderCust(id) {
       ${bill.invoices.map(i => `<div class="row"><i class="ti ti-file-invoice sec-muted"></i>
         <div style="flex:1;min-width:0"><div><b>${esc(i.number)}</b></div><div class="small sec-muted">${esc(i.date)}${i.due_date ? ' · due ' + esc(i.due_date) : ''}</div></div>
         <span class="mono">${fmtMoney(i.total)}</span>${invPill(i)}</div>`).join('')}</div>` : ''}
-    <div class="card"><div class="hd"><h2>Sites · ${c.sites.length}</h2><a class="btn sm" href="#/site/new?customer=${c.id}"><i class="ti ti-plus"></i> Add site</a></div>${sites || '<div class="row muted">No sites yet</div>'}</div>`;
+    <div class="card"><div class="hd"><h2>Sites · ${c.sites.length}</h2><div style="display:flex;gap:8px">
+      ${isPriv() ? `<button class="btn sm" onclick="attachSiteUI(${c.id})" title="Move an existing site to this customer"><i class="ti ti-link"></i> Attach existing site</button>` : ''}
+      <a class="btn sm" href="#/site/new?customer=${c.id}"><i class="ti ti-plus"></i> Add site</a></div></div>
+      <div id="attachsite"></div>${sites || '<div class="row muted">No sites yet — attach an existing site or add a new one</div>'}</div>`;
+}
+// Inline pickers: assign a site to a customer (from either end)
+async function assignCustomerUI(siteId, currentId) {
+  const custs = await api('/customers');
+  if (!custs.length) { toast('No customers yet — create one first'); return; }
+  $('#custassign').innerHTML = `<select id="custsel" style="width:auto;display:inline-block;padding:4px 8px">${custs.map(c => `<option value="${c.id}" ${c.id === currentId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+    <button class="btn sm" onclick="saveAssignCustomer(${siteId})"><i class="ti ti-check"></i> Save</button>
+    <button class="btn sm" onclick="renderSite(${siteId})">Cancel</button>`;
+}
+async function saveAssignCustomer(siteId) {
+  try {
+    await api('/sites/' + siteId, { method: 'PUT', body: JSON.stringify({ customer_id: Number($('#custsel').value) }) });
+    toast('Customer assigned'); renderSite(siteId);
+  } catch (e) { toast(e.message); }
+}
+async function attachSiteUI(custId) {
+  const sites = await api('/sites');
+  const others = sites.filter(s => s.customer_id !== custId);
+  if (!others.length) { toast('Every site already belongs to this customer'); return; }
+  $('#attachsite').innerHTML = `<div class="row" style="gap:8px">
+    <select id="attachsel" style="flex:1">${others.map(s => `<option value="${s.id}">${esc(s.name)}${s.customer_name ? ' — currently ' + esc(s.customer_name) : ' — no customer'}</option>`).join('')}</select>
+    <button class="btn sm primary" onclick="saveAttachSite(${custId})"><i class="ti ti-check"></i> Attach</button>
+    <button class="btn sm" onclick="this.closest('#attachsite').innerHTML=''">Cancel</button></div>`;
+}
+async function saveAttachSite(custId) {
+  try {
+    await api('/sites/' + $('#attachsel').value, { method: 'PUT', body: JSON.stringify({ customer_id: custId }) });
+    toast('Site attached'); renderCust(custId);
+  } catch (e) { toast(e.message); }
 }
 async function formCust(q) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }

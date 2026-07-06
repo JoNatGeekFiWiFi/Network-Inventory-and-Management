@@ -1453,12 +1453,16 @@ app.post('/api/sites', (req, res) => {
 
 app.put('/api/sites/:id', (req, res) => {
   const b = req.body || {};
-  const ex = db.prepare('SELECT customer_id, account_id FROM sites WHERE id=?').get(req.params.id);
-  const customerId = b.customer_id !== undefined ? b.customer_id : (ex ? ex.customer_id : null);
-  const accountId = b.account_id || defaultAccountForCustomer(customerId) || (ex ? ex.account_id : null);
+  const ex = db.prepare('SELECT * FROM sites WHERE id=?').get(req.params.id);
+  if (!ex) return res.status(404).json({ error: 'not found' });
+  // merge: fields not in the body keep their current values (so a customer-only change can't wipe the site)
+  const customerId = b.customer_id !== undefined ? b.customer_id : ex.customer_id;
+  const accountId = b.account_id || (b.customer_id !== undefined && b.customer_id !== ex.customer_id ? defaultAccountForCustomer(customerId) : null) || ex.account_id;
   db.prepare('UPDATE sites SET account_id=?, customer_id=?, name=?, service_address=?, lat=?, lng=?, status=?, current_mgmt_ip=?, current_public_ip=?, notes=? WHERE id=?')
-    .run(N(accountId), N(customerId || null), N(b.name), N(b.service_address), N(b.lat || null), N(b.lng || null), N(b.status, 'Active'), N(b.current_mgmt_ip), N(b.current_public_ip), N(b.notes), req.params.id);
-  audit(req, 'edit', 'site#' + req.params.id, b.name);
+    .run(N(accountId), N(customerId || null), N(b.name, ex.name), N(b.service_address, ex.service_address),
+         b.lat === undefined ? ex.lat : (b.lat || null), b.lng === undefined ? ex.lng : (b.lng || null),
+         N(b.status, ex.status), N(b.current_mgmt_ip, ex.current_mgmt_ip), N(b.current_public_ip, ex.current_public_ip), N(b.notes, ex.notes), req.params.id);
+  audit(req, 'edit', 'site#' + req.params.id, b.name || ex.name);
   res.json({ ok: true });
 });
 
