@@ -2150,9 +2150,9 @@ async function billTab(tab) {
       body.innerHTML = `<div style="display:flex;gap:8px;margin-bottom:10px;justify-content:flex-end"><button class="btn sm" onclick="addProduct()"><i class="ti ti-plus"></i> New product</button></div>
         <div class="card">${rows.map(p => `<div class="row">
         <i class="ti ti-package sec-muted"></i>
-        <div style="flex:1;min-width:0"><div>${esc(p.name)}</div><div class="small sec-muted">${esc(p.description || '')}</div></div>
+        <div style="flex:1;min-width:0"><div>${esc(p.name)}${p.taxable === 0 ? ' <span class="tag">no tax</span>' : ''}</div><div class="small sec-muted">${esc(p.description || '')}</div></div>
         <span class="mono">${fmtMoney(p.price)}</span>
-        <button class="btn sm" onclick="editProduct(${p.id}, ${esc(JSON.stringify(p.name))}, ${esc(JSON.stringify(p.description || ''))}, ${p.price})" title="Edit this product"><i class="ti ti-edit"></i> Edit</button>
+        <button class="btn sm" onclick="editProduct(${p.id}, ${esc(JSON.stringify(p.name))}, ${esc(JSON.stringify(p.description || ''))}, ${p.price}, ${p.taxable})" title="Edit this product"><i class="ti ti-edit"></i> Edit</button>
         <button class="btn sm" onclick="delProduct(${p.id})" title="Remove from the catalog (past invoices keep their lines)"><i class="ti ti-trash"></i> Delete</button></div>`).join('') || '<div class="row muted">No products yet — add your service plans (e.g. "Fiber 1G — $99/mo") for quick invoicing</div>'}</div>`;
     }
   } catch (e) { body.innerHTML = `<div class="card" style="padding:16px;color:var(--danger)">${esc(e.message)}</div>`; }
@@ -2162,7 +2162,7 @@ async function toggleInvoice(id) {
   if (det.innerHTML) { det.innerHTML = ''; return; }
   try {
     const i = await api('/billing/invoices/' + id);
-    const items = i.items.map(it => `<div class="kv"><span class="small">${esc(it.description)} <span class="muted">× ${it.quantity}</span></span><span class="mono small">${fmtMoney(it.amount)}</span></div>`).join('');
+    const items = i.items.map(it => `<div class="kv"><span class="small">${esc(it.description)} <span class="muted">× ${it.quantity}${it.taxable === 0 && i.tax_rate > 0 ? ' · no tax' : ''}</span></span><span class="mono small">${fmtMoney(it.amount)}</span></div>`).join('');
     const pays = i.payments.map(p => `<div class="kv"><span class="small" style="color:var(--success)">Payment · ${esc(p.date)} · ${esc(p.method)}${p.reference ? ' · ' + esc(p.reference) : ''}</span><span class="mono small" style="color:var(--success)">-${fmtMoney(p.amount)}</span></div>`).join('');
     const actions = [];
     if (i.status === 'draft') actions.push(`<a class="btn sm" href="#/billing/invoice/${i.id}/edit"><i class="ti ti-edit"></i> Edit</a>`);
@@ -2212,12 +2212,14 @@ async function addProduct() {
   const name = prompt('Product / service name (e.g. "Fiber 1G"):'); if (!name) return;
   const price = parseFloat(prompt('Price:', '0')) || 0;
   const description = prompt('Description (optional):') || '';
-  try { await api('/billing/products', { method: 'POST', body: JSON.stringify({ name, price, description }) }); toast('Added'); billTab('products'); } catch (e) { toast(e.message); }
+  const taxable = confirm('Charge sales tax on this item?\n\nOK = taxable · Cancel = not taxed');
+  try { await api('/billing/products', { method: 'POST', body: JSON.stringify({ name, price, description, taxable }) }); toast('Added'); billTab('products'); } catch (e) { toast(e.message); }
 }
-async function editProduct(id, name, description, price) {
+async function editProduct(id, name, description, price, taxable) {
   const n = prompt('Name:', name); if (!n) return;
   const p = parseFloat(prompt('Price:', price)); const d = prompt('Description:', description) || '';
-  try { await api('/billing/products/' + id, { method: 'PUT', body: JSON.stringify({ name: n, price: isNaN(p) ? price : p, description: d }) }); toast('Saved'); billTab('products'); } catch (e) { toast(e.message); }
+  const t = confirm('Charge sales tax on this item?\n\nOK = taxable · Cancel = not taxed' + (taxable === 0 ? '\n(currently: not taxed)' : '\n(currently: taxable)'));
+  try { await api('/billing/products/' + id, { method: 'PUT', body: JSON.stringify({ name: n, price: isNaN(p) ? price : p, description: d, taxable: t }) }); toast('Saved'); billTab('products'); } catch (e) { toast(e.message); }
 }
 async function delProduct(id) {
   if (!confirm('Remove this product from the catalog?')) return;
@@ -2225,31 +2227,35 @@ async function delProduct(id) {
 }
 // ---- invoice / recurring form (shared line-item editor) ----
 function renderItemRows() {
-  const rows = window._items.map((it, i) => `<div style="display:flex;gap:8px;margin-bottom:6px">
+  const rows = window._items.map((it, i) => `<div style="display:flex;gap:8px;margin-bottom:6px;align-items:center">
     <input placeholder="Description" value="${esc(it.description)}" oninput="window._items[${i}].description=this.value;itemTotals()" style="flex:3"/>
     <input type="number" min="0" step="any" title="Quantity" value="${it.quantity}" oninput="window._items[${i}].quantity=parseFloat(this.value)||0;itemTotals()" style="flex:1"/>
     <input type="number" min="0" step="any" title="Unit price" value="${it.unit_price}" oninput="window._items[${i}].unit_price=parseFloat(this.value)||0;itemTotals()" style="flex:1;font-family:var(--mono)"/>
-    <button class="btn sm" onclick="window._items.splice(${i},1);renderItemRows()" title="Remove line"><i class="ti ti-x"></i></button></div>`).join('');
-  $('#itemrows').innerHTML = rows + `<div style="display:flex;gap:8px;margin-top:4px;align-items:center">
-    <button class="btn sm" onclick="window._items.push({description:'',quantity:1,unit_price:0});renderItemRows()"><i class="ti ti-plus"></i> Add line</button>
-    ${window._products.length ? `<select id="prodpick" style="width:auto" onchange="pickProduct(this)"><option value="">Add from products…</option>${window._products.map(p => `<option value="${p.id}">${esc(p.name)} — ${fmtMoney(p.price)}</option>`).join('')}</select>` : ''}
-    <div style="flex:1"></div><div class="small sec-muted">Subtotal <b class="mono" id="itemsub"></b></div></div>`;
+    <label class="small sec-muted" style="display:flex;align-items:center;gap:4px;flex:none;cursor:pointer" title="Charge sales tax on this line (uses the invoice tax rate)"><input type="checkbox" ${it.taxable === 0 ? '' : 'checked'} onchange="window._items[${i}].taxable=this.checked?1:0;itemTotals()" style="width:auto"/>Tax</label>
+    <button class="btn sm" onclick="window._items.splice(${i},1);renderItemRows()" title="Remove this line">Remove</button></div>`).join('');
+  $('#itemrows').innerHTML = rows + `<div style="display:flex;gap:8px;margin-top:4px;align-items:center;flex-wrap:wrap">
+    <button class="btn sm" onclick="window._items.push({description:'',quantity:1,unit_price:0,taxable:1});renderItemRows()"><i class="ti ti-plus"></i> Add line</button>
+    ${window._products.length ? `<select id="prodpick" style="width:auto" onchange="pickProduct(this)"><option value="">Add from products…</option>${window._products.map(p => `<option value="${p.id}">${esc(p.name)} — ${fmtMoney(p.price)}${p.taxable === 0 ? ' (no tax)' : ''}</option>`).join('')}</select>` : ''}
+    <div style="flex:1"></div><div class="small sec-muted" id="itemsub"></div></div>`;
   itemTotals();
 }
 function itemTotals() {
-  const sub = window._items.reduce((n, it) => n + (it.quantity || 0) * (it.unit_price || 0), 0);
-  const el = $('#itemsub'); if (el) el.textContent = fmtMoney(sub);
+  const line = it => (it.quantity || 0) * (it.unit_price || 0);
+  const sub = window._items.reduce((n, it) => n + line(it), 0);
+  const taxable = window._items.filter(it => it.taxable !== 0).reduce((n, it) => n + line(it), 0);
+  const el = $('#itemsub');
+  if (el) el.innerHTML = `Subtotal <b class="mono">${fmtMoney(sub)}</b>${taxable !== sub ? ` · taxed portion <b class="mono">${fmtMoney(taxable)}</b>` : ''}`;
 }
 function pickProduct(sel) {
   const p = window._products.find(x => x.id === Number(sel.value)); sel.value = '';
-  if (p) { window._items.push({ description: p.name + (p.description ? ' — ' + p.description : ''), quantity: 1, unit_price: p.price }); renderItemRows(); }
+  if (p) { window._items.push({ description: p.name + (p.description ? ' — ' + p.description : ''), quantity: 1, unit_price: p.price, taxable: p.taxable === 0 ? 0 : 1 }); renderItemRows(); }
 }
 async function formInvoice(q) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
   const [custs, products] = await Promise.all([api('/customers'), api('/billing/products')]);
-  let inv = { customer_id: '', email: '', date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 0, notes: '', items: [{ description: '', quantity: 1, unit_price: 0 }] };
+  let inv = { customer_id: '', email: '', date: new Date().toISOString().slice(0, 10), due_date: '', tax_rate: 0, notes: '', items: [{ description: '', quantity: 1, unit_price: 0, taxable: 1 }] };
   if (q.id) inv = await api('/billing/invoices/' + q.id);
-  window._items = inv.items.map(it => ({ description: it.description, quantity: it.quantity, unit_price: it.unit_price }));
+  window._items = inv.items.map(it => ({ description: it.description, quantity: it.quantity, unit_price: it.unit_price, taxable: it.taxable === 0 ? 0 : 1 }));
   window._products = products;
   view().innerHTML = `<div class="crumb" onclick="location.hash='#/billing'"><i class="ti ti-chevron-left"></i> Billing</div>
     <h1>${q.id ? 'Edit invoice ' + esc(inv.number) : 'New invoice'}</h1>
@@ -2287,9 +2293,9 @@ async function saveInvoice(id, send) {
 async function formRecurring(q) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
   const [custs, products] = await Promise.all([api('/customers'), api('/billing/products')]);
-  let r = { customer_id: '', frequency: 'monthly', next_date: new Date().toISOString().slice(0, 10), tax_rate: 0, auto_send: 1, items: [{ description: '', quantity: 1, unit_price: 0 }] };
+  let r = { customer_id: '', frequency: 'monthly', next_date: new Date().toISOString().slice(0, 10), tax_rate: 0, auto_send: 1, items: [{ description: '', quantity: 1, unit_price: 0, taxable: 1 }] };
   if (q.id) { const all = await api('/billing/recurring'); r = all.find(x => x.id === Number(q.id)) || r; }
-  window._items = r.items.map(it => ({ description: it.description, quantity: it.quantity, unit_price: it.unit_price }));
+  window._items = r.items.map(it => ({ description: it.description, quantity: it.quantity, unit_price: it.unit_price, taxable: it.taxable === 0 ? 0 : 1 }));
   window._products = products;
   view().innerHTML = `<div class="crumb" onclick="location.hash='#/billing'"><i class="ti ti-chevron-left"></i> Billing</div>
     <h1>${q.id ? 'Edit' : 'New'} recurring invoice</h1>

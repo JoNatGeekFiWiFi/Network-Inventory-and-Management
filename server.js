@@ -1933,8 +1933,10 @@ const r2 = v => Math.round(Number(v || 0) * 100) / 100;
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const esc2 = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 function computeTotals(items, taxRate) {
-  const subtotal = r2(items.reduce((n, it) => n + Number(it.quantity || 1) * Number(it.unit_price || 0), 0));
-  const tax = r2(subtotal * (Number(taxRate || 0) / 100));
+  const line = it => Number(it.quantity || 1) * Number(it.unit_price || 0);
+  const subtotal = r2(items.reduce((n, it) => n + line(it), 0));
+  const taxableBase = r2(items.filter(it => it.taxable !== 0 && it.taxable !== false).reduce((n, it) => n + line(it), 0));
+  const tax = r2(taxableBase * (Number(taxRate || 0) / 100));
   return { subtotal, tax, total: r2(subtotal + tax) };
 }
 function nextInvoiceNumber() {
@@ -1947,7 +1949,8 @@ function cleanItems(raw) {
   return (Array.isArray(raw) ? raw : []).map(it => ({
     description: String(it.description || '').slice(0, 400),
     quantity: Number(it.quantity) > 0 ? Number(it.quantity) : 1,
-    unit_price: r2(it.unit_price)
+    unit_price: r2(it.unit_price),
+    taxable: (it.taxable === 0 || it.taxable === false) ? 0 : 1
   })).filter(it => it.description || it.unit_price);
 }
 function insertInvoice({ customer_id, email, date, due_date, tax_rate, notes, items, status }) {
@@ -1956,8 +1959,8 @@ function insertInvoice({ customer_id, email, date, due_date, tax_rate, notes, it
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(nextInvoiceNumber(), customer_id, N(email), date || todayStr(), N(due_date), status || 'draft',
          Number(tax_rate || 0), t.subtotal, t.tax, t.total, t.total, N(notes), randomBytes(18).toString('hex'));
-  const ins = db.prepare('INSERT INTO bill_items (invoice_id,description,quantity,unit_price,amount) VALUES (?,?,?,?,?)');
-  for (const it of items) ins.run(info.lastInsertRowid, it.description, it.quantity, it.unit_price, r2(it.quantity * it.unit_price));
+  const ins = db.prepare('INSERT INTO bill_items (invoice_id,description,quantity,unit_price,amount,taxable) VALUES (?,?,?,?,?,?)');
+  for (const it of items) ins.run(info.lastInsertRowid, it.description, it.quantity, it.unit_price, r2(it.quantity * it.unit_price), it.taxable);
   return info.lastInsertRowid;
 }
 function loadInvoice(id) {
@@ -2068,7 +2071,7 @@ app.get('/api/billing/products', requireNoc, (req, res) => {
 app.post('/api/billing/products', requireNoc, (req, res) => {
   const b = req.body || {};
   if (!b.name) return res.status(400).json({ error: 'Name required' });
-  const info = db.prepare('INSERT INTO bill_products (name,description,price) VALUES (?,?,?)').run(b.name, N(b.description), r2(b.price));
+  const info = db.prepare('INSERT INTO bill_products (name,description,price,taxable) VALUES (?,?,?,?)').run(b.name, N(b.description), r2(b.price), b.taxable === false ? 0 : 1);
   audit(req, 'create', 'product#' + info.lastInsertRowid, b.name);
   res.json({ id: info.lastInsertRowid });
 });
@@ -2076,8 +2079,9 @@ app.put('/api/billing/products/:id', requireNoc, (req, res) => {
   const b = req.body || {};
   const ex = db.prepare('SELECT * FROM bill_products WHERE id=?').get(req.params.id);
   if (!ex) return res.status(404).json({ error: 'not found' });
-  db.prepare('UPDATE bill_products SET name=?, description=?, price=? WHERE id=?')
-    .run(N(b.name, ex.name), N(b.description, ex.description), b.price === undefined ? ex.price : r2(b.price), req.params.id);
+  db.prepare('UPDATE bill_products SET name=?, description=?, price=?, taxable=? WHERE id=?')
+    .run(N(b.name, ex.name), N(b.description, ex.description), b.price === undefined ? ex.price : r2(b.price),
+         b.taxable === undefined ? ex.taxable : (b.taxable ? 1 : 0), req.params.id);
   audit(req, 'edit', 'product#' + req.params.id, b.name || ex.name);
   res.json({ ok: true });
 });
@@ -2127,8 +2131,8 @@ app.put('/api/billing/invoices/:id', requireNoc, (req, res) => {
     .run(Number(b.customer_id || inv.customer_id), N(b.email, inv.email), b.date || inv.date, N(b.due_date, inv.due_date),
          Number(b.tax_rate === undefined ? inv.tax_rate : b.tax_rate), t.subtotal, t.tax, t.total, t.total, N(b.notes, inv.notes), inv.id);
   db.prepare('DELETE FROM bill_items WHERE invoice_id=?').run(inv.id);
-  const ins = db.prepare('INSERT INTO bill_items (invoice_id,description,quantity,unit_price,amount) VALUES (?,?,?,?,?)');
-  for (const it of items) ins.run(inv.id, it.description, it.quantity, it.unit_price, r2(it.quantity * it.unit_price));
+  const ins = db.prepare('INSERT INTO bill_items (invoice_id,description,quantity,unit_price,amount,taxable) VALUES (?,?,?,?,?,?)');
+  for (const it of items) ins.run(inv.id, it.description, it.quantity, it.unit_price, r2(it.quantity * it.unit_price), it.taxable);
   audit(req, 'edit', 'invoice#' + inv.id, inv.number);
   res.json({ ok: true });
 });
@@ -2299,7 +2303,8 @@ app.post('/api/billing/restore', requireNoc, (req, res) => {
 function payPage(inv, msg) {
   const company = esc2(getSetting('bill_company') || 'Network Inventory');
   const canPay = inv.balance > 0 && inv.status !== 'void' && !!getSetting('stripe_secret');
-  const rows = inv.items.map(it => `<tr><td>${esc2(it.description)}</td><td align="center">${it.quantity}</td><td align="right">$${it.amount.toFixed(2)}</td></tr>`).join('');
+  const anyUntaxed = inv.tax > 0 && inv.items.some(it => it.taxable === 0);
+  const rows = inv.items.map(it => `<tr><td>${esc2(it.description)}${anyUntaxed && it.taxable === 0 ? ' <span style="color:#9aa6b2;font-size:12px">· no tax</span>' : ''}</td><td align="center">${it.quantity}</td><td align="right">$${it.amount.toFixed(2)}</td></tr>`).join('');
   const statusTxt = inv.status === 'void' ? 'VOID' : inv.balance <= 0 ? 'PAID — thank you' : (inv.status === 'partial' ? `$${inv.balance.toFixed(2)} remaining` : `$${inv.balance.toFixed(2)} due${inv.due_date ? ' by ' + esc2(inv.due_date) : ''}`);
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Invoice ${esc2(inv.number)}</title>
 <style>:root{--bg:#0f1216;--card:#171c22;--line:#2a323c;--text:#e6eaf0;--muted:#9aa6b2;--accent:#378ADD;--ok:#1D9E75}
