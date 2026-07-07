@@ -126,6 +126,15 @@ export function migrate() {
   ensure('customers', 'portal_enabled', 'INTEGER NOT NULL DEFAULT 0');
   db.exec("CREATE TABLE IF NOT EXISTS portal_sessions (token TEXT PRIMARY KEY, customer_id INTEGER NOT NULL, expires_at TEXT NOT NULL)");
   db.exec("CREATE TABLE IF NOT EXISTS portal_login_tokens (token TEXT PRIMARY KEY, customer_id INTEGER NOT NULL, expires_at TEXT NOT NULL)");
+  // Support / trouble tickets (customers open from the portal; staff reply)
+  db.exec(`CREATE TABLE IF NOT EXISTS tickets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT, customer_id INTEGER NOT NULL, site_id INTEGER,
+    subject TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', priority TEXT NOT NULL DEFAULT 'normal',
+    opened_by TEXT NOT NULL DEFAULT 'customer', assigned_to TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')), closed_at TEXT)`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_tickets ON tickets(customer_id, status)');
+  db.exec("CREATE TABLE IF NOT EXISTS ticket_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL, author_type TEXT NOT NULL, author TEXT, body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  db.exec('CREATE INDEX IF NOT EXISTS idx_ticketmsg ON ticket_messages(ticket_id)');
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

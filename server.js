@@ -2602,6 +2602,103 @@ app.get('/portal/api/account', requirePortal, (req, res) => {
   });
 });
 
+// ---- support / trouble tickets ----
+const TICKET_STATUS = ['open', 'in_progress', 'waiting', 'resolved', 'closed'];
+const TICKET_PRIO = ['low', 'normal', 'high', 'urgent'];
+const nl2br = s => esc2(s).replace(/\n/g, '<br>');
+function ticketNotify(subject, text, html) { const to = getSetting('access_notify_email') || getSetting('mail_from'); if (to) mailSafe({ to, subject, text, html }); }
+function createTicket({ customer_id, site_id, subject, body, priority, opened_by, author }) {
+  const info = db.prepare("INSERT INTO tickets (customer_id,site_id,subject,priority,opened_by) VALUES (?,?,?,?,?)")
+    .run(customer_id, N(site_id), subject, TICKET_PRIO.includes(priority) ? priority : 'normal', opened_by || 'customer');
+  const id = info.lastInsertRowid;
+  db.prepare('UPDATE tickets SET number=? WHERE id=?').run('TKT-' + (1000 + id), id);
+  if (body) db.prepare("INSERT INTO ticket_messages (ticket_id,author_type,author,body) VALUES (?,?,?,?)").run(id, opened_by || 'customer', author || '', body);
+  return id;
+}
+function loadTicket(id) {
+  const t = db.prepare('SELECT t.*, c.name AS customer_name, c.billing_email, s.name AS site_name FROM tickets t LEFT JOIN customers c ON c.id=t.customer_id LEFT JOIN sites s ON s.id=t.site_id WHERE t.id=?').get(id);
+  if (!t) return null;
+  t.messages = db.prepare('SELECT * FROM ticket_messages WHERE ticket_id=? ORDER BY id').all(id);
+  return t;
+}
+// staff
+app.get('/api/tickets', requireNoc, (req, res) => {
+  const q = '%' + String(req.query.q || '').trim() + '%'; const st = String(req.query.status || '');
+  let sql = `SELECT t.id,t.number,t.subject,t.status,t.priority,t.assigned_to,t.opened_by,t.created_at,t.updated_at, c.name AS customer_name,
+    (SELECT COUNT(*) FROM ticket_messages m WHERE m.ticket_id=t.id) AS msg_count
+    FROM tickets t LEFT JOIN customers c ON c.id=t.customer_id WHERE (t.subject LIKE ? OR t.number LIKE ? OR c.name LIKE ?)`;
+  const p = [q, q, q];
+  if (st === 'active') sql += " AND t.status IN ('open','in_progress','waiting')";
+  else if (st) { sql += ' AND t.status=?'; p.push(st); }
+  sql += " ORDER BY (t.status IN ('open','in_progress','waiting')) DESC, t.updated_at DESC LIMIT 300";
+  res.json(db.prepare(sql).all(...p));
+});
+app.get('/api/tickets/summary', requireNoc, (req, res) => {
+  res.json({
+    open: db.prepare("SELECT COUNT(*) v FROM tickets WHERE status IN ('open','in_progress','waiting')").get().v,
+    unassigned: db.prepare("SELECT COUNT(*) v FROM tickets WHERE status IN ('open','in_progress','waiting') AND (assigned_to IS NULL OR assigned_to='')").get().v,
+    urgent: db.prepare("SELECT COUNT(*) v FROM tickets WHERE status IN ('open','in_progress','waiting') AND priority='urgent'").get().v
+  });
+});
+app.get('/api/staff', requireNoc, (req, res) => res.json(db.prepare("SELECT name, email FROM users WHERE active=1 ORDER BY name").all()));
+app.get('/api/tickets/:id', requireNoc, (req, res) => { const t = loadTicket(req.params.id); if (!t) return res.status(404).json({ error: 'not found' }); res.json(t); });
+app.post('/api/tickets', requireNoc, (req, res) => {
+  const b = req.body || {};
+  if (!b.customer_id || !b.subject) return res.status(400).json({ error: 'Customer and subject are required' });
+  const id = createTicket({ customer_id: Number(b.customer_id), site_id: b.site_id, subject: String(b.subject).slice(0, 200), body: b.body, priority: b.priority, opened_by: 'staff', author: (req.user && req.user.email) || '' });
+  const num = db.prepare('SELECT number FROM tickets WHERE id=?').get(id).number;
+  audit(req, 'create', 'ticket#' + id, num + ' ' + b.subject);
+  res.json({ id, number: num });
+});
+app.post('/api/tickets/:id/reply', requireNoc, (req, res) => {
+  const t = db.prepare('SELECT * FROM tickets WHERE id=?').get(req.params.id); if (!t) return res.status(404).json({ error: 'not found' });
+  const body = String((req.body || {}).body || '').trim(); if (!body) return res.status(400).json({ error: 'Enter a reply' });
+  db.prepare("INSERT INTO ticket_messages (ticket_id,author_type,author,body) VALUES (?,?,?,?)").run(t.id, 'staff', (req.user && req.user.email) || '', body);
+  db.prepare("UPDATE tickets SET updated_at=datetime('now'), status=CASE WHEN status IN ('resolved','closed') THEN status ELSE 'waiting' END WHERE id=?").run(t.id);
+  const c = db.prepare('SELECT billing_email FROM customers WHERE id=?').get(t.customer_id) || {};
+  if (c.billing_email) { const pub = pubBase(); mailSafe({ to: c.billing_email, subject: `Re: ${t.number} — ${t.subject}`, text: `${body}\n\nView your ticket: ${pub}/portal`, html: `<p>${nl2br(body)}</p><p><a href="${pub}/portal">View your ticket in the portal</a></p>` }); }
+  audit(req, 'reply', 'ticket#' + t.id, t.number);
+  res.json({ ok: true });
+});
+app.put('/api/tickets/:id', requireNoc, (req, res) => {
+  const b = req.body || {}; const t = db.prepare('SELECT * FROM tickets WHERE id=?').get(req.params.id); if (!t) return res.status(404).json({ error: 'not found' });
+  const status = TICKET_STATUS.includes(b.status) ? b.status : t.status;
+  const priority = TICKET_PRIO.includes(b.priority) ? b.priority : t.priority;
+  const wasClosed = ['resolved', 'closed'].includes(t.status), nowClosed = ['resolved', 'closed'].includes(status);
+  db.prepare(`UPDATE tickets SET status=?, priority=?, assigned_to=?, updated_at=datetime('now')${nowClosed && !wasClosed ? ", closed_at=datetime('now')" : (!nowClosed ? ', closed_at=NULL' : '')} WHERE id=?`)
+    .run(status, priority, b.assigned_to !== undefined ? N(b.assigned_to) : t.assigned_to, t.id);
+  audit(req, 'edit', 'ticket#' + t.id, `${status}/${priority}`);
+  res.json({ ok: true });
+});
+// portal (scoped to the signed-in customer)
+app.get('/portal/api/tickets', requirePortal, (req, res) => {
+  res.json(db.prepare("SELECT id,number,subject,status,priority,created_at,updated_at,(SELECT COUNT(*) FROM ticket_messages m WHERE m.ticket_id=tickets.id) AS msg_count FROM tickets WHERE customer_id=? ORDER BY updated_at DESC").all(req.pcust.id));
+});
+app.post('/portal/api/tickets', requirePortal, (req, res) => {
+  const b = req.body || {}; const subject = String(b.subject || '').trim().slice(0, 200); const body = String(b.body || '').trim();
+  if (!subject) return res.status(400).json({ error: 'Please enter a subject' });
+  let siteId = null; if (b.site_id) { const s = db.prepare('SELECT id FROM sites WHERE id=? AND customer_id=?').get(Number(b.site_id), req.pcust.id); if (s) siteId = s.id; }
+  const id = createTicket({ customer_id: req.pcust.id, site_id: siteId, subject, body, priority: b.priority, opened_by: 'customer', author: req.pcust.name });
+  const num = db.prepare('SELECT number FROM tickets WHERE id=?').get(id).number;
+  ticketNotify(`New support ticket ${num}: ${subject}`, `${req.pcust.name} opened ${num}:\n\n${body}`, `<p><b>${esc2(req.pcust.name)}</b> opened <b>${esc2(num)}</b>: ${esc2(subject)}</p><p>${nl2br(body)}</p>`);
+  res.json({ ok: true, id, number: num });
+});
+app.get('/portal/api/tickets/:id', requirePortal, (req, res) => {
+  const t = db.prepare('SELECT * FROM tickets WHERE id=? AND customer_id=?').get(req.params.id, req.pcust.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  t.messages = db.prepare('SELECT author_type, body, created_at FROM ticket_messages WHERE ticket_id=? ORDER BY id').all(t.id);
+  res.json(t);
+});
+app.post('/portal/api/tickets/:id/reply', requirePortal, (req, res) => {
+  const t = db.prepare('SELECT * FROM tickets WHERE id=? AND customer_id=?').get(req.params.id, req.pcust.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  const body = String((req.body || {}).body || '').trim(); if (!body) return res.status(400).json({ error: 'Enter a message' });
+  db.prepare("INSERT INTO ticket_messages (ticket_id,author_type,author,body) VALUES (?,?,?,?)").run(t.id, 'customer', req.pcust.name, body);
+  db.prepare("UPDATE tickets SET updated_at=datetime('now'), status=CASE WHEN status IN ('resolved','closed') THEN 'open' ELSE status END, closed_at=CASE WHEN status IN ('resolved','closed') THEN NULL ELSE closed_at END WHERE id=?").run(t.id);
+  ticketNotify(`Reply on ${t.number}: ${t.subject}`, `${req.pcust.name} replied on ${t.number}:\n\n${body}`, `<p><b>${esc2(req.pcust.name)}</b> replied on <b>${esc2(t.number)}</b>:</p><p>${nl2br(body)}</p>`);
+  res.json({ ok: true });
+});
+
 // ---- audit ----
 app.get('/api/audit', (req, res) => {
   res.json(db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 200').all());

@@ -63,6 +63,7 @@ function setupHeader() {
   $('#navBatch').style.display = isPriv() ? '' : 'none';
   $('#navAccess').style.display = isPriv() ? '' : 'none';
   $('#navBilling').style.display = isPriv() ? '' : 'none';
+  $('#navTickets').style.display = isPriv() ? '' : 'none';
   $('#navPackages').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
 }
@@ -143,6 +144,9 @@ async function route() {
     if (p[0] === 'billing' && p[1] === 'quote' && p[2] === 'new') { setNav('billing'); return await formQuote({}); }
     if (p[0] === 'billing' && p[1] === 'quote' && p[3] === 'edit') { setNav('billing'); return await formQuote({ id: p[2] }); }
     if (p[0] === 'billing') { setNav('billing'); return await renderBilling(); }
+    if (p[0] === 'tickets' && p[1] === 'new') { setNav('tickets'); return await formTicket(); }
+    if (p[0] === 'tickets' && p[1]) { setNav('tickets'); return await renderTicket(p[1]); }
+    if (p[0] === 'tickets') { setNav('tickets'); return await renderTickets(); }
     if (p[0] === 'activity') { setNav('activity'); return await renderActivity(); }
     if (p[0] === 'users' && p[1] === 'new') { setNav('users'); return await formUser({}); }
     if (p[0] === 'users' && p[2] === 'edit') { setNav('users'); return await formUser({ id: p[1] }); }
@@ -2094,6 +2098,73 @@ async function showWg(id) {
     });
   } catch (e) { toast(e.message); }
 }
+
+// ---------- Support / trouble tickets ----------
+const TICKET_PILL = { open: 's-warn', in_progress: 's-warn', waiting: '', resolved: 's-up', closed: '' };
+const TICKET_PRIO_COL = { low: 'var(--muted)', normal: 'var(--text2)', high: 'var(--warning)', urgent: 'var(--danger)' };
+function ticketPill(s) { return `<span class="pill ${TICKET_PILL[s] || ''}">${esc((s || '').replace('_', ' '))}</span>`; }
+async function renderTickets() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const sum = await api('/tickets/summary');
+  view().innerHTML = `<div class="head"><div class="t"><h1>Support</h1><div class="small sec-muted" style="margin-top:3px">Customer trouble tickets from the portal</div></div>
+    <a class="btn primary" href="#/tickets/new"><i class="ti ti-plus"></i> New ticket</a></div>
+    <div class="grid3" style="margin:16px 0">
+      <div class="metric"><div class="l">Open</div><div class="v" style="color:var(--warning)">${sum.open}</div></div>
+      <div class="metric"><div class="l">Unassigned</div><div class="v">${sum.unassigned}</div></div>
+      <div class="metric"><div class="l">Urgent</div><div class="v" style="color:var(--danger)">${sum.urgent}</div></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <input id="tkq" placeholder="Search subject, number, customer…" style="flex:1" oninput="tkSearch()"/>
+      <select id="tkst" style="width:auto" onchange="loadTk()">
+        <option value="active">Active</option><option value="">All</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="waiting">Waiting</option><option value="resolved">Resolved</option><option value="closed">Closed</option></select></div>
+    <div class="card" id="tklist"><div class="loading">Loading…</div></div>`;
+  loadTk();
+}
+function tkSearch() { clearTimeout(window._tkT); window._tkT = setTimeout(loadTk, 250); }
+async function loadTk() {
+  const box = $('#tklist'); if (!box) return;
+  const q = $('#tkq') ? $('#tkq').value.trim() : '', st = $('#tkst') ? $('#tkst').value : 'active';
+  const rows = await api('/tickets?q=' + encodeURIComponent(q) + '&status=' + st);
+  box.innerHTML = rows.map(t => `<div class="row rowlink" onclick="location.hash='#/tickets/${t.id}'">
+    <i class="ti ti-lifebuoy" style="color:${TICKET_PRIO_COL[t.priority] || 'var(--muted)'}"></i>
+    <div style="flex:1;min-width:0"><div><b>${esc(t.number)}</b> · ${esc(t.subject)}</div>
+      <div class="small sec-muted">${esc(t.customer_name || '')} · ${esc(t.updated_at)}${t.assigned_to ? ' · ' + esc(t.assigned_to) : ' · unassigned'}${['urgent', 'high'].includes(t.priority) ? ` · <span style="color:${TICKET_PRIO_COL[t.priority]}">${t.priority}</span>` : ''}</div></div>
+    ${ticketPill(t.status)}<i class="ti ti-chevron-right muted"></i></div>`).join('') || '<div class="row muted">No tickets</div>';
+}
+async function renderTicket(id) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const [t, staff] = await Promise.all([api('/tickets/' + id), api('/staff').catch(() => [])]);
+  const msgs = t.messages.map(m => `<div class="card" style="margin-bottom:10px;padding:12px 14px;${m.author_type === 'staff' ? 'border-left:3px solid var(--accent)' : ''}">
+    <div class="small sec-muted" style="margin-bottom:4px"><b>${m.author_type === 'staff' ? 'Staff' : 'Customer'}</b>${m.author ? ' · ' + esc(m.author) : ''} · ${esc(m.created_at)}</div>
+    <div style="white-space:pre-wrap">${esc(m.body)}</div></div>`).join('') || '<div class="card" style="padding:12px 14px" class="muted">No messages</div>';
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/tickets'"><i class="ti ti-chevron-left"></i> Support</div>
+    <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(t.number)}</h1>${ticketPill(t.status)}</div>
+      <div class="small sec-muted" style="margin-top:3px">${esc(t.subject)} · ${esc(t.customer_name || '')}${t.site_name ? ' · ' + esc(t.site_name) : ''} · opened ${esc(t.created_at)} by ${esc(t.opened_by)}</div></div></div>
+    <div class="card" style="padding:14px;margin:14px 0" id="tkctl"><div class="grid3">
+      <div class="fld"><label class="fl">Status</label><select name="status">${['open', 'in_progress', 'waiting', 'resolved', 'closed'].map(s => `<option value="${s}" ${t.status === s ? 'selected' : ''}>${s.replace('_', ' ')}</option>`).join('')}</select></div>
+      <div class="fld"><label class="fl">Priority</label><select name="priority">${['low', 'normal', 'high', 'urgent'].map(s => `<option value="${s}" ${t.priority === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+      <div class="fld"><label class="fl">Assigned to</label><select name="assigned_to"><option value="">Unassigned</option>${staff.map(u => `<option value="${esc(u.email)}" ${t.assigned_to === u.email ? 'selected' : ''}>${esc(u.name || u.email)}</option>`).join('')}</select></div></div>
+      <div style="display:flex;justify-content:flex-end"><button class="btn sm" onclick="saveTicketCtl(${t.id})"><i class="ti ti-check"></i> Update</button></div></div>
+    ${msgs}
+    <div class="box"><textarea id="tkreply" rows="3" placeholder="Reply to the customer (emailed to their billing address)…"></textarea>
+      <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn primary" onclick="replyTicket(${t.id})"><i class="ti ti-send"></i> Send reply</button></div></div>`;
+}
+async function saveTicketCtl(id) { const d = collect('#tkctl'); try { await api('/tickets/' + id, { method: 'PUT', body: JSON.stringify(d) }); toast('Updated'); renderTicket(id); } catch (e) { toast(e.message); } }
+async function replyTicket(id) { const body = $('#tkreply').value.trim(); if (!body) { toast('Enter a reply'); return; } try { await api('/tickets/' + id + '/reply', { method: 'POST', body: JSON.stringify({ body }) }); toast('Reply sent'); renderTicket(id); } catch (e) { toast(e.message); } }
+async function formTicket() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const custs = await api('/customers');
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/tickets'"><i class="ti ti-chevron-left"></i> Support</div>
+    <h1>New ticket</h1>
+    <div class="card" style="margin-top:14px;padding:16px" id="f">
+      <div class="fld"><label class="fl">Customer</label><select name="customer_id">${custs.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div>
+      ${field('Subject', 'subject', '', { ph: 'Brief summary of the issue' })}
+      ${field('Priority', 'priority', 'normal', { type: 'select', options: ['low', 'normal', 'high', 'urgent'] })}
+      ${field('Message', 'body', '', { type: 'textarea' })}
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
+      <button class="btn primary" onclick="saveTicket()"><i class="ti ti-check"></i> Create</button></div></div>`;
+}
+async function saveTicket() { const d = collect('#f'); if (!d.subject) { toast('Enter a subject'); return; } try { const r = await api('/tickets', { method: 'POST', body: JSON.stringify(d) }); toast('Created ' + r.number); location.hash = '#/tickets/' + r.id; } catch (e) { toast(e.message); } }
 
 // ---------- Billing (standalone; Stripe processes card/ACH) ----------
 const fmtMoney = (n) => '$' + Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });

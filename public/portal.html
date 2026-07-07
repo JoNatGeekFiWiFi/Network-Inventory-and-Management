@@ -77,10 +77,11 @@
         <div class="tabs">
           <div class="tab ${TAB === 'invoices' ? 'on' : ''}" data-t="invoices">Invoices</div>
           <div class="tab ${TAB === 'quotes' ? 'on' : ''}" data-t="quotes">Quotes</div>
+          <div class="tab ${TAB === 'support' ? 'on' : ''}" data-t="support">Support</div>
           <div class="tab ${TAB === 'account' ? 'on' : ''}" data-t="account">Account</div>
         </div><div id="body"><div class="card">Loading…</div></div>`;
       $('#logout').onclick = async () => { await fetch('/portal/logout', { method: 'POST' }); ME = null; login(); };
-      document.querySelectorAll('.tab').forEach(t => t.onclick = () => { TAB = t.dataset.t; dashboard(); });
+      document.querySelectorAll('.tab').forEach(t => t.onclick = () => { TAB = t.dataset.t; TK_VIEW = { mode: 'list', id: null }; dashboard(); });
       renderTab();
     }
     async function renderTab() {
@@ -96,6 +97,8 @@
           body.innerHTML = `<div class="card">${rows.map(q => `<div class="row">
             <div class="g"><div><b>${esc(q.number)}</b> · ${money(q.total)}</div><div class="small muted">${esc(q.date)}${q.expiry_date ? ' · valid until ' + esc(q.expiry_date) : ''}</div></div>
             ${statusPill(q.status)}${q.view_url ? `<a class="btn sm ghost" href="${q.view_url}">View</a>` : ''}</div>`).join('') || '<div class="row muted">No quotes yet.</div>'}</div>`;
+        } else if (TAB === 'support') {
+          return renderSupport(body);
         } else {
           const a = await (await fetch('/portal/api/account')).json();
           body.innerHTML = `<div class="card"><h2>Accounts</h2>${(a.accounts || []).map(x => `<div class="row"><div class="g">${esc(x.name)}</div></div>`).join('') || '<div class="row muted">—</div>'}</div>
@@ -103,9 +106,62 @@
         }
       } catch (e) { body.innerHTML = `<div class="card">${esc(e.message)}</div>`; }
     }
+    let TK_VIEW = { mode: 'list', id: null };
+    async function renderSupport(body) {
+      if (TK_VIEW.mode === 'new') return supportNew(body);
+      if (TK_VIEW.mode === 'thread') return supportThread(body, TK_VIEW.id);
+      const rows = await (await fetch('/portal/api/tickets')).json();
+      body.innerHTML = `<div style="display:flex;justify-content:flex-end;margin-bottom:12px"><button class="btn sm" id="newtk">+ New request</button></div>
+        <div class="card">${rows.map(t => `<div class="row rowlink" data-id="${t.id}" style="cursor:pointer">
+          <div class="g"><div><b>${esc(t.number)}</b> · ${esc(t.subject)}</div><div class="small muted">Updated ${esc(t.updated_at)}${t.last_from ? ' · last: ' + esc(t.last_from) : ''}</div></div>
+          ${statusPill(t.status)}</div>`).join('') || '<div class="row muted">No support requests yet.</div>'}</div>`;
+      $('#newtk').onclick = () => { TK_VIEW = { mode: 'new' }; renderTab(); };
+      body.querySelectorAll('.rowlink').forEach(r => r.onclick = () => { TK_VIEW = { mode: 'thread', id: r.dataset.id }; renderTab(); });
+    }
+    function supportNew(body) {
+      body.innerHTML = `<div class="card"><h2>New support request</h2>
+        <label>Subject</label><input id="tksub" placeholder="Brief summary"/>
+        <label>Priority</label><select id="tkprio" style="width:100%;padding:11px 12px;border-radius:9px;border:1px solid var(--line);background:var(--card2);color:var(--text);font-size:15px">
+          <option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select>
+        <label>Describe the issue</label><textarea id="tkbody" rows="5" style="width:100%;padding:11px 12px;border-radius:9px;border:1px solid var(--line);background:var(--card2);color:var(--text);font-size:15px;font-family:inherit"></textarea>
+        <div class="err" id="tkerr"></div>
+        <div style="display:flex;gap:8px;margin-top:14px"><button class="btn ghost sm" id="tkcancel">Cancel</button><button class="btn" id="tksend">Submit</button></div></div>`;
+      $('#tkcancel').onclick = () => { TK_VIEW = { mode: 'list' }; renderTab(); };
+      $('#tksend').onclick = async () => {
+        const subject = $('#tksub').value.trim(), bodyv = $('#tkbody').value.trim();
+        if (!subject || !bodyv) { $('#tkerr').textContent = 'Subject and description are required.'; return; }
+        try {
+          const r = await fetch('/portal/api/tickets', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ subject, body: bodyv, priority: $('#tkprio').value }) });
+          const j = await r.json(); if (!r.ok) throw new Error(j.error || 'Could not submit');
+          TK_VIEW = { mode: 'thread', id: j.id }; renderTab();
+        } catch (e) { $('#tkerr').textContent = e.message; }
+      };
+    }
+    async function supportThread(body, id) {
+      const t = await (await fetch('/portal/api/tickets/' + id)).json();
+      const msgs = (t.messages || []).map(m => `<div class="card" style="padding:12px 14px;margin-bottom:10px;${m.author_type === 'staff' ? 'border-left:3px solid var(--accent)' : ''}">
+        <div class="small muted" style="margin-bottom:4px"><b>${m.author_type === 'staff' ? esc(ME.company + ' Support') : 'You'}</b> · ${esc(m.created_at)}</div>
+        <div style="white-space:pre-wrap">${esc(m.body)}</div></div>`).join('');
+      const closed = ['resolved', 'closed'].includes(t.status);
+      body.innerHTML = `<div style="margin-bottom:12px"><a class="link" href="#" id="tkback">← Back to requests</a></div>
+        <div class="card"><div style="display:flex;align-items:center;gap:10px"><h2 style="flex:1;margin:0">${esc(t.number)} · ${esc(t.subject)}</h2>${statusPill(t.status)}</div></div>
+        ${msgs}
+        <div class="card"><label style="margin-top:0">${closed ? 'Reply (reopens this request)' : 'Add a reply'}</label>
+          <textarea id="tkreply" rows="3" style="width:100%;padding:11px 12px;border-radius:9px;border:1px solid var(--line);background:var(--card2);color:var(--text);font-size:15px;font-family:inherit"></textarea>
+          <div class="err" id="tkrerr"></div>
+          <div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn" id="tkrsend">Send reply</button></div></div>`;
+      $('#tkback').onclick = (e) => { e.preventDefault(); TK_VIEW = { mode: 'list' }; renderTab(); };
+      $('#tkrsend').onclick = async () => {
+        const bodyv = $('#tkreply').value.trim(); if (!bodyv) { $('#tkrerr').textContent = 'Enter a reply.'; return; }
+        try {
+          const r = await fetch('/portal/api/tickets/' + id + '/reply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ body: bodyv }) });
+          const j = await r.json(); if (!r.ok) throw new Error(j.error || 'Could not send'); supportThread(body, id);
+        } catch (e) { $('#tkrerr').textContent = e.message; }
+      };
+    }
     function statusPill(s) {
-      const cls = { paid: 'up', accepted: 'up', active: 'up', sent: 'warn', partial: 'warn', draft: '', overdue: 'down', declined: 'down', void: 'down', expired: 'down' }[s] || '';
-      return `<span class="pill ${cls}">${esc(s ? s[0].toUpperCase() + s.slice(1) : '')}</span>`;
+      const cls = { paid: 'up', accepted: 'up', active: 'up', resolved: 'up', sent: 'warn', partial: 'warn', open: 'warn', in_progress: 'warn', draft: '', waiting: '', closed: '', overdue: 'down', declined: 'down', void: 'down', expired: 'down' }[s] || '';
+      return `<span class="pill ${cls}">${esc(s ? s[0].toUpperCase() + s.slice(1).replace('_', ' ') : '')}</span>`;
     }
     boot();
   </script>
