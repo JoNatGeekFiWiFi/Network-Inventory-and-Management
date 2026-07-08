@@ -135,6 +135,24 @@ export function migrate() {
   db.exec('CREATE INDEX IF NOT EXISTS idx_tickets ON tickets(customer_id, status)');
   db.exec("CREATE TABLE IF NOT EXISTS ticket_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL, author_type TEXT NOT NULL, author TEXT, body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
   db.exec('CREATE INDEX IF NOT EXISTS idx_ticketmsg ON ticket_messages(ticket_id)');
+  // Omnichannel tickets: every message carries a channel + direction so email/SMS/WhatsApp all thread into one ticket
+  ensure('ticket_messages', 'channel', "TEXT NOT NULL DEFAULT 'portal'");   // portal|email|sms|whatsapp|note
+  ensure('ticket_messages', 'direction', "TEXT NOT NULL DEFAULT 'out'");    // in|out
+  ensure('ticket_messages', 'external_id', 'TEXT');                          // provider msg id / email Message-ID (dedupe)
+  ensure('ticket_messages', 'delivery_status', 'TEXT');                      // queued|sent|delivered|failed
+  ensure('ticket_messages', 'to_addr', 'TEXT');
+  ensure('ticket_messages', 'from_addr', 'TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_ticketmsg_ext ON ticket_messages(external_id)');
+  ensure('tickets', 'channel', "TEXT NOT NULL DEFAULT 'portal'");            // origin channel
+  ensure('tickets', 'last_channel', 'TEXT');                                 // channel of the most recent inbound
+  ensure('tickets', 'contact_email', 'TEXT');
+  ensure('tickets', 'contact_phone', 'TEXT');
+  ensure('tickets', 'reply_token', 'TEXT');                                  // opaque token woven into email Reply-To for threading
+  db.exec('CREATE INDEX IF NOT EXISTS idx_tickets_reply ON tickets(reply_token)');
+  // Customer contact points for outbound SMS/WhatsApp + inbound number->customer matching
+  ensure('customers', 'sms_number', 'TEXT');
+  ensure('customers', 'whatsapp_number', 'TEXT');
+  ensure('customers', 'preferred_channel', 'TEXT');                          // email|sms|whatsapp (fallback for staff-initiated)
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

@@ -669,6 +669,9 @@ async function formCust(q) {
         <div class="help">A customer can be served by more than one account. Pick all that apply.</div></div>
       ${field('Status', 'status', c.status, { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}
       ${field('Billing email (invoices + portal login)', 'billing_email', c.billing_email || '', { mono: true, ph: 'billing@customer.com' })}
+      <div class="grid2">${field('SMS number', 'sms_number', c.sms_number || '', { mono: true, ph: '+15551234567' })}${field('WhatsApp number', 'whatsapp_number', c.whatsapp_number || '', { mono: true, ph: '+15551234567' })}</div>
+      <div class="help">Used to send &amp; receive ticket messages by text. Include the country code (E.164).</div>
+      ${field('Preferred channel (staff-started messages)', 'preferred_channel', c.preferred_channel || '', { type: 'select', options: [{ v: '', l: 'Auto (reply on their channel)' }, { v: 'email', l: 'Email' }, { v: 'sms', l: 'SMS' }, { v: 'whatsapp', l: 'WhatsApp' }] })}
       ${field('Notes', 'notes', c.notes, { type: 'textarea' })}
       ${q.id ? `<div class="fld" style="border-top:.5px solid var(--border);padding-top:12px;margin-top:6px">
         <label class="row" style="cursor:pointer;padding:0"><input type="checkbox" id="portalEnabled" ${c.portal_enabled ? 'checked' : ''} style="width:auto"/>
@@ -1667,6 +1670,32 @@ async function renderSettings() {
         <button class="btn" onclick="sendTestMail()"><i class="ti ti-send"></i> Send test</button></div>
       <div class="help">New site-access requests email the "notify" address; approving/denying a request emails the requester. Requires a working SMTP server + From address. Save before sending a test.</div>
     </div>
+    <div class="card" style="padding:16px" id="messaging">
+      <h2 style="margin-bottom:12px"><i class="ti ti-messages"></i> Ticket messaging (SMS · WhatsApp · inbound email)</h2>
+      <div class="small sec-muted" style="margin:-6px 0 12px">Two-way ticket messaging. Outbound email uses the SMTP settings above; configure SMS/WhatsApp providers and inbound email here.</div>
+      <div class="grid2">${field('SMS provider', 'sms_provider', s.sms_provider, { type: 'select', options: [{ v: 'twilio', l: 'Twilio' }, { v: 'telnyx', l: 'Telnyx' }] })}${field('WhatsApp provider', 'whatsapp_provider', s.whatsapp_provider, { type: 'select', options: [{ v: 'twilio', l: 'Twilio' }, { v: 'telnyx', l: 'Telnyx' }] })}</div>
+      <div style="border-top:.5px solid var(--border);margin:10px 0;padding-top:10px"><b class="small">Twilio</b></div>
+      ${field('Account SID', 'twilio_sid', s.twilio_sid, { mono: true, ph: 'ACxxxx…' })}
+      ${field('Auth token', 'twilio_token', '', { mono: true, ph: s.has_twilio_token ? 'unchanged' : 'Twilio auth token' })}
+      <div class="grid2">${field('SMS from number', 'twilio_sms_from', s.twilio_sms_from, { mono: true, ph: '+1555…' })}${field('WhatsApp sender', 'twilio_wa_from', s.twilio_wa_from, { mono: true, ph: '+1555… (WA-enabled)' })}</div>
+      <div style="border-top:.5px solid var(--border);margin:10px 0;padding-top:10px"><b class="small">Telnyx</b></div>
+      ${field('API key', 'telnyx_key', '', { mono: true, ph: s.has_telnyx_key ? 'unchanged' : 'KEYxxxx…' })}
+      <div class="grid2">${field('SMS from number', 'telnyx_sms_from', s.telnyx_sms_from, { mono: true, ph: '+1555…' })}${field('WhatsApp sender', 'telnyx_wa_from', s.telnyx_wa_from, { mono: true, ph: '+1555…' })}</div>
+      ${field('Messaging profile ID (optional)', 'telnyx_profile', s.telnyx_profile, { mono: true })}
+      <div style="border-top:.5px solid var(--border);margin:10px 0;padding-top:10px"><b class="small">Inbound email</b></div>
+      ${field('Receive replies via', 'email_inbound_method', s.email_inbound_method, { type: 'select', options: [{ v: 'imap', l: 'IMAP mailbox polling' }, { v: 'webhook', l: 'Provider webhook (Mailgun/Postmark/SendGrid)' }] })}
+      <div class="grid2">${field('IMAP host', 'imap_host', s.imap_host, { mono: true, ph: 'imap.gmail.com' })}${field('IMAP port', 'imap_port', s.imap_port, { mono: true, ph: '993' })}</div>
+      <div class="grid2">${field('IMAP username', 'imap_user', s.imap_user, { mono: true, ph: 'support@geekitek.com' })}${field('IMAP password', 'imap_pass', '', { mono: true, ph: s.has_imap_pass ? 'unchanged' : 'mailbox / app password' })}</div>
+      <label class="row" style="cursor:pointer;padding:6px 0"><input type="checkbox" id="imapTls" ${s.imap_tls ? 'checked' : ''} style="width:auto"/>
+        <div style="flex:1"><div>Use TLS (port 993)</div><div class="small sec-muted">The mailbox is polled about once a minute for unseen mail.</div></div></label>
+      <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" onclick="saveMessaging()"><i class="ti ti-check"></i> Save</button></div>
+      <div class="box" style="margin-top:12px"><div class="small" style="margin-bottom:6px"><b>Inbound webhook URLs</b> — paste these into your provider consoles${s.inbound_secret ? '' : ' (save once to generate the secret)'}:</div>
+        ${s.inbound_secret && s.public_base_url_effective ? `
+        <div class="fld"><label class="fl">Twilio (SMS + WhatsApp)</label><input readonly value="${esc(s.public_base_url_effective + '/inbound/twilio/' + s.inbound_secret)}" style="font-family:var(--mono);background:var(--surface2)"/></div>
+        <div class="fld"><label class="fl">Telnyx (SMS + WhatsApp)</label><input readonly value="${esc(s.public_base_url_effective + '/inbound/telnyx/' + s.inbound_secret)}" style="font-family:var(--mono);background:var(--surface2)"/></div>
+        <div class="fld"><label class="fl">Email (Mailgun / Postmark / SendGrid parse)</label><input readonly value="${esc(s.public_base_url_effective + '/inbound/email/' + s.inbound_secret)}" style="font-family:var(--mono);background:var(--surface2)"/></div>` : '<div class="small sec-muted">Set the Public server URL (in Zero-touch provisioning) and save this section to generate your webhook URLs.</div>'}
+        <div class="help">For email replies to thread automatically, keep the <span class="mono">[TKT-####]</span> subject tag and the <span class="mono">Reply-To</span> address intact (both are set on outgoing mail). IMAP polling needs no webhooks — just the mailbox login above.</div></div>
+    </div>
     <div class="card" style="padding:16px" id="accesscfg">
       <h2 style="margin-bottom:12px"><i class="ti ti-id-badge-2"></i> Site access</h2>
       ${field('Auto check-out time (HH:MM, blank = off)', 'auto_checkout_at', s.auto_checkout_at, { mono: true, ph: 'e.g. 18:00' })}
@@ -1712,6 +1741,12 @@ async function saveMail() {
   if (!d.smtp_pass) delete d.smtp_pass;
   delete d.mailTestTo;
   try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
+}
+async function saveMessaging() {
+  const d = collect('#messaging');
+  d.imap_tls = $('#imapTls').checked;
+  for (const k of ['twilio_token', 'telnyx_key', 'imap_pass']) if (!d[k]) delete d[k]; // blank = keep existing secret
+  try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Messaging settings saved'); renderSettings(); } catch (e) { toast(e.message); }
 }
 async function saveAccessCfg() {
   const d = collect('#accesscfg');
@@ -2102,6 +2137,8 @@ async function showWg(id) {
 // ---------- Support / trouble tickets ----------
 const TICKET_PILL = { open: 's-warn', in_progress: 's-warn', waiting: '', resolved: 's-up', closed: '' };
 const TICKET_PRIO_COL = { low: 'var(--muted)', normal: 'var(--text2)', high: 'var(--warning)', urgent: 'var(--danger)' };
+const CHAN = { portal: { i: 'ti-browser', l: 'Portal' }, email: { i: 'ti-mail', l: 'Email' }, sms: { i: 'ti-message', l: 'SMS' }, whatsapp: { i: 'ti-brand-whatsapp', l: 'WhatsApp' }, note: { i: 'ti-note', l: 'Note' } };
+function chanBadge(ch) { const c = CHAN[ch] || CHAN.portal; return `<span class="pill" style="padding:1px 8px;font-size:11px"><i class="ti ${c.i}"></i> ${c.l}</span>`; }
 function ticketPill(s) { return `<span class="pill ${TICKET_PILL[s] || ''}">${esc((s || '').replace('_', ' '))}</span>`; }
 async function renderTickets() {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
@@ -2135,22 +2172,34 @@ async function renderTicket(id) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
   const [t, staff] = await Promise.all([api('/tickets/' + id), api('/staff').catch(() => [])]);
   const msgs = t.messages.map(m => `<div class="card" style="margin-bottom:10px;padding:12px 14px;${m.author_type === 'staff' ? 'border-left:3px solid var(--accent)' : ''}">
-    <div class="small sec-muted" style="margin-bottom:4px"><b>${m.author_type === 'staff' ? 'Staff' : 'Customer'}</b>${m.author ? ' · ' + esc(m.author) : ''} · ${esc(m.created_at)}</div>
-    <div style="white-space:pre-wrap">${esc(m.body)}</div></div>`).join('') || '<div class="card" style="padding:12px 14px" class="muted">No messages</div>';
+    <div class="small sec-muted" style="margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><b>${m.author_type === 'staff' ? 'Staff' : 'Customer'}</b>${m.author ? '· ' + esc(m.author) : ''} · ${esc(m.created_at)} ${chanBadge(m.channel)}<span class="small sec-muted">${m.direction === 'in' ? '↓ in' : '↑ out'}</span>${m.delivery_status === 'failed' ? '<span class="pill s-down" style="padding:1px 8px;font-size:11px">delivery failed</span>' : ''}</div>
+    <div style="white-space:pre-wrap">${esc(m.body)}</div></div>`).join('') || '<div class="card muted" style="padding:12px 14px">No messages</div>';
+  // default the reply channel to the customer's last-used channel (portal has no external delivery)
+  const dflt = t.last_channel || t.channel || 'portal';
+  const chOpts = ['portal', 'email', 'sms', 'whatsapp'].map(c => `<option value="${c}" ${c === dflt ? 'selected' : ''}>${CHAN[c].l}</option>`).join('');
+  const contact = [t.contact_email, t.contact_phone].filter(Boolean).join(' · ');
   view().innerHTML = `<div class="crumb" onclick="location.hash='#/tickets'"><i class="ti ti-chevron-left"></i> Support</div>
-    <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(t.number)}</h1>${ticketPill(t.status)}</div>
-      <div class="small sec-muted" style="margin-top:3px">${esc(t.subject)} · ${esc(t.customer_name || '')}${t.site_name ? ' · ' + esc(t.site_name) : ''} · opened ${esc(t.created_at)} by ${esc(t.opened_by)}</div></div></div>
+    <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(t.number)}</h1>${ticketPill(t.status)}${chanBadge(t.channel)}</div>
+      <div class="small sec-muted" style="margin-top:3px">${esc(t.subject)} · ${esc(t.customer_name || '')}${t.site_name ? ' · ' + esc(t.site_name) : ''} · opened ${esc(t.created_at)} by ${esc(t.opened_by)}${contact ? ' · ' + esc(contact) : ''}</div></div></div>
     <div class="card" style="padding:14px;margin:14px 0" id="tkctl"><div class="grid3">
       <div class="fld"><label class="fl">Status</label><select name="status">${['open', 'in_progress', 'waiting', 'resolved', 'closed'].map(s => `<option value="${s}" ${t.status === s ? 'selected' : ''}>${s.replace('_', ' ')}</option>`).join('')}</select></div>
       <div class="fld"><label class="fl">Priority</label><select name="priority">${['low', 'normal', 'high', 'urgent'].map(s => `<option value="${s}" ${t.priority === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
       <div class="fld"><label class="fl">Assigned to</label><select name="assigned_to"><option value="">Unassigned</option>${staff.map(u => `<option value="${esc(u.email)}" ${t.assigned_to === u.email ? 'selected' : ''}>${esc(u.name || u.email)}</option>`).join('')}</select></div></div>
       <div style="display:flex;justify-content:flex-end"><button class="btn sm" onclick="saveTicketCtl(${t.id})"><i class="ti ti-check"></i> Update</button></div></div>
     ${msgs}
-    <div class="box"><textarea id="tkreply" rows="3" placeholder="Reply to the customer (emailed to their billing address)…"></textarea>
-      <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn primary" onclick="replyTicket(${t.id})"><i class="ti ti-send"></i> Send reply</button></div></div>`;
+    <div class="box"><textarea id="tkreply" rows="3" placeholder="Reply to the customer…"></textarea>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap"><label class="fl" style="margin:0">Send via</label>
+        <select id="tkchan" style="width:auto">${chOpts}</select>
+        <span class="small sec-muted" style="flex:1">Portal-only messages show in the customer portal; email/SMS/WhatsApp are delivered to their contact info.</span>
+        <button class="btn primary" onclick="replyTicket(${t.id})"><i class="ti ti-send"></i> Send reply</button></div></div>`;
 }
 async function saveTicketCtl(id) { const d = collect('#tkctl'); try { await api('/tickets/' + id, { method: 'PUT', body: JSON.stringify(d) }); toast('Updated'); renderTicket(id); } catch (e) { toast(e.message); } }
-async function replyTicket(id) { const body = $('#tkreply').value.trim(); if (!body) { toast('Enter a reply'); return; } try { await api('/tickets/' + id + '/reply', { method: 'POST', body: JSON.stringify({ body }) }); toast('Reply sent'); renderTicket(id); } catch (e) { toast(e.message); } }
+async function replyTicket(id) {
+  const body = $('#tkreply').value.trim(); if (!body) { toast('Enter a reply'); return; }
+  const channel = $('#tkchan') ? $('#tkchan').value : undefined;
+  try { const r = await api('/tickets/' + id + '/reply', { method: 'POST', body: JSON.stringify({ body, channel }) }); toast(r.delivered === false ? ('Saved, but ' + channel + ' delivery failed: ' + (r.error || '')) : 'Reply sent'); renderTicket(id); }
+  catch (e) { toast(e.message); }
+}
 async function formTicket() {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
   const custs = await api('/customers');

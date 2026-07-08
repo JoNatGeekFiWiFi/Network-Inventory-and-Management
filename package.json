@@ -9,9 +9,13 @@
     "seed": "node db.js --seed",
     "reset": "node db.js --reset"
   },
-  "engines": { "node": ">=22.5" },
+  "engines": {
+    "node": ">=22.5"
+  },
   "dependencies": {
     "express": "^4.19.2",
+    "imapflow": "^1.4.6",
+    "mailparser": "^3.9.14",
     "nodemailer": "^6.9.14"
   }
 }

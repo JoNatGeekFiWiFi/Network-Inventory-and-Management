@@ -119,7 +119,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 // Stripe webhook needs the RAW body for signature verification, so it registers before the JSON parser
 app.post('/stripe/webhook', express.raw({ type: '*/*', limit: '1mb' }), (req, res) => stripeWebhook(req, res));
+// Telnyx signs the RAW request body (Ed25519), so it too must precede the JSON parser
+app.post('/inbound/telnyx/:secret', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => inboundTelnyx(req, res));
 app.use(express.json({ limit: '60mb' })); // raised so base64 note attachments + .npk package uploads fit
+app.use(express.urlencoded({ extended: false, limit: '10mb' })); // Twilio + Mailgun inbound post form-encoded
 
 // First-run: create schema + seed if empty
 initSchema();
@@ -241,17 +244,78 @@ app.delete('/api/models/:id', requireNoc, (req, res) => {
 const getSetting = (k) => { const r = db.prepare('SELECT value FROM settings WHERE key=?').get(k); return r ? r.value : null; };
 const setSetting = (k, v) => db.prepare('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, v == null ? '' : v);
 // Send email via the configured SMTP server (no-op if not configured). Never throws to the caller.
-async function sendMail({ to, subject, text, html }) {
+async function sendMail({ to, subject, text, html, replyTo, headers }) {
   const host = getSetting('smtp_host'), from = getSetting('mail_from');
   if (!host || !from || !to) return false;
   const tx = nodemailer.createTransport({
     host, port: parseInt(getSetting('smtp_port'), 10) || 587, secure: getSetting('smtp_secure') === '1',
     auth: getSetting('smtp_user') ? { user: getSetting('smtp_user'), pass: getSetting('smtp_pass') || '' } : undefined
   });
-  await tx.sendMail({ from, to, subject, text, html });
-  return true;
+  const info = await tx.sendMail({ from, to, subject, text, html, replyTo, headers });
+  return info && info.messageId ? info.messageId : true;
 }
 const mailSafe = (opts) => { sendMail(opts).catch(e => console.warn('email send failed:', e.message)); };
+
+// ---------- Omnichannel messaging (email / SMS / WhatsApp via Twilio or Telnyx) ----------
+const normPhone = (s) => { s = String(s || '').trim(); if (!s) return ''; const p = s.replace(/[^\d+]/g, ''); return p.startsWith('+') ? p : (p ? '+' + p : ''); };
+// email Reply-To woven with a per-ticket token: support+<token>@domain  (so inbound replies thread back)
+function emailReplyTo(token) {
+  const from = (getSetting('mail_from') || '').trim(); const m = from.match(/<([^>]+)>/); const addr = m ? m[1] : from;
+  const at = addr.indexOf('@'); if (at < 0 || !token) return addr || '';
+  return addr.slice(0, at) + '+' + token + addr.slice(at);
+}
+// --- provider REST calls (no SDK; plain fetch) ---
+async function twilioSendMessage({ to, from, body, whatsapp }) {
+  const sid = getSetting('twilio_sid'), tok = getSetting('twilio_token');
+  if (!sid || !tok) return { ok: false, error: 'Twilio not configured' };
+  const f = whatsapp ? ('whatsapp:' + from) : from, t = whatsapp ? ('whatsapp:' + to) : to;
+  const params = new URLSearchParams({ To: t, From: f, Body: body });
+  const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
+    method: 'POST', headers: { Authorization: 'Basic ' + Buffer.from(sid + ':' + tok).toString('base64'), 'Content-Type': 'application/x-www-form-urlencoded' }, body: params
+  });
+  const j = await r.json().catch(() => ({}));
+  return r.ok ? { ok: true, id: j.sid } : { ok: false, error: j.message || ('Twilio HTTP ' + r.status) };
+}
+async function telnyxSendMessage({ to, from, body, whatsapp }) {
+  const key = getSetting('telnyx_key'); if (!key) return { ok: false, error: 'Telnyx not configured' };
+  const payload = { to, from, text: body };
+  if (whatsapp) payload.type = 'whatsapp';
+  const prof = getSetting('telnyx_profile'); if (prof) payload.messaging_profile_id = prof;
+  const r = await fetch('https://api.telnyx.com/v2/messages', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+  });
+  const j = await r.json().catch(() => ({}));
+  return r.ok ? { ok: true, id: j.data && j.data.id } : { ok: false, error: (j.errors && j.errors[0] && j.errors[0].detail) || ('Telnyx HTTP ' + r.status) };
+}
+async function sendSms(to, body) {
+  const prov = getSetting('sms_provider') || 'twilio';
+  const from = prov === 'telnyx' ? getSetting('telnyx_sms_from') : getSetting('twilio_sms_from');
+  if (!from) return { ok: false, error: 'No SMS sender number configured' };
+  return prov === 'telnyx' ? telnyxSendMessage({ to, from, body }) : twilioSendMessage({ to, from, body });
+}
+async function sendWhatsApp(to, body) {
+  const prov = getSetting('whatsapp_provider') || 'twilio';
+  const from = prov === 'telnyx' ? getSetting('telnyx_wa_from') : getSetting('twilio_wa_from');
+  if (!from) return { ok: false, error: 'No WhatsApp sender configured' };
+  return prov === 'telnyx' ? telnyxSendMessage({ to, from, body, whatsapp: true }) : twilioSendMessage({ to, from, body, whatsapp: true });
+}
+// Dispatch one outbound message on a given channel. Returns {ok, external_id, to, error}.
+async function deliverOnChannel(t, channel, body) {
+  const cust = db.prepare('SELECT billing_email, sms_number, whatsapp_number FROM customers WHERE id=?').get(t.customer_id) || {};
+  if (channel === 'email') {
+    const to = t.contact_email || cust.billing_email; if (!to) return { ok: false, error: 'No email on file', to: null };
+    const pub = pubBase(); const rt = emailReplyTo(t.reply_token);
+    const mid = await sendMail({ to, subject: `[${t.number}] ${t.subject}`, text: `${body}\n\nView your ticket: ${pub}/portal`, html: `<p>${nl2br(body)}</p><p style="color:#888;font-size:12px">Reply to this email to continue the conversation, or view it in the <a href="${pub}/portal">customer portal</a>.</p>`, replyTo: rt || undefined }).catch(e => ({ err: e.message }));
+    return mid && !mid.err ? { ok: true, external_id: typeof mid === 'string' ? mid : null, to } : { ok: false, error: (mid && mid.err) || 'send failed', to };
+  }
+  if (channel === 'sms' || channel === 'whatsapp') {
+    const to = normPhone(t.contact_phone || (channel === 'sms' ? cust.sms_number : cust.whatsapp_number) || cust.sms_number || cust.whatsapp_number);
+    if (!to) return { ok: false, error: 'No phone number on file', to: null };
+    const r = channel === 'sms' ? await sendSms(to, body) : await sendWhatsApp(to, body);
+    return { ok: r.ok, external_id: r.id || null, error: r.error, to };
+  }
+  return { ok: true, to: null }; // portal/note: nothing to send externally
+}
 
 app.get('/api/settings', requireNoc, (req, res) => {
   res.json({
@@ -285,7 +349,26 @@ app.get('/api/settings', requireNoc, (req, res) => {
     bill_prefix: getSetting('bill_prefix') || 'INV-',
     bill_next: getSetting('bill_next') || '1001',
     quote_prefix: getSetting('quote_prefix') || 'QUO-',
-    quote_next: getSetting('quote_next') || '1001'
+    quote_next: getSetting('quote_next') || '1001',
+    // omnichannel messaging
+    sms_provider: getSetting('sms_provider') || 'twilio',
+    whatsapp_provider: getSetting('whatsapp_provider') || 'twilio',
+    twilio_sid: getSetting('twilio_sid') || '',
+    twilio_sms_from: getSetting('twilio_sms_from') || '',
+    twilio_wa_from: getSetting('twilio_wa_from') || '',
+    has_twilio_token: !!getSetting('twilio_token'),
+    telnyx_sms_from: getSetting('telnyx_sms_from') || '',
+    telnyx_wa_from: getSetting('telnyx_wa_from') || '',
+    telnyx_profile: getSetting('telnyx_profile') || '',
+    has_telnyx_key: !!getSetting('telnyx_key'),
+    email_inbound_method: getSetting('email_inbound_method') || 'imap',
+    imap_host: getSetting('imap_host') || '',
+    imap_port: getSetting('imap_port') || '993',
+    imap_user: getSetting('imap_user') || '',
+    imap_tls: getSetting('imap_tls') !== '0',
+    has_imap_pass: !!getSetting('imap_pass'),
+    inbound_secret: getSetting('inbound_secret') || '',
+    public_base_url_effective: pubBase()
   });
 });
 app.put('/api/settings', requireNoc, (req, res) => {
@@ -305,6 +388,16 @@ app.put('/api/settings', requireNoc, (req, res) => {
   if (b.allow_auto_enroll !== undefined) setSetting('allow_auto_enroll', b.allow_auto_enroll ? '1' : '0');
   if (b.prov_admin_password) setSetting('prov_admin_password', String(b.prov_admin_password));
   if (b.prov_wifi_password) setSetting('prov_wifi_password', String(b.prov_wifi_password));
+  // omnichannel messaging config
+  for (const k of ['twilio_sid', 'twilio_sms_from', 'twilio_wa_from', 'telnyx_sms_from', 'telnyx_wa_from', 'telnyx_profile', 'imap_host', 'imap_port', 'imap_user']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  if (b.sms_provider !== undefined) setSetting('sms_provider', b.sms_provider === 'telnyx' ? 'telnyx' : 'twilio');
+  if (b.whatsapp_provider !== undefined) setSetting('whatsapp_provider', b.whatsapp_provider === 'telnyx' ? 'telnyx' : 'twilio');
+  if (b.email_inbound_method !== undefined) setSetting('email_inbound_method', b.email_inbound_method === 'webhook' ? 'webhook' : 'imap');
+  if (b.imap_tls !== undefined) setSetting('imap_tls', b.imap_tls ? '1' : '0');
+  if (b.twilio_token) setSetting('twilio_token', String(b.twilio_token).trim());
+  if (b.telnyx_key) setSetting('telnyx_key', String(b.telnyx_key).trim());
+  if (b.imap_pass) setSetting('imap_pass', String(b.imap_pass));
+  if (!getSetting('inbound_secret')) setSetting('inbound_secret', randomUUID().replace(/-/g, '')); // path-gate secret for inbound webhooks
   if (!getSetting('provision_token')) setSetting('provision_token', randomUUID().replace(/-/g, '')); // shared secret for phone-home restore
   if (!getSetting('wg_server_priv')) { const kp = wgKeypair(); setSetting('wg_server_priv', kp.privateKey); setSetting('wg_server_pub', kp.publicKey); }
   audit(req, 'edit', 'settings', 'overlay settings');
@@ -1500,7 +1593,8 @@ app.post('/api/customers', requireNoc, (req, res) => {
   const ids = accountIdsFrom(b);
   if (!ids.length) return res.status(400).json({ error: 'Pick at least one account' });
   if (!b.name) return res.status(400).json({ error: 'Customer name required' });
-  const info = db.prepare('INSERT INTO customers (account_id,name,status,notes,billing_email) VALUES (?,?,?,?,?)').run(ids[0], N(b.name), b.status || 'Active', N(b.notes), N(b.billing_email));
+  const info = db.prepare('INSERT INTO customers (account_id,name,status,notes,billing_email,sms_number,whatsapp_number,preferred_channel) VALUES (?,?,?,?,?,?,?,?)')
+    .run(ids[0], N(b.name), b.status || 'Active', N(b.notes), N(b.billing_email), N(normPhone(b.sms_number) || null), N(normPhone(b.whatsapp_number) || null), N(['email', 'sms', 'whatsapp'].includes(b.preferred_channel) ? b.preferred_channel : null));
   setCustomerAccounts(info.lastInsertRowid, ids);
   audit(req, 'create', 'customer#' + info.lastInsertRowid, b.name);
   res.json({ id: info.lastInsertRowid });
@@ -1510,6 +1604,9 @@ app.put('/api/customers/:id', requireNoc, (req, res) => {
   const ex = db.prepare('SELECT * FROM customers WHERE id=?').get(req.params.id);
   if (!ex) return res.status(404).json({ error: 'not found' });
   db.prepare('UPDATE customers SET name=?, status=?, notes=?, billing_email=? WHERE id=?').run(N(b.name, ex.name), N(b.status, ex.status), N(b.notes), N(b.billing_email, ex.billing_email), req.params.id);
+  if (b.sms_number !== undefined) db.prepare('UPDATE customers SET sms_number=? WHERE id=?').run(normPhone(b.sms_number) || null, req.params.id);
+  if (b.whatsapp_number !== undefined) db.prepare('UPDATE customers SET whatsapp_number=? WHERE id=?').run(normPhone(b.whatsapp_number) || null, req.params.id);
+  if (b.preferred_channel !== undefined) db.prepare('UPDATE customers SET preferred_channel=? WHERE id=?').run(['email', 'sms', 'whatsapp'].includes(b.preferred_channel) ? b.preferred_channel : null, req.params.id);
   if (b.account_ids !== undefined || b.account_id !== undefined) {
     const ids = accountIdsFrom(b);
     if (!ids.length) return res.status(400).json({ error: 'A customer must have at least one account' });
@@ -2607,12 +2704,22 @@ const TICKET_STATUS = ['open', 'in_progress', 'waiting', 'resolved', 'closed'];
 const TICKET_PRIO = ['low', 'normal', 'high', 'urgent'];
 const nl2br = s => esc2(s).replace(/\n/g, '<br>');
 function ticketNotify(subject, text, html) { const to = getSetting('access_notify_email') || getSetting('mail_from'); if (to) mailSafe({ to, subject, text, html }); }
-function createTicket({ customer_id, site_id, subject, body, priority, opened_by, author }) {
-  const info = db.prepare("INSERT INTO tickets (customer_id,site_id,subject,priority,opened_by) VALUES (?,?,?,?,?)")
-    .run(customer_id, N(site_id), subject, TICKET_PRIO.includes(priority) ? priority : 'normal', opened_by || 'customer');
+const TICKET_CHANNELS = ['portal', 'email', 'sms', 'whatsapp', 'note'];
+function appendMessage(ticketId, { author_type, author, body, channel, direction, external_id, to_addr, from_addr, delivery_status }) {
+  return db.prepare("INSERT INTO ticket_messages (ticket_id,author_type,author,body,channel,direction,external_id,to_addr,from_addr,delivery_status) VALUES (?,?,?,?,?,?,?,?,?,?)")
+    .run(ticketId, author_type, author || '', body, TICKET_CHANNELS.includes(channel) ? channel : 'portal', direction === 'in' ? 'in' : 'out', N(external_id), N(to_addr), N(from_addr), N(delivery_status)).lastInsertRowid;
+}
+function createTicket({ customer_id, site_id, subject, body, priority, opened_by, author, channel, contact_email, contact_phone }) {
+  const cust = db.prepare('SELECT billing_email, sms_number, whatsapp_number FROM customers WHERE id=?').get(customer_id) || {};
+  const ch = TICKET_CHANNELS.includes(channel) ? channel : 'portal';
+  const email = contact_email || cust.billing_email || null;
+  const phone = normPhone(contact_phone || cust.sms_number || cust.whatsapp_number || '') || null;
+  const token = randomUUID().replace(/-/g, '');
+  const info = db.prepare("INSERT INTO tickets (customer_id,site_id,subject,priority,opened_by,channel,last_channel,contact_email,contact_phone,reply_token) VALUES (?,?,?,?,?,?,?,?,?,?)")
+    .run(customer_id, N(site_id), subject, TICKET_PRIO.includes(priority) ? priority : 'normal', opened_by || 'customer', ch, ch, email, phone, token);
   const id = info.lastInsertRowid;
   db.prepare('UPDATE tickets SET number=? WHERE id=?').run('TKT-' + (1000 + id), id);
-  if (body) db.prepare("INSERT INTO ticket_messages (ticket_id,author_type,author,body) VALUES (?,?,?,?)").run(id, opened_by || 'customer', author || '', body);
+  if (body) appendMessage(id, { author_type: opened_by || 'customer', author, body, channel: ch, direction: opened_by === 'staff' ? 'out' : 'in' });
   return id;
 }
 function loadTicket(id) {
@@ -2650,15 +2757,18 @@ app.post('/api/tickets', requireNoc, (req, res) => {
   audit(req, 'create', 'ticket#' + id, num + ' ' + b.subject);
   res.json({ id, number: num });
 });
-app.post('/api/tickets/:id/reply', requireNoc, (req, res) => {
+app.post('/api/tickets/:id/reply', requireNoc, async (req, res) => {
   const t = db.prepare('SELECT * FROM tickets WHERE id=?').get(req.params.id); if (!t) return res.status(404).json({ error: 'not found' });
   const body = String((req.body || {}).body || '').trim(); if (!body) return res.status(400).json({ error: 'Enter a reply' });
-  db.prepare("INSERT INTO ticket_messages (ticket_id,author_type,author,body) VALUES (?,?,?,?)").run(t.id, 'staff', (req.user && req.user.email) || '', body);
+  // reply goes out on the customer's channel (last inbound), overridable by the agent
+  let channel = String((req.body || {}).channel || '').trim();
+  if (!TICKET_CHANNELS.includes(channel)) channel = t.last_channel || t.channel || 'portal';
+  let deliv = { ok: true, to: null };
+  if (['email', 'sms', 'whatsapp'].includes(channel)) { try { deliv = await deliverOnChannel(t, channel, body); } catch (e) { deliv = { ok: false, error: e.message, to: null }; } }
+  appendMessage(t.id, { author_type: 'staff', author: (req.user && req.user.email) || '', body, channel, direction: 'out', external_id: deliv.external_id, to_addr: deliv.to, delivery_status: deliv.ok ? (channel === 'portal' ? null : 'sent') : 'failed' });
   db.prepare("UPDATE tickets SET updated_at=datetime('now'), status=CASE WHEN status IN ('resolved','closed') THEN status ELSE 'waiting' END WHERE id=?").run(t.id);
-  const c = db.prepare('SELECT billing_email FROM customers WHERE id=?').get(t.customer_id) || {};
-  if (c.billing_email) { const pub = pubBase(); mailSafe({ to: c.billing_email, subject: `Re: ${t.number} — ${t.subject}`, text: `${body}\n\nView your ticket: ${pub}/portal`, html: `<p>${nl2br(body)}</p><p><a href="${pub}/portal">View your ticket in the portal</a></p>` }); }
-  audit(req, 'reply', 'ticket#' + t.id, t.number);
-  res.json({ ok: true });
+  audit(req, 'reply', 'ticket#' + t.id, t.number + ' via ' + channel);
+  res.json({ ok: true, channel, delivered: deliv.ok, error: deliv.ok ? undefined : deliv.error });
 });
 app.put('/api/tickets/:id', requireNoc, (req, res) => {
   const b = req.body || {}; const t = db.prepare('SELECT * FROM tickets WHERE id=?').get(req.params.id); if (!t) return res.status(404).json({ error: 'not found' });
@@ -2686,18 +2796,115 @@ app.post('/portal/api/tickets', requirePortal, (req, res) => {
 app.get('/portal/api/tickets/:id', requirePortal, (req, res) => {
   const t = db.prepare('SELECT * FROM tickets WHERE id=? AND customer_id=?').get(req.params.id, req.pcust.id);
   if (!t) return res.status(404).json({ error: 'not found' });
-  t.messages = db.prepare('SELECT author_type, body, created_at FROM ticket_messages WHERE ticket_id=? ORDER BY id').all(t.id);
+  t.messages = db.prepare("SELECT author_type, body, created_at, channel, direction FROM ticket_messages WHERE ticket_id=? AND channel!='note' ORDER BY id").all(t.id);
   res.json(t);
 });
 app.post('/portal/api/tickets/:id/reply', requirePortal, (req, res) => {
   const t = db.prepare('SELECT * FROM tickets WHERE id=? AND customer_id=?').get(req.params.id, req.pcust.id);
   if (!t) return res.status(404).json({ error: 'not found' });
   const body = String((req.body || {}).body || '').trim(); if (!body) return res.status(400).json({ error: 'Enter a message' });
-  db.prepare("INSERT INTO ticket_messages (ticket_id,author_type,author,body) VALUES (?,?,?,?)").run(t.id, 'customer', req.pcust.name, body);
-  db.prepare("UPDATE tickets SET updated_at=datetime('now'), status=CASE WHEN status IN ('resolved','closed') THEN 'open' ELSE status END, closed_at=CASE WHEN status IN ('resolved','closed') THEN NULL ELSE closed_at END WHERE id=?").run(t.id);
+  appendMessage(t.id, { author_type: 'customer', author: req.pcust.name, body, channel: 'portal', direction: 'in' });
+  db.prepare("UPDATE tickets SET updated_at=datetime('now'), last_channel='portal', status=CASE WHEN status IN ('resolved','closed') THEN 'open' ELSE status END, closed_at=CASE WHEN status IN ('resolved','closed') THEN NULL ELSE closed_at END WHERE id=?").run(t.id);
   ticketNotify(`Reply on ${t.number}: ${t.subject}`, `${req.pcust.name} replied on ${t.number}:\n\n${body}`, `<p><b>${esc2(req.pcust.name)}</b> replied on <b>${esc2(t.number)}</b>:</p><p>${nl2br(body)}</p>`);
   res.json({ ok: true });
 });
+
+// ---------- Inbound ingestion: email / SMS / WhatsApp all thread into a ticket ----------
+const emailAddr = (s) => { const m = String(s || '').match(/<([^>]+)>/); return (m ? m[1] : String(s || '')).trim().toLowerCase(); };
+const findCustomerByEmail = (email) => { email = emailAddr(email); return email ? (db.prepare('SELECT * FROM customers WHERE lower(billing_email)=? ORDER BY id LIMIT 1').get(email) || null) : null; };
+const findCustomerByPhone = (phone) => { const p = normPhone(phone); return p ? (db.prepare('SELECT * FROM customers WHERE sms_number=? OR whatsapp_number=? ORDER BY id LIMIT 1').get(p, p) || null) : null; };
+const openTicketForCustomer = (cid) => db.prepare("SELECT * FROM tickets WHERE customer_id=? AND status NOT IN ('resolved','closed') ORDER BY updated_at DESC LIMIT 1").get(cid) || null;
+function ingestInbound({ channel, from, to, subject, body, external_id }) {
+  body = String(body || '').trim(); if (!body && !subject) return { skipped: 'empty' };
+  if (external_id) { const dup = db.prepare('SELECT id FROM ticket_messages WHERE external_id=?').get(external_id); if (dup) return { skipped: 'duplicate' }; }
+  let t = null, cust = null;
+  if (channel === 'email') {
+    const rt = (String(to || '') + ' ' + String(subject || '')).match(/\+([0-9a-f]{24,})@/i);
+    if (rt) t = db.prepare('SELECT * FROM tickets WHERE reply_token=?').get(rt[1]);
+    if (!t) { const m = String(subject || '').match(/TKT-(\d+)/i); if (m) t = db.prepare('SELECT * FROM tickets WHERE number=?').get('TKT-' + m[1]); }
+    if (!t) cust = findCustomerByEmail(from);
+  } else {
+    cust = findCustomerByPhone(from);
+    if (cust) t = openTicketForCustomer(cust.id);
+  }
+  if (!t) {
+    if (!cust) { ticketNotify(`Unrecognized inbound ${channel}`, `From ${from}:\n\n${body}`, `<p>Unrecognized <b>${esc2(channel)}</b> from <b>${esc2(from)}</b> — no matching customer on file.</p><p>${nl2br(body)}</p>`); return { skipped: 'no-customer' }; }
+    const subj = (subject && subject.trim()) || ((body.split('\n')[0] || (channel + ' message')).slice(0, 120));
+    const id = createTicket({ customer_id: cust.id, subject: subj, body, priority: 'normal', opened_by: 'customer', author: from, channel, contact_email: channel === 'email' ? emailAddr(from) : null, contact_phone: channel !== 'email' ? normPhone(from) : null });
+    if (external_id) db.prepare("UPDATE ticket_messages SET external_id=? WHERE id=(SELECT id FROM ticket_messages WHERE ticket_id=? ORDER BY id LIMIT 1)").run(external_id, id); // dedupe re-delivered opener
+    const nt = db.prepare('SELECT number FROM tickets WHERE id=?').get(id);
+    ticketNotify(`New ${channel} ticket ${nt.number}: ${subj}`, `${from} via ${channel}:\n\n${body}`, `<p>New <b>${esc2(channel)}</b> ticket <b>${esc2(nt.number)}</b> from ${esc2(from)}:</p><p>${nl2br(body)}</p>`);
+    return { ticket_id: id, number: nt.number, created: true };
+  }
+  appendMessage(t.id, { author_type: 'customer', author: from, body, channel, direction: 'in', external_id, from_addr: channel === 'email' ? emailAddr(from) : normPhone(from) });
+  db.prepare("UPDATE tickets SET updated_at=datetime('now'), last_channel=?, status=CASE WHEN status IN ('resolved','closed') THEN 'open' ELSE status END, closed_at=CASE WHEN status IN ('resolved','closed') THEN NULL ELSE closed_at END WHERE id=?").run(channel, t.id);
+  ticketNotify(`Reply on ${t.number}: ${t.subject}`, `${from} via ${channel}:\n\n${body}`, `<p><b>${esc2(from)}</b> replied via <b>${esc2(channel)}</b> on <b>${esc2(t.number)}</b>:</p><p>${nl2br(body)}</p>`);
+  return { ticket_id: t.id, number: t.number };
+}
+const inboundSecretOk = (req) => { const s = getSetting('inbound_secret'); return !!s && req.params.secret === s; };
+// Twilio SMS + WhatsApp inbound (application/x-www-form-urlencoded). Empty TwiML reply = accepted, no auto-response.
+app.post('/inbound/twilio/:secret', (req, res) => {
+  if (!inboundSecretOk(req)) return res.status(403).type('text/xml').send('<Response/>');
+  const b = req.body || {}; const rawFrom = String(b.From || ''); const wa = rawFrom.startsWith('whatsapp:');
+  try { ingestInbound({ channel: wa ? 'whatsapp' : 'sms', from: rawFrom.replace(/^whatsapp:/, ''), to: String(b.To || '').replace(/^whatsapp:/, ''), body: b.Body || '', external_id: b.MessageSid || b.SmsSid || null }); }
+  catch (e) { console.warn('twilio inbound failed:', e.message); }
+  res.type('text/xml').send('<Response/>');
+});
+// Telnyx SMS + WhatsApp inbound (JSON; registered with raw body up top). Secret path-gated.
+function inboundTelnyx(req, res) {
+  const secret = getSetting('inbound_secret');
+  if (secret && req.params.secret !== secret) return res.status(403).end();
+  let payload = {}; try { payload = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString('utf8') : (req.body || '{}')); } catch { return res.status(400).end(); }
+  const evt = payload.data || {}; if (evt.event_type && evt.event_type !== 'message.received') return res.status(200).end();
+  const d = evt.payload || {};
+  const from = (d.from && d.from.phone_number) || ''; const to = (Array.isArray(d.to) && d.to[0] && d.to[0].phone_number) || '';
+  try { ingestInbound({ channel: d.type === 'whatsapp' ? 'whatsapp' : 'sms', from, to, body: d.text || '', external_id: d.id || null }); }
+  catch (e) { console.warn('telnyx inbound failed:', e.message); }
+  res.status(200).end();
+}
+// Email inbound webhook — provider-agnostic (Mailgun form, Postmark/SendGrid JSON). Secret path-gated.
+app.post('/inbound/email/:secret', (req, res) => {
+  if (!inboundSecretOk(req)) return res.status(403).end();
+  const b = req.body || {};
+  const from = b.from || b.From || b.sender || b.FromFull && b.FromFull.Email || '';
+  let to = b.to || b.To || b.recipient || '';
+  if (!to && b.envelope) { try { to = (JSON.parse(b.envelope).to || [])[0] || ''; } catch {} }
+  const subject = b.subject || b.Subject || '';
+  const body = b['stripped-text'] || b.TextBody || b.text || b['body-plain'] || b.plain || '';
+  const external_id = b['Message-Id'] || b.MessageID || b.MessageId || b['message-id'] || null;
+  try { const r = ingestInbound({ channel: 'email', from, to, subject, body: String(body).trim(), external_id }); res.json({ ok: true, ...r }); }
+  catch (e) { console.warn('email inbound failed:', e.message); res.status(500).json({ error: e.message }); }
+});
+// IMAP poller — pulls unseen mail from the support mailbox and threads it into tickets (runs from the sampler)
+let _imapBusy = false;
+async function pollImap() {
+  if (getSetting('email_inbound_method') !== 'imap') return;
+  const host = getSetting('imap_host'), user = getSetting('imap_user'), pass = getSetting('imap_pass');
+  if (!host || !user || !pass || _imapBusy) return;
+  _imapBusy = true;
+  try {
+    const { ImapFlow } = await import('imapflow');
+    const { simpleParser } = await import('mailparser');
+    const client = new ImapFlow({ host, port: parseInt(getSetting('imap_port'), 10) || 993, secure: getSetting('imap_tls') !== '0', auth: { user, pass }, logger: false });
+    await client.connect();
+    const lock = await client.getMailboxLock('INBOX');
+    try {
+      const uids = await client.search({ seen: false }, { uid: true });
+      for (const uid of (uids || []).slice(0, 50)) {
+        const msg = await client.fetchOne(uid, { source: true }, { uid: true });
+        if (!msg || !msg.source) continue;
+        const p = await simpleParser(msg.source);
+        const from = (p.from && p.from.text) || '';
+        const to = ((p.to && p.to.text) || '') + ' ' + (p.headers.get('delivered-to') || '') + ' ' + (p.cc && p.cc.text || '');
+        const body = (p.text || (p.html ? String(p.html).replace(/<[^>]+>/g, ' ') : '')).trim();
+        try { ingestInbound({ channel: 'email', from, to, subject: p.subject || '', body, external_id: p.messageId || ('imap-' + uid) }); }
+        catch (e) { console.warn('imap ingest:', e.message); }
+        await client.messageFlagsAdd(uid, ['\\Seen'], { uid: true });
+      }
+    } finally { lock.release(); await client.logout().catch(() => {}); }
+  } catch (e) { console.warn('IMAP poll failed:', e.message); }
+  finally { _imapBusy = false; }
+}
 
 // ---- audit ----
 app.get('/api/audit', (req, res) => {
@@ -2804,6 +3011,8 @@ async function sampleTick() {
     if (process.env.BILLING !== 'off' && _tickN % 60 === 1) {
       try { runRecurringBilling(); } catch (e) { console.warn('recurring billing failed:', e.message); }
     }
+    // inbound email: poll the support mailbox for customer replies (self-guards on config)
+    if (process.env.IMAP !== 'off') { try { await pollImap(); } catch (e) { console.warn('imap poll:', e.message); } }
     // end-of-day auto check-out of any visitors still on site (once per day, at/after the configured time)
     const acAt = getSetting('auto_checkout_at');
     if (acAt && /^\d{1,2}:\d{2}$/.test(acAt)) {
