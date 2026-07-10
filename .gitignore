@@ -14,3 +14,6 @@ push-to-github.sh
 
 # Stray git lock files
 *.lock
+
+# Scratch test files (sandbox can't delete from the mounted folder)
+_*.mjs

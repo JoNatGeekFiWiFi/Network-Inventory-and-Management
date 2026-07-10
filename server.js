@@ -796,7 +796,35 @@ function exportText(body) {
   return text;
 }
 const _sleep = ms => new Promise(r => setTimeout(r, ms));
-const pendingUploads = new Map(); // token -> { resolve }  (legacy upload receiver; FTP pull is primary)
+const pendingUploads = new Map(); // token -> { resolve }  (legacy upload receiver; SFTP/FTP pull is primary)
+// Primary retrieval: SFTP over the router's SSH service (usually enabled + secure). Dynamic import so the app
+// still boots if ssh2 isn't installed. RouterOS serves the flash filesystem as the SFTP root.
+async function sftpRetrieve(host, user, pass, filename, { port = 22, timeoutMs = 20000 } = {}) {
+  const mod = await import('ssh2');
+  const SshClient = mod.Client || (mod.default && mod.default.Client);
+  if (!SshClient) throw new Error('ssh2 not available');
+  return await new Promise((resolve, reject) => {
+    const conn = new SshClient(); let done = false;
+    const finish = (err, data) => { if (done) return; done = true; clearTimeout(timer); try { conn.end(); } catch {} err ? reject(err instanceof Error ? err : new Error(String(err))) : resolve(data); };
+    const timer = setTimeout(() => finish(new Error('SFTP timeout')), timeoutMs);
+    conn.on('ready', () => {
+      conn.sftp((err, sftp) => {
+        if (err) return finish(err);
+        const names = [filename, '/' + filename, filename.replace(/^\/+/, '')];
+        const tryPath = (i) => {
+          if (i >= names.length) return finish(new Error('SFTP file not found: ' + filename));
+          const chunks = []; const rs = sftp.createReadStream(names[i]);
+          rs.on('data', c => chunks.push(c));
+          rs.on('error', () => tryPath(i + 1));
+          rs.on('end', () => finish(null, Buffer.concat(chunks).toString('utf8')));
+        };
+        tryPath(0);
+      });
+    });
+    conn.on('error', e => finish(e));
+    conn.connect({ host, port, username: user, password: pass, readyTimeout: timeoutMs });
+  });
+}
 // Minimal FTP client (PASV + RETR) over node:net — RouterOS won't return file contents over REST,
 // and only [s]ftp support fetch-upload, so we pull the exported .rsc directly from the router.
 function ftpRetrieve(host, user, pass, filename, { port = 21, timeoutMs = 20000 } = {}) {
@@ -857,10 +885,15 @@ async function backupDevice(d, source) {
       // B1: try reading the file's text contents over REST (works on some builds)
       text = f.contents || '';
       if ((!text || !text.trim()) && f['.id']) { const one = await ros('GET', '/rest/file/' + f['.id']); if (one.status < 400) { try { const o = JSON.parse(one.body); const obj = Array.isArray(o) ? o[0] : o; text = obj.contents || ''; } catch {} } }
-      // B2: if REST won't hand back contents, pull the .rsc from the router via FTP over the overlay
+      // B2: REST won't hand back contents — pull the .rsc from the router. Prefer SFTP (SSH), fall back to FTP.
       if (!text || !text.trim()) {
-        try { text = await ftpRetrieve(d.mgmt_address, d.admin_username || 'admin', d.admin_password, f.name); }
-        catch (e) { if (f['.id']) { try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {} } throw new Error('REST gave no config and FTP pull failed: ' + e.message); }
+        const user = d.admin_username || 'admin'; let sftpErr = null, ftpErr = null;
+        try { text = await sftpRetrieve(d.mgmt_address, user, d.admin_password, f.name); } catch (e) { sftpErr = e; }
+        if (!text || !text.trim()) { try { text = await ftpRetrieve(d.mgmt_address, user, d.admin_password, f.name); } catch (e) { ftpErr = e; } }
+        if (!text || !text.trim()) {
+          if (f['.id']) { try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {} }
+          throw new Error('REST gave no config; SFTP failed: ' + (sftpErr ? sftpErr.message : 'n/a') + '; FTP failed: ' + (ftpErr ? ftpErr.message : 'n/a'));
+        }
       }
       if (f['.id']) { try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {} } // tidy up flash
     }
@@ -932,7 +965,10 @@ app.get('/api/devices/:id/backup-debug', requireNoc, async (req, res) => {
       out.steps.push({ label: 'GET /rest/file/:id (netinv-backup)', status: one.status, fileSize: f.size, contentsLen: cl, snippet: sn });
       // alternate read: collection GET filtered by name with explicit proplist
       try { const alt = await ros('GET', '/rest/file?name=' + encodeURIComponent(f.name) + '&.proplist=name,size,contents'); let al = 0; try { const a = JSON.parse(alt.body); const o = Array.isArray(a) ? a[0] : a; al = o && o.contents ? String(o.contents).length : 0; } catch {} out.steps.push({ label: 'GET /rest/file?name=..&.proplist=contents', status: alt.status, contentsLen: al }); } catch (e) { out.steps.push({ label: 'alt read', error: e.message }); }
-      // FTP pull attempt (the actual backup retrieval path) — report success length or error
+      // SFTP pull attempt (primary retrieval path) — report success length or error
+      try { const t = await sftpRetrieve(d.mgmt_address, d.admin_username || 'admin', d.admin_password, f.name, { timeoutMs: 15000 }); out.steps.push({ label: 'SFTP get ' + f.name, ok: true, bytes: Buffer.byteLength(t), snippet: t.slice(0, 120) }); }
+      catch (e) { out.steps.push({ label: 'SFTP get ' + f.name, error: e.message }); }
+      // FTP pull attempt (fallback retrieval path) — report success length or error
       try { const t = await ftpRetrieve(d.mgmt_address, d.admin_username || 'admin', d.admin_password, f.name, { timeoutMs: 15000 }); out.steps.push({ label: 'FTP RETR ' + f.name, ok: true, bytes: Buffer.byteLength(t), snippet: t.slice(0, 120) }); }
       catch (e) { out.steps.push({ label: 'FTP RETR ' + f.name, error: e.message }); }
       try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {}
