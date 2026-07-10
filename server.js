@@ -325,6 +325,8 @@ app.get('/api/settings', requireNoc, (req, res) => {
     wg_dns: getSetting('wg_dns') || '',
     wg_server_pub: getSetting('wg_server_pub') || '',
     backup_upload_base: getSetting('backup_upload_base') || '',
+    backup_enable_ssh: getSetting('backup_enable_ssh') !== '0',
+    mgmt_overlay_cidr: getSetting('mgmt_overlay_cidr') || '',
     public_base_url: getSetting('public_base_url') || '',
     allow_auto_enroll: getSetting('allow_auto_enroll') === '1',
     prov_wifi_ssid: getSetting('prov_wifi_ssid') || '',
@@ -373,7 +375,8 @@ app.get('/api/settings', requireNoc, (req, res) => {
 });
 app.put('/api/settings', requireNoc, (req, res) => {
   const b = req.body || {};
-  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns', 'backup_upload_base', 'public_base_url', 'prov_wifi_ssid', 'smtp_host', 'smtp_port', 'smtp_user', 'mail_from', 'access_notify_email', 'auto_checkout_at']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  for (const k of ['zt_network_id', 'wg_endpoint', 'wg_subnet', 'wg_dns', 'backup_upload_base', 'mgmt_overlay_cidr', 'public_base_url', 'prov_wifi_ssid', 'smtp_host', 'smtp_port', 'smtp_user', 'mail_from', 'access_notify_email', 'auto_checkout_at']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  if (b.backup_enable_ssh !== undefined) setSetting('backup_enable_ssh', b.backup_enable_ssh ? '1' : '0');
   for (const k of ['invoice_terms', 'recurring_invoice_terms']) if (b[k] !== undefined) setSetting(k, String(b[k])); // multi-line, don't trim internal formatting
   if (b.smtp_secure !== undefined) setSetting('smtp_secure', b.smtp_secure ? '1' : '0');
   if (b.smtp_pass) setSetting('smtp_pass', String(b.smtp_pass));
@@ -866,6 +869,26 @@ function ftpRetrieve(host, user, pass, filename, { port = 21, timeoutMs = 20000 
     }
   });
 }
+const slash16 = ip => { const m = String(ip || '').match(/^(\d+)\.(\d+)\./); return m ? `${m[1]}.${m[2]}.0.0/16` : ''; };
+// Backups pull config over SFTP/FTP, but many routers have those services off. Since the REST API works,
+// enable SSH via the API (scoped to the management overlay so it isn't exposed) right before pulling.
+async function ensureSshForBackup(d, ros) {
+  if (getSetting('backup_enable_ssh') === '0') return { skipped: 'auto-enable off' };
+  let arr = [];
+  try { const r = await ros('GET', '/rest/ip/service'); if (r.status < 400) arr = JSON.parse(r.body); } catch (e) { return { error: e.message }; }
+  const s = (Array.isArray(arr) ? arr : []).find(x => x.name === 'ssh'); if (!s) return { note: 'no ssh service' };
+  if (!(s.disabled === 'true' || s.disabled === true)) return { alreadyOn: true };
+  const cidr = (getSetting('mgmt_overlay_cidr') || '').trim() || slash16(d.mgmt_address);
+  const patch = { disabled: 'false' };
+  if (cidr && !s.address) patch.address = cidr; // scope to overlay only if the operator hasn't set their own address restriction
+  try {
+    const pr = await ros('PATCH', '/rest/ip/service/' + encodeURIComponent(s['.id']), patch);
+    if (pr.status >= 400) return { error: 'enable HTTP ' + pr.status };
+  } catch (e) { return { error: e.message }; }
+  try { db.prepare("INSERT INTO audit_log (actor,role,action,target,details) VALUES ('system','system','edit',?,?)").run('device#' + d.id, 'auto-enabled SSH for backups' + (patch.address ? ' (address ' + patch.address + ')' : '')); } catch {}
+  await _sleep(1500); // let sshd bind before we connect
+  return { enabled: true, address: patch.address || s.address || '(unchanged)' };
+}
 async function backupDevice(d, source) {
   const H = rosHeaders(d);
   const ros = (method, path, body) => restReq(d.mgmt_address, path, { headers: H, method, body, timeoutMs: 25000 });
@@ -888,11 +911,13 @@ async function backupDevice(d, source) {
       // B2: REST won't hand back contents — pull the .rsc from the router. Prefer SFTP (SSH), fall back to FTP.
       if (!text || !text.trim()) {
         const user = d.admin_username || 'admin'; let sftpErr = null, ftpErr = null;
+        const sshFix = await ensureSshForBackup(d, ros).catch(e => ({ error: e.message })); // turn SSH on via the API if it's off
         try { text = await sftpRetrieve(d.mgmt_address, user, d.admin_password, f.name); } catch (e) { sftpErr = e; }
         if (!text || !text.trim()) { try { text = await ftpRetrieve(d.mgmt_address, user, d.admin_password, f.name); } catch (e) { ftpErr = e; } }
         if (!text || !text.trim()) {
           if (f['.id']) { try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {} }
-          throw new Error('REST gave no config; SFTP failed: ' + (sftpErr ? sftpErr.message : 'n/a') + '; FTP failed: ' + (ftpErr ? ftpErr.message : 'n/a'));
+          const hint = sshFix && sshFix.enabled ? ' (SSH was just enabled' + (sshFix.address && sshFix.address !== '(unchanged)' ? ' scoped to ' + sshFix.address : '') + ' — run the backup once more)' : (sshFix && sshFix.error ? ' (SSH auto-enable failed: ' + sshFix.error + ')' : '');
+          throw new Error('REST gave no config; SFTP failed: ' + (sftpErr ? sftpErr.message : 'n/a') + '; FTP failed: ' + (ftpErr ? ftpErr.message : 'n/a') + hint);
         }
       }
       if (f['.id']) { try { await ros('DELETE', '/rest/file/' + f['.id']); } catch {} } // tidy up flash
@@ -965,6 +990,8 @@ app.get('/api/devices/:id/backup-debug', requireNoc, async (req, res) => {
       out.steps.push({ label: 'GET /rest/file/:id (netinv-backup)', status: one.status, fileSize: f.size, contentsLen: cl, snippet: sn });
       // alternate read: collection GET filtered by name with explicit proplist
       try { const alt = await ros('GET', '/rest/file?name=' + encodeURIComponent(f.name) + '&.proplist=name,size,contents'); let al = 0; try { const a = JSON.parse(alt.body); const o = Array.isArray(a) ? a[0] : a; al = o && o.contents ? String(o.contents).length : 0; } catch {} out.steps.push({ label: 'GET /rest/file?name=..&.proplist=contents', status: alt.status, contentsLen: al }); } catch (e) { out.steps.push({ label: 'alt read', error: e.message }); }
+      // Report SSH service state + auto-enable it (scoped to overlay) so SFTP can connect
+      try { const sf = await ensureSshForBackup(d, ros); out.steps.push({ label: 'ensure SSH service', ...sf }); } catch (e) { out.steps.push({ label: 'ensure SSH service', error: e.message }); }
       // SFTP pull attempt (primary retrieval path) — report success length or error
       try { const t = await sftpRetrieve(d.mgmt_address, d.admin_username || 'admin', d.admin_password, f.name, { timeoutMs: 15000 }); out.steps.push({ label: 'SFTP get ' + f.name, ok: true, bytes: Buffer.byteLength(t), snippet: t.slice(0, 120) }); }
       catch (e) { out.steps.push({ label: 'SFTP get ' + f.name, error: e.message }); }

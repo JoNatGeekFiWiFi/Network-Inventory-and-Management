@@ -1625,7 +1625,10 @@ async function renderSettings() {
     <div class="card" style="padding:16px" id="bak">
       <h2 style="margin-bottom:12px"><i class="ti ti-archive"></i> Router backups</h2>
       ${field('Backup upload URL', 'backup_upload_base', s.backup_upload_base, { mono: true, ph: 'http://<server-overlay-ip>:3000' })}
-      <div class="help">Optional fallback. The platform pulls config exports from routers via FTP over the overlay; leave this blank unless your routers can only push over HTTP.</div>
+      <div class="help">Optional legacy fallback. The platform pulls config exports from routers over <b>SFTP (SSH)</b>, falling back to FTP; leave this blank unless your routers can only push over HTTP.</div>
+      <label class="row" style="cursor:pointer;padding:8px 0;border-top:.5px solid var(--border);margin-top:10px"><input type="checkbox" id="backupSsh" ${s.backup_enable_ssh ? 'checked' : ''} style="width:auto"/>
+        <div style="flex:1"><div>Auto-enable SSH for backups</div><div class="small sec-muted">If a router has SSH turned off, enable it via the REST API before pulling the config (scoped to the overlay range below). Backups need SSH or FTP to retrieve the export.</div></div></label>
+      ${field('Management overlay range (scopes auto-enabled SSH)', 'mgmt_overlay_cidr', s.mgmt_overlay_cidr, { mono: true, ph: 'e.g. 10.241.0.0/16 — blank = derive /16 from the device IP' })}
       <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" onclick="saveSettings()"><i class="ti ti-check"></i> Save</button></div>
     </div>
     <div class="card" style="padding:16px" id="prov">
@@ -1725,6 +1728,7 @@ async function renderSettings() {
 async function saveSettings() {
   const z = collect('#zt'), w = collect('#wg'), bk = collect('#bak');
   const d = Object.assign({}, z, w, bk);
+  if ($('#backupSsh')) d.backup_enable_ssh = $('#backupSsh').checked;
   if (!d.zt_api_token) delete d.zt_api_token; // blank = keep existing
   try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }
 }
