@@ -153,6 +153,21 @@ export function migrate() {
   ensure('customers', 'sms_number', 'TEXT');
   ensure('customers', 'whatsapp_number', 'TEXT');
   ensure('customers', 'preferred_channel', 'TEXT');                          // email|sms|whatsapp (fallback for staff-initiated)
+  // Patch panel documentation — opt-in per site/POP, one+ panels each with labelled ports
+  ensure('sites', 'patch_enabled', 'INTEGER NOT NULL DEFAULT 0');
+  ensure('pops', 'patch_enabled', 'INTEGER NOT NULL DEFAULT 0');
+  db.exec(`CREATE TABLE IF NOT EXISTS patch_panels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, parent_type TEXT NOT NULL, parent_id INTEGER NOT NULL,
+    name TEXT NOT NULL, location TEXT, ports INTEGER NOT NULL DEFAULT 24, notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_patch_panels ON patch_panels(parent_type, parent_id)');
+  // one row per USED port (upsert by panel_id+port_no); blank ports have no row
+  db.exec(`CREATE TABLE IF NOT EXISTS patch_ports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, panel_id INTEGER NOT NULL, port_no INTEGER NOT NULL,
+    label TEXT, device_id INTEGER, device_text TEXT, circuit_id INTEGER, circuit_text TEXT,
+    far_end TEXT, status TEXT NOT NULL DEFAULT 'free', note TEXT,
+    UNIQUE(panel_id, port_no))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_patch_ports ON patch_ports(panel_id)');
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

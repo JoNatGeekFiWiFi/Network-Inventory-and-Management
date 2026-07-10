@@ -114,6 +114,7 @@ async function route() {
     if (p[0] === 'site' && p[1] === 'new') { setNav('sites'); return await formSite(q); }
     if (p[0] === 'site' && p[2] === 'notes') { setNav('sites'); return await renderNotes(p[1]); }
     if (p[0] === 'site' && p[2] === 'edit') { setNav('sites'); return await formSite({ id: p[1] }); }
+    if (p[0] === 'site' && p[2] === 'patch') { setNav('sites'); return await renderPatch('site', p[1]); }
     if (p[0] === 'site') { setNav('sites'); return await renderSite(p[1]); }
     if (p[0] === 'pops') { setNav('sites'); return await renderPops(); }
     if (p[0] === 'pop' && p[1] === 'new') { setNav('sites'); return await formPop({}); }
@@ -121,6 +122,7 @@ async function route() {
     if (p[0] === 'pop' && p[2] === 'notes') { setNav('sites'); return await renderPopNotes(p[1]); }
     if (p[0] === 'pop' && p[2] === 'circuit' && p[3] === 'new') { setNav('sites'); return await formPopCircuit({ popId: p[1] }); }
     if (p[0] === 'pop' && p[2] === 'circuit' && p[3]) { setNav('sites'); return await formPopCircuit({ popId: p[1], id: p[3] }); }
+    if (p[0] === 'pop' && p[2] === 'patch') { setNav('sites'); return await renderPatch('pop', p[1]); }
     if (p[0] === 'pop') { setNav('sites'); return await renderPop(p[1]); }
     if (p[0] === 'accounts') { setNav('accounts'); return await renderCustomers(); }
     if (p[0] === 'customers') { setNav('customers'); return await renderCustomerList(); }
@@ -280,6 +282,11 @@ async function renderSite(id) {
       ${hw}
     </div>
 
+    <div class="card"><div class="row rowlink" onclick="location.hash='#/site/${s.id}/patch'">
+      <i class="ti ti-layout-grid sec-muted"></i>
+      <div style="flex:1;min-width:0"><div>Patch panels</div><div class="small sec-muted">${s.patch_enabled ? 'Documented — ports labelled to devices &amp; circuits' : 'Not set up — click to enable'}</div></div>
+      <i class="ti ti-chevron-right muted"></i></div></div>
+
     <div class="card">
       <div class="hd"><h2><i class="ti ti-notes"></i> Site notes · ${s.notes.length}</h2><a class="btn sm" href="#/site/${s.id}/notes"><i class="ti ti-arrows-diagonal"></i> Expand</a></div>
       ${note ? `<div class="note"><div class="av">${initials(note.author)}</div><div style="flex:1"><div class="small"><b>${esc(note.author)}</b> <span class="muted">· ${esc(note.created_at)}</span></div>${note.body ? `<div class="small sec-muted" style="margin-top:2px">${esc(note.body)}</div>` : ''}${attachmentsHtml(note.attachments, false)}</div></div>` : '<div class="row muted">No notes yet</div>'}
@@ -329,6 +336,10 @@ async function renderPop(id) {
           <div class="small mono sec-muted">${c.circuit_id ? esc(c.circuit_id) : 'no circuit ID'}${c.notes ? ' · ' + esc(c.notes) : ''}</div></div>
         ${statusPill(c.status)}${isPriv() ? '<i class="ti ti-chevron-right muted"></i>' : ''}</div>`).join('') : '<div class="row muted">No upstream circuits defined — Add circuit to record where this POP gets bandwidth.</div>'}</div>
     <div class="card"><div class="hd"><h2>Hardware · ${p.devices.length}</h2><a class="btn sm" href="#/device/new?pop=${p.id}"><i class="ti ti-plus"></i> Add hardware</a></div>${hw}</div>
+    <div class="card"><div class="row rowlink" onclick="location.hash='#/pop/${p.id}/patch'">
+      <i class="ti ti-layout-grid sec-muted"></i>
+      <div style="flex:1;min-width:0"><div>Patch panels</div><div class="small sec-muted">${p.patch_enabled ? 'Documented — ports labelled to devices &amp; circuits' : 'Not set up — click to enable'}</div></div>
+      <i class="ti ti-chevron-right muted"></i></div></div>
     <div class="card"><div class="hd"><h2>Customer sites served</h2></div><div style="padding:0 14px 12px">${served}</div></div>
     <div class="card"><div class="hd"><h2><i class="ti ti-notes"></i> Notes · ${p.notes.length}</h2><a class="btn sm" href="#/pop/${p.id}/notes"><i class="ti ti-arrows-diagonal"></i> Expand</a></div>
       ${p.notes[0] ? `<div class="note"><div class="av">${initials(p.notes[0].author)}</div><div style="flex:1"><div class="small"><b>${esc(p.notes[0].author)}</b> <span class="muted">· ${esc(p.notes[0].created_at)}</span></div>${p.notes[0].body ? `<div class="small sec-muted" style="margin-top:2px">${esc(p.notes[0].body)}</div>` : ''}${attachmentsHtml(p.notes[0].attachments, false)}</div></div>` : '<div class="row muted">No notes yet</div>'}</div>`;
@@ -2139,6 +2150,109 @@ async function showWg(id) {
 }
 
 // ---------- Support / trouble tickets ----------
+// ---------- Patch panel documentation (per site / POP) ----------
+const PATCH_STATUS_COL = { free: 'var(--muted)', used: 'var(--success,#1D9E75)', reserved: 'var(--warning)' };
+function patchDevName(idOrNull) { const d = (window._patch.devices || []).find(x => x.id === idOrNull); return d ? d.name : ''; }
+function patchCircLabel(idOrNull) { const c = (window._patch.circuits || []).find(x => x.id === idOrNull); return c ? c.label : ''; }
+async function renderPatch(type, id) {
+  const data = await api('/patch/' + type + '/' + id);
+  window._patch = { type, id, devices: data.devices, circuits: data.circuits, panels: data.panels };
+  const backHash = type === 'pop' ? '#/pop/' + id : '#/site/' + id;
+  const panels = data.panels.map(panelCard).join('');
+  view().innerHTML = `<div class="crumb" onclick="location.hash='${backHash}'"><i class="ti ti-chevron-left"></i> ${esc(data.parent.name)}</div>
+    <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>Patch panels</h1>${data.enabled ? '<span class="pill s-up">enabled</span>' : '<span class="pill">off</span>'}</div>
+      <div class="small sec-muted" style="margin-top:3px">${esc(data.parent.name)} · label each port to a device and/or circuit</div></div>
+      ${isPriv() && data.enabled ? `<button class="btn" onclick="patchEnable(false)" title="Turn off patch panel documentation for this site">Disable</button>` : ''}</div>`;
+  const v = view();
+  if (!isPriv()) { v.insertAdjacentHTML('beforeend', panels || '<div class="card" style="padding:16px" class="muted">No panels documented.</div>'); return; }
+  if (!data.enabled && !data.panels.length) {
+    v.insertAdjacentHTML('beforeend', `<div class="card" style="padding:18px;text-align:center">
+      <div class="sec-muted" style="margin-bottom:12px">Patch panel documentation isn't set up here yet.</div>
+      <button class="btn primary" onclick="patchEnable(true)"><i class="ti ti-plus"></i> Enable patch panels</button></div>`);
+    return;
+  }
+  v.insertAdjacentHTML('beforeend', panels);
+  v.insertAdjacentHTML('beforeend', `<div class="card" style="padding:16px" id="addpanel">
+    <div class="hd" style="padding:0 0 10px"><h2><i class="ti ti-plus"></i> Add a panel</h2></div>
+    <div class="grid2">${field('Panel name', 'name', '', { ph: 'e.g. Rack A — Patch 1' })}${field('Location', 'location', '', { ph: 'rack / room (optional)' })}</div>
+    <div class="grid2">${field('Number of ports', 'ports', '24', { type: 'select', options: ['12', '24', '48', '96'] })}${field('Notes', 'notes', '', { ph: 'optional' })}</div>
+    <div style="display:flex;justify-content:flex-end"><button class="btn primary" onclick="addPanel()"><i class="ti ti-check"></i> Add panel</button></div></div>`);
+}
+async function patchEnable(on) {
+  try { await api('/patch/' + window._patch.type + '/' + window._patch.id + '/enable', { method: 'POST', body: JSON.stringify({ enabled: on }) }); renderPatch(window._patch.type, window._patch.id); }
+  catch (e) { toast(e.message); }
+}
+async function addPanel() {
+  const d = collect('#addpanel'); if (!d.name) { toast('Enter a panel name'); return; }
+  try { await api('/patch/' + window._patch.type + '/' + window._patch.id + '/panels', { method: 'POST', body: JSON.stringify(d) }); toast('Panel added'); renderPatch(window._patch.type, window._patch.id); }
+  catch (e) { toast(e.message); }
+}
+async function delPanel(pid) {
+  if (!confirm('Delete this panel and all its port labels?')) return;
+  try { await api('/patch/panels/' + pid, { method: 'DELETE' }); toast('Panel deleted'); renderPatch(window._patch.type, window._patch.id); }
+  catch (e) { toast(e.message); }
+}
+function editPanel(pid) {
+  const p = window._patch.panels.find(x => x.id === pid); if (!p) return;
+  const box = $('#panelhd-' + pid);
+  box.innerHTML = `<div class="box" id="paneledit-${pid}" style="flex:1">
+    <div class="grid2">${field('Panel name', 'name', p.name)}${field('Location', 'location', p.location || '')}</div>
+    <div class="grid2">${field('Ports', 'ports', String(p.ports), { type: 'select', options: ['12', '24', '48', '96'].includes(String(p.ports)) ? ['12', '24', '48', '96'] : [String(p.ports), '12', '24', '48', '96'] })}${field('Notes', 'notes', p.notes || '')}</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn sm" onclick="renderPatch(window._patch.type,window._patch.id)">Cancel</button><button class="btn sm primary" onclick="savePanel(${pid})">Save</button></div></div>`;
+}
+async function savePanel(pid) {
+  const d = collect('#paneledit-' + pid);
+  try { await api('/patch/panels/' + pid, { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderPatch(window._patch.type, window._patch.id); }
+  catch (e) { toast(e.message); }
+}
+function panelCard(panel) {
+  const used = {}; (panel.used_ports || []).forEach(p => used[p.port_no] = p);
+  let rows = '';
+  for (let n = 1; n <= panel.ports; n++) rows += portRow(panel.id, n, used[n]);
+  const usedCount = (panel.used_ports || []).filter(p => p.status !== 'free').length;
+  return `<div class="card">
+    <div class="hd" id="panelhd-${panel.id}"><h2>${esc(panel.name)} <span class="small sec-muted" style="font-weight:400">· ${panel.ports} ports · ${usedCount} used${panel.location ? ' · ' + esc(panel.location) : ''}</span></h2>
+      ${isPriv() ? `<span style="display:flex;gap:6px"><button class="btn sm" onclick="editPanel(${panel.id})" title="Edit panel"><i class="ti ti-edit"></i></button><button class="btn sm" onclick="delPanel(${panel.id})" title="Delete panel"><i class="ti ti-trash"></i></button></span>` : ''}</div>
+    ${panel.notes ? `<div class="small sec-muted" style="padding:0 14px 8px">${esc(panel.notes)}</div>` : ''}
+    <div style="padding:0 6px 8px">${rows}</div></div>`;
+}
+function portRow(panelId, n, pt) {
+  const status = pt ? pt.status : 'free';
+  const dev = pt ? (patchDevName(pt.device_id) || pt.device_text || '') : '';
+  const circ = pt ? (patchCircLabel(pt.circuit_id) || pt.circuit_text || '') : '';
+  const bits = [];
+  if (pt && pt.label) bits.push('<b>' + esc(pt.label) + '</b>');
+  if (dev) bits.push('<i class="ti ti-device-desktop" style="font-size:12px"></i> ' + esc(dev));
+  if (circ) bits.push('<i class="ti ti-route" style="font-size:12px"></i> ' + esc(circ));
+  if (pt && pt.far_end) bits.push('<span class="sec-muted">→ ' + esc(pt.far_end) + '</span>');
+  const summary = bits.join(' &nbsp;·&nbsp; ') || '<span class="muted">free</span>';
+  return `<div class="row" id="port-${panelId}-${n}" style="padding:6px 8px">
+    <span class="mono" style="width:30px;text-align:right;color:var(--muted)">${n}</span>
+    <span title="${status}" style="width:10px;height:10px;border-radius:50%;background:${PATCH_STATUS_COL[status]};flex:none"></span>
+    <div style="flex:1;min-width:0;font-size:13px">${summary}${pt && pt.note ? `<div class="small sec-muted">${esc(pt.note)}</div>` : ''}</div>
+    ${isPriv() ? `<button class="btn sm" onclick="editPort(${panelId},${n})"><i class="ti ti-edit"></i></button>` : ''}</div>`;
+}
+function editPort(panelId, n) {
+  const panel = window._patch.panels.find(p => p.id === panelId); const pt = (panel.used_ports || []).find(x => x.port_no === n) || {};
+  const devOpts = [{ v: '', l: '— none —' }].concat((window._patch.devices || []).map(d => ({ v: d.id, l: d.name })));
+  const circOpts = [{ v: '', l: '— none —' }].concat((window._patch.circuits || []).map(c => ({ v: c.id, l: c.label })));
+  const row = $('#port-' + panelId + '-' + n);
+  row.innerHTML = `<div class="box" id="ppedit-${panelId}-${n}" style="flex:1;padding:12px">
+    <div style="font-weight:600;margin-bottom:8px">Port ${n}</div>
+    <div class="grid2">${field('Label / description', 'label', pt.label || '', { ph: 'e.g. Uplink to core' })}${field('Status', 'status', pt.status || 'free', { type: 'select', options: [{ v: 'free', l: 'Free' }, { v: 'used', l: 'Used' }, { v: 'reserved', l: 'Reserved' }] })}</div>
+    <div class="grid2">${field('Device', 'device_id', pt.device_id || '', { type: 'select', options: devOpts })}${field('…or device (free text)', 'device_text', pt.device_text || '', { ph: 'if not in inventory' })}</div>
+    <div class="grid2">${field('Circuit', 'circuit_id', pt.circuit_id || '', { type: 'select', options: circOpts })}${field('…or circuit (free text)', 'circuit_text', pt.circuit_text || '', { ph: 'if not in system' })}</div>
+    <div class="grid2">${field('Far-end / connected to', 'far_end', pt.far_end || '', { ph: 'room, rack, jack, other panel/port' })}${field('Note', 'note', pt.note || '')}</div>
+    <div style="display:flex;gap:8px;justify-content:space-between">
+      <button class="btn sm" onclick="savePort(${panelId},${n},true)" title="Clear this port">Clear</button>
+      <span style="display:flex;gap:8px"><button class="btn sm" onclick="renderPatch(window._patch.type,window._patch.id)">Cancel</button><button class="btn sm primary" onclick="savePort(${panelId},${n})">Save</button></span></div></div>`;
+}
+async function savePort(panelId, n, clear) {
+  const d = clear ? { status: 'free' } : collect('#ppedit-' + panelId + '-' + n);
+  try { await api('/patch/panels/' + panelId + '/ports/' + n, { method: 'PUT', body: JSON.stringify(d) }); toast(clear ? 'Port cleared' : 'Port saved'); renderPatch(window._patch.type, window._patch.id); }
+  catch (e) { toast(e.message); }
+}
+
 const TICKET_PILL = { open: 's-warn', in_progress: 's-warn', waiting: '', resolved: 's-up', closed: '' };
 const TICKET_PRIO_COL = { low: 'var(--muted)', normal: 'var(--text2)', high: 'var(--warning)', urgent: 'var(--danger)' };
 const CHAN = { portal: { i: 'ti-browser', l: 'Portal' }, email: { i: 'ti-mail', l: 'Email' }, sms: { i: 'ti-message', l: 'SMS' }, whatsapp: { i: 'ti-brand-whatsapp', l: 'WhatsApp' }, note: { i: 'ti-note', l: 'Note' } };

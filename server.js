@@ -1755,6 +1755,87 @@ app.delete('/api/pops/:id/circuits/:cid', requireNoc, (req, res) => {
   audit(req, 'delete', 'pop#' + req.params.id, 'circuit#' + req.params.cid);
   res.json({ ok: true });
 });
+
+// ---- patch panel documentation (per site or POP; opt-in) ----
+const PATCH_PORT_STATUS = ['free', 'used', 'reserved'];
+function patchParent(type, id) {
+  if (type === 'site') return db.prepare('SELECT id, name, patch_enabled FROM sites WHERE id=?').get(id);
+  if (type === 'pop') return db.prepare('SELECT id, name, patch_enabled FROM pops WHERE id=?').get(id);
+  return null;
+}
+// the site's/POP's devices + circuits, formatted for the per-port dropdowns
+function patchContext(type, id) {
+  if (type === 'site') {
+    const devices = db.prepare("SELECT id, name FROM devices WHERE assigned_type='site' AND assigned_site_id=? ORDER BY name").all(id);
+    const circuits = db.prepare('SELECT * FROM connections WHERE site_id=? ORDER BY priority').all(id).map(resolveConn)
+      .map(c => ({ id: c.id, label: `${c.role}${c.served_label ? ' · ' + c.served_label : ''}${c.static_ip ? ' · ' + c.static_ip : (c.current_ip ? ' · ' + c.current_ip : '')}` }));
+    return { devices, circuits };
+  }
+  const devices = db.prepare("SELECT id, name FROM devices WHERE assigned_type='pop' AND assigned_pop_id=? ORDER BY name").all(id);
+  const circuits = db.prepare('SELECT * FROM pop_circuits WHERE pop_id=? ORDER BY id').all(id).map(withCircuitLabel)
+    .map(c => ({ id: c.id, label: `${c.circuit_id || c.source_label || 'Circuit'}${c.bandwidth ? ' · ' + c.bandwidth : ''}` }));
+  return { devices, circuits };
+}
+function loadPanels(type, id) {
+  const panels = db.prepare('SELECT * FROM patch_panels WHERE parent_type=? AND parent_id=? ORDER BY id').all(type, id);
+  for (const p of panels) p.used_ports = db.prepare('SELECT * FROM patch_ports WHERE panel_id=? ORDER BY port_no').all(p.id);
+  return panels;
+}
+app.get('/api/patch/:type/:id', (req, res) => {
+  const { type, id } = req.params; const parent = patchParent(type, id);
+  if (!parent) return res.status(404).json({ error: 'not found' });
+  const ctx = patchContext(type, id);
+  res.json({ parent: { id: parent.id, name: parent.name, type }, enabled: !!parent.patch_enabled, panels: loadPanels(type, id), devices: ctx.devices, circuits: ctx.circuits });
+});
+app.post('/api/patch/:type/:id/enable', requireNoc, (req, res) => {
+  const { type, id } = req.params; const parent = patchParent(type, id); if (!parent) return res.status(404).json({ error: 'not found' });
+  const on = (req.body || {}).enabled ? 1 : 0;
+  db.prepare(`UPDATE ${type === 'pop' ? 'pops' : 'sites'} SET patch_enabled=? WHERE id=?`).run(on, id);
+  audit(req, 'edit', type + '#' + id, 'patch panels ' + (on ? 'enabled' : 'disabled'));
+  res.json({ ok: true, enabled: !!on });
+});
+app.post('/api/patch/:type/:id/panels', requireNoc, (req, res) => {
+  const { type, id } = req.params; const parent = patchParent(type, id); if (!parent) return res.status(404).json({ error: 'not found' });
+  const b = req.body || {}; if (!b.name) return res.status(400).json({ error: 'Panel name required' });
+  const ports = Math.min(Math.max(parseInt(b.ports, 10) || 24, 1), 288);
+  const info = db.prepare('INSERT INTO patch_panels (parent_type,parent_id,name,location,ports,notes) VALUES (?,?,?,?,?,?)').run(type, id, String(b.name).slice(0, 120), N(b.location), ports, N(b.notes));
+  if (!parent.patch_enabled) db.prepare(`UPDATE ${type === 'pop' ? 'pops' : 'sites'} SET patch_enabled=1 WHERE id=?`).run(id);
+  audit(req, 'create', type + '#' + id, 'patch panel ' + b.name);
+  res.json({ id: info.lastInsertRowid });
+});
+app.put('/api/patch/panels/:pid', requireNoc, (req, res) => {
+  const p = db.prepare('SELECT * FROM patch_panels WHERE id=?').get(req.params.pid); if (!p) return res.status(404).json({ error: 'not found' });
+  const b = req.body || {}; const ports = Math.min(Math.max(parseInt(b.ports, 10) || p.ports, 1), 288);
+  db.prepare('UPDATE patch_panels SET name=?, location=?, ports=?, notes=? WHERE id=?').run(N(b.name, p.name), N(b.location, p.location), ports, N(b.notes, p.notes), p.id);
+  if (ports < p.ports) db.prepare('DELETE FROM patch_ports WHERE panel_id=? AND port_no>?').run(p.id, ports); // drop rows for removed ports
+  audit(req, 'edit', p.parent_type + '#' + p.parent_id, 'patch panel#' + p.id);
+  res.json({ ok: true });
+});
+app.delete('/api/patch/panels/:pid', requireNoc, (req, res) => {
+  const p = db.prepare('SELECT * FROM patch_panels WHERE id=?').get(req.params.pid); if (!p) return res.status(404).json({ error: 'not found' });
+  db.prepare('DELETE FROM patch_ports WHERE panel_id=?').run(p.id);
+  db.prepare('DELETE FROM patch_panels WHERE id=?').run(p.id);
+  audit(req, 'delete', p.parent_type + '#' + p.parent_id, 'patch panel#' + p.id);
+  res.json({ ok: true });
+});
+// upsert a single port. Empty/free with no data clears the row.
+app.put('/api/patch/panels/:pid/ports/:portNo', requireNoc, (req, res) => {
+  const p = db.prepare('SELECT * FROM patch_panels WHERE id=?').get(req.params.pid); if (!p) return res.status(404).json({ error: 'not found' });
+  const portNo = parseInt(req.params.portNo, 10);
+  if (!(portNo >= 1 && portNo <= p.ports)) return res.status(400).json({ error: 'port out of range' });
+  const b = req.body || {};
+  const status = PATCH_PORT_STATUS.includes(b.status) ? b.status : 'free';
+  const deviceId = b.device_id ? Number(b.device_id) : null;
+  const circuitId = b.circuit_id ? Number(b.circuit_id) : null;
+  const vals = { label: N(b.label) || null, device_id: deviceId, device_text: N(b.device_text) || null, circuit_id: circuitId, circuit_text: N(b.circuit_text) || null, far_end: N(b.far_end) || null, status, note: N(b.note) || null };
+  const empty = !vals.label && !vals.device_id && !vals.device_text && !vals.circuit_id && !vals.circuit_text && !vals.far_end && !vals.note && status === 'free';
+  if (empty) { db.prepare('DELETE FROM patch_ports WHERE panel_id=? AND port_no=?').run(p.id, portNo); return res.json({ ok: true, cleared: true }); }
+  db.prepare(`INSERT INTO patch_ports (panel_id,port_no,label,device_id,device_text,circuit_id,circuit_text,far_end,status,note)
+    VALUES (@panel_id,@port_no,@label,@device_id,@device_text,@circuit_id,@circuit_text,@far_end,@status,@note)
+    ON CONFLICT(panel_id,port_no) DO UPDATE SET label=@label,device_id=@device_id,device_text=@device_text,circuit_id=@circuit_id,circuit_text=@circuit_text,far_end=@far_end,status=@status,note=@note`)
+    .run({ panel_id: p.id, port_no: portNo, ...vals });
+  res.json({ ok: true });
+});
 app.post('/api/pops/:id/notes', (req, res) => {
   const b = req.body || {};
   const info = db.prepare('INSERT INTO pop_notes (pop_id, author, author_role, body) VALUES (?,?,?,?)').run(req.params.id, b.author || 'tester', role(req), N(b.body));
