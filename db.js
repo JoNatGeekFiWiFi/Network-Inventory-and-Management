@@ -168,6 +168,17 @@ export function migrate() {
     far_end TEXT, status TEXT NOT NULL DEFAULT 'free', note TEXT,
     UNIQUE(panel_id, port_no))`);
   db.exec('CREATE INDEX IF NOT EXISTS idx_patch_ports ON patch_ports(panel_id)');
+  // Standalone circuit inventory: a circuit connects two endpoints, each a site | pop | carrier (>=1 internal).
+  // a_ref_id / z_ref_id point into sites, pops, or upstream_providers depending on the paired *_type.
+  db.exec(`CREATE TABLE IF NOT EXISTS circuits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT,
+    a_type TEXT NOT NULL, a_ref_id INTEGER,
+    z_type TEXT NOT NULL, z_ref_id INTEGER,
+    provider_id INTEGER, circuit_id TEXT, ctype TEXT, bandwidth TEXT,
+    status TEXT NOT NULL DEFAULT 'Up', monthly_cost REAL, install_date TEXT, notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_circuits_a ON circuits(a_type, a_ref_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_circuits_z ON circuits(z_type, z_ref_id)');
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.
@@ -325,7 +336,7 @@ export function seed() {
 // CLI: node db.js --seed | --reset
 const arg = process.argv[2];
 if (arg === '--reset') {
-  for (const t of ['audit_log','devices','connections','site_notes','site_access','sites','previous_isps','account_contacts','accounts','controllers','device_models','upstream_providers','pops']) {
+  for (const t of ['audit_log','devices','connections','circuits','site_notes','site_access','sites','previous_isps','account_contacts','accounts','controllers','device_models','upstream_providers','pops']) {
     try { db.exec(`DROP TABLE IF EXISTS ${t}`); } catch {}
   }
   initSchema(); seed();

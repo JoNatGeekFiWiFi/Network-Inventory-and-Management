@@ -1756,6 +1756,82 @@ app.delete('/api/pops/:id/circuits/:cid', requireNoc, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---- circuits (standalone A<->Z inventory; endpoints are site | pop | carrier) ----
+const CIRCUIT_ENDPOINT_TYPES = ['site', 'pop', 'carrier'];
+const CIRCUIT_STATUS = ['Up', 'Standby', 'Down', 'Planned', 'Decommissioned'];
+function endpointName(type, refId) {
+  if (!refId) return null;
+  if (type === 'site') { const r = db.prepare('SELECT name FROM sites WHERE id=?').get(refId); return r ? r.name : null; }
+  if (type === 'pop') { const r = db.prepare('SELECT name FROM pops WHERE id=?').get(refId); return r ? r.name : null; }
+  if (type === 'carrier') { const r = db.prepare('SELECT name FROM upstream_providers WHERE id=?').get(refId); return r ? r.name : null; }
+  return null;
+}
+const endpointHref = (type, refId) => (type === 'site' ? '#/site/' + refId : type === 'pop' ? '#/pop/' + refId : null);
+function decorateCircuit(c) {
+  return {
+    ...c,
+    a_name: endpointName(c.a_type, c.a_ref_id), a_href: endpointHref(c.a_type, c.a_ref_id),
+    z_name: endpointName(c.z_type, c.z_ref_id), z_href: endpointHref(c.z_type, c.z_ref_id),
+    provider_name: c.provider_id ? (db.prepare('SELECT name FROM upstream_providers WHERE id=?').get(c.provider_id) || {}).name : null
+  };
+}
+// validate + normalize an endpoint from the request body ({a_type,a_ref_id} etc)
+function validEndpoint(type, refId) {
+  if (!CIRCUIT_ENDPOINT_TYPES.includes(type)) return { error: 'endpoint type must be site, pop, or carrier' };
+  if (!refId) return { error: 'pick an endpoint' };
+  if (!endpointName(type, refId)) return { error: 'endpoint not found' };
+  return { ok: true };
+}
+app.get('/api/circuits-options', (req, res) => {
+  res.json({
+    sites: db.prepare('SELECT id, name FROM sites ORDER BY name').all(),
+    pops: db.prepare('SELECT id, name FROM pops ORDER BY name').all(),
+    carriers: db.prepare('SELECT id, name FROM upstream_providers ORDER BY name').all()
+  });
+});
+app.get('/api/circuits', (req, res) => {
+  const q = '%' + String(req.query.q || '').trim() + '%'; const st = String(req.query.status || '');
+  let rows = db.prepare('SELECT * FROM circuits ORDER BY id DESC').all().map(decorateCircuit);
+  if (req.query.ref) { const [t, idr] = String(req.query.ref).split(':'); const rid = Number(idr); rows = rows.filter(c => (c.a_type === t && c.a_ref_id === rid) || (c.z_type === t && c.z_ref_id === rid)); }
+  if (st) rows = rows.filter(c => c.status === st);
+  if (req.query.q) { const needle = String(req.query.q).toLowerCase(); rows = rows.filter(c => [c.label, c.circuit_id, c.a_name, c.z_name, c.provider_name, c.bandwidth, c.ctype].some(x => (x || '').toLowerCase().includes(needle))); }
+  res.json(rows);
+});
+app.get('/api/circuits/:id', (req, res) => {
+  const c = db.prepare('SELECT * FROM circuits WHERE id=?').get(req.params.id);
+  if (!c) return res.status(404).json({ error: 'not found' });
+  res.json(decorateCircuit(c));
+});
+function circuitFromBody(b) {
+  const a = validEndpoint(b.a_type, Number(b.a_ref_id) || null); if (a.error) return { error: 'A-end: ' + a.error };
+  const z = validEndpoint(b.z_type, Number(b.z_ref_id) || null); if (z.error) return { error: 'Z-end: ' + z.error };
+  if (b.a_type === 'carrier' && b.z_type === 'carrier') return { error: 'At least one end must be your own site or POP' };
+  const status = CIRCUIT_STATUS.includes(b.status) ? b.status : 'Up';
+  const cost = b.monthly_cost === '' || b.monthly_cost == null ? null : (parseFloat(b.monthly_cost) || null);
+  return { vals: { label: N(b.label) || null, a_type: b.a_type, a_ref_id: Number(b.a_ref_id), z_type: b.z_type, z_ref_id: Number(b.z_ref_id), provider_id: b.provider_id ? Number(b.provider_id) : null, circuit_id: N(b.circuit_id) || null, ctype: N(b.ctype) || null, bandwidth: N(b.bandwidth) || null, status, monthly_cost: cost, install_date: N(b.install_date) || null, notes: N(b.notes) || null } };
+}
+app.post('/api/circuits', requireNoc, (req, res) => {
+  const r = circuitFromBody(req.body || {}); if (r.error) return res.status(400).json({ error: r.error });
+  const v = r.vals;
+  const info = db.prepare(`INSERT INTO circuits (label,a_type,a_ref_id,z_type,z_ref_id,provider_id,circuit_id,ctype,bandwidth,status,monthly_cost,install_date,notes)
+    VALUES (@label,@a_type,@a_ref_id,@z_type,@z_ref_id,@provider_id,@circuit_id,@ctype,@bandwidth,@status,@monthly_cost,@install_date,@notes)`).run(v);
+  audit(req, 'create', 'circuit#' + info.lastInsertRowid, v.label || (endpointName(v.a_type, v.a_ref_id) + ' ↔ ' + endpointName(v.z_type, v.z_ref_id)));
+  res.json({ id: info.lastInsertRowid });
+});
+app.put('/api/circuits/:id', requireNoc, (req, res) => {
+  const ex = db.prepare('SELECT * FROM circuits WHERE id=?').get(req.params.id); if (!ex) return res.status(404).json({ error: 'not found' });
+  const r = circuitFromBody(req.body || {}); if (r.error) return res.status(400).json({ error: r.error });
+  const v = r.vals;
+  db.prepare(`UPDATE circuits SET label=@label,a_type=@a_type,a_ref_id=@a_ref_id,z_type=@z_type,z_ref_id=@z_ref_id,provider_id=@provider_id,circuit_id=@circuit_id,ctype=@ctype,bandwidth=@bandwidth,status=@status,monthly_cost=@monthly_cost,install_date=@install_date,notes=@notes WHERE id=@id`).run({ ...v, id: Number(req.params.id) });
+  audit(req, 'edit', 'circuit#' + req.params.id, v.label || '');
+  res.json({ ok: true });
+});
+app.delete('/api/circuits/:id', requireNoc, (req, res) => {
+  db.prepare('DELETE FROM circuits WHERE id=?').run(req.params.id);
+  audit(req, 'delete', 'circuit#' + req.params.id);
+  res.json({ ok: true });
+});
+
 // ---- patch panel documentation (per site or POP; opt-in) ----
 const PATCH_PORT_STATUS = ['free', 'used', 'reserved'];
 function patchParent(type, id) {

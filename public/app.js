@@ -124,6 +124,10 @@ async function route() {
     if (p[0] === 'pop' && p[2] === 'circuit' && p[3]) { setNav('sites'); return await formPopCircuit({ popId: p[1], id: p[3] }); }
     if (p[0] === 'pop' && p[2] === 'patch') { setNav('sites'); return await renderPatch('pop', p[1]); }
     if (p[0] === 'pop') { setNav('sites'); return await renderPop(p[1]); }
+    if (p[0] === 'circuits') { setNav('circuits'); return await renderCircuits(); }
+    if (p[0] === 'circuit' && p[1] === 'new') { setNav('circuits'); return await formCircuit({}); }
+    if (p[0] === 'circuit' && p[2] === 'edit') { setNav('circuits'); return await formCircuit({ id: p[1] }); }
+    if (p[0] === 'circuit') { setNav('circuits'); return await renderCircuit(p[1]); }
     if (p[0] === 'accounts') { setNav('accounts'); return await renderCustomers(); }
     if (p[0] === 'customers') { setNav('customers'); return await renderCustomerList(); }
     if (p[0] === 'account' && p[1] === 'new') { setNav('accounts'); return await formCustomer({}); }
@@ -237,8 +241,21 @@ function delPopNote(id, popId) {
   if (confirm('Delete this note and its attachments?')) doDelete('/pop-notes/' + id, 'Note deleted', () => renderPopNotes(popId));
 }
 
+function circuitMiniRows(circuits, selfType, selfId) {
+  return circuits.map(c => {
+    const farIsA = !(c.a_type === selfType && c.a_ref_id === Number(selfId));
+    const farName = farIsA ? c.a_name : c.z_name, farType = farIsA ? c.a_type : c.z_type, farHref = farIsA ? c.a_href : c.z_href;
+    const far = farHref ? `<a class="iplink" href="${farHref}">${esc(farName || '—')}</a>` : esc(farName || '—');
+    return `<div class="row rowlink" onclick="location.hash='#/circuit/${c.id}'">
+      <i class="ti ti-topology-star-3 sec-muted"></i>
+      <div style="flex:1;min-width:0"><div>${c.label ? esc(c.label) + ' · ' : ''}<span class="muted">↔</span> ${far}</div>
+        <div class="small sec-muted">${c.ctype ? esc(c.ctype) + ' · ' : ''}${c.bandwidth ? esc(c.bandwidth) + ' · ' : ''}${c.circuit_id ? 'ID ' + esc(c.circuit_id) : (c.provider_name ? esc(c.provider_name) : 'no circuit ID')}</div></div>
+      ${statusPill(c.status)}<i class="ti ti-chevron-right muted"></i></div>`;
+  }).join('');
+}
 async function renderSite(id) {
   const s = await api('/sites/' + id);
+  const circuits = await api('/circuits?ref=site:' + id).catch(() => []);
   const connCards = s.connections.map(c => {
     const ipline = c.ip_type === 'Static' ? `Static · ${esc(c.static_ip || '')}` : `Dynamic · ${esc(c.current_ip || '')}`;
     return `<div class="metric" style="background:var(--surface);border:.5px solid var(--border)">
@@ -282,6 +299,9 @@ async function renderSite(id) {
       ${hw}
     </div>
 
+    <div class="card"><div class="hd"><h2><i class="ti ti-topology-star-3"></i> Circuits · ${circuits.length}</h2>${isPriv() ? `<a class="btn sm" href="#/circuit/new"><i class="ti ti-plus"></i> Add circuit</a>` : ''}</div>
+      ${circuits.length ? circuitMiniRows(circuits, 'site', s.id) : '<div class="row muted">No circuits reference this site. Add one from the Circuits menu or the button above.</div>'}</div>
+
     <div class="card"><div class="row rowlink" onclick="location.hash='#/site/${s.id}/patch'">
       <i class="ti ti-layout-grid sec-muted"></i>
       <div style="flex:1;min-width:0"><div>Patch panels</div><div class="small sec-muted">${s.patch_enabled ? 'Documented — ports labelled to devices &amp; circuits' : 'Not set up — click to enable'}</div></div>
@@ -312,6 +332,7 @@ async function renderPops() {
 }
 async function renderPop(id) {
   const p = await api('/pops/' + id);
+  const circuits = await api('/circuits?ref=pop:' + id).catch(() => []);
   const where = p.address ? `<a class="iplink" href="https://maps.google.com/?q=${encodeURIComponent(p.address)}" target="_blank">${esc(p.address)} <i class="ti ti-external-link" style="font-size:11px"></i></a>`
     : (p.lat != null ? `<a class="iplink mono" href="https://maps.google.com/?q=${p.lat},${p.lng}" target="_blank">${p.lat}, ${p.lng}</a> <span class="muted small">· GPS</span>` : '—');
   const hw = p.devices.map(d => `<div class="row rowlink" onclick="location.hash='#/device/${d.id}'">
@@ -336,6 +357,8 @@ async function renderPop(id) {
           <div class="small mono sec-muted">${c.circuit_id ? esc(c.circuit_id) : 'no circuit ID'}${c.notes ? ' · ' + esc(c.notes) : ''}</div></div>
         ${statusPill(c.status)}${isPriv() ? '<i class="ti ti-chevron-right muted"></i>' : ''}</div>`).join('') : '<div class="row muted">No upstream circuits defined — Add circuit to record where this POP gets bandwidth.</div>'}</div>
     <div class="card"><div class="hd"><h2>Hardware · ${p.devices.length}</h2><a class="btn sm" href="#/device/new?pop=${p.id}"><i class="ti ti-plus"></i> Add hardware</a></div>${hw}</div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-topology-star-3"></i> Circuits · ${circuits.length}</h2>${isPriv() ? `<a class="btn sm" href="#/circuit/new"><i class="ti ti-plus"></i> Add circuit</a>` : ''}</div>
+      ${circuits.length ? circuitMiniRows(circuits, 'pop', p.id) : '<div class="row muted">No circuits reference this POP. The Upstream/bandwidth card above tracks POP feeds; use Circuits for site-to-site or carrier links.</div>'}</div>
     <div class="card"><div class="row rowlink" onclick="location.hash='#/pop/${p.id}/patch'">
       <i class="ti ti-layout-grid sec-muted"></i>
       <div style="flex:1;min-width:0"><div>Patch panels</div><div class="small sec-muted">${p.patch_enabled ? 'Documented — ports labelled to devices &amp; circuits' : 'Not set up — click to enable'}</div></div>
@@ -2150,6 +2173,105 @@ async function showWg(id) {
 }
 
 // ---------- Support / trouble tickets ----------
+// ---------- Circuits (standalone A<->Z inventory) ----------
+const CIRCUIT_TYPES = ['Fiber', 'Coax', 'Fixed Wireless', 'Ethernet', 'T1', 'Other'];
+const CIRCUIT_STATUSES = ['Up', 'Standby', 'Down', 'Planned', 'Decommissioned'];
+const endTypeIcon = t => t === 'carrier' ? 'ti-building-broadcast-tower' : t === 'pop' ? 'ti-server-2' : 'ti-map-pin';
+function endpointChip(name, type, href) {
+  const inner = `<i class="ti ${endTypeIcon(type)}" style="font-size:12px"></i> ${esc(name || '—')}`;
+  return href ? `<a class="iplink" href="${href}">${inner}</a>` : `<span>${inner}</span>`;
+}
+async function renderCircuits() {
+  view().innerHTML = `<div class="head"><div class="t"><h1>Circuits</h1><div class="small sec-muted" style="margin-top:3px">Site-to-site and carrier links across your network</div></div>
+    ${isPriv() ? '<a class="btn primary" href="#/circuit/new"><i class="ti ti-plus"></i> Add circuit</a>' : ''}</div>
+    <div style="display:flex;gap:8px;margin:14px 0 10px">
+      <input id="cq" placeholder="Search label, circuit ID, endpoint, carrier…" style="flex:1" oninput="circSearch()"/>
+      <select id="cst" style="width:auto" onchange="loadCirc()"><option value="">All statuses</option>${CIRCUIT_STATUSES.map(s => `<option value="${s}">${s}</option>`).join('')}</select></div>
+    <div class="card" id="clist"><div class="loading">Loading…</div></div>`;
+  loadCirc();
+}
+function circSearch() { clearTimeout(window._cqT); window._cqT = setTimeout(loadCirc, 250); }
+async function loadCirc() {
+  const box = $('#clist'); if (!box) return;
+  const q = $('#cq') ? $('#cq').value.trim() : '', st = $('#cst') ? $('#cst').value : '';
+  const rows = await api('/circuits?q=' + encodeURIComponent(q) + '&status=' + encodeURIComponent(st));
+  box.innerHTML = rows.map(c => `<div class="row rowlink" onclick="location.hash='#/circuit/${c.id}'">
+    <i class="ti ti-topology-star-3 sec-muted"></i>
+    <div style="flex:1;min-width:0">
+      <div>${c.label ? '<b>' + esc(c.label) + '</b> · ' : ''}${esc(c.a_name || '—')} <span class="muted">↔</span> ${esc(c.z_name || '—')}</div>
+      <div class="small sec-muted">${c.ctype ? esc(c.ctype) + ' · ' : ''}${c.bandwidth ? esc(c.bandwidth) + ' · ' : ''}${c.provider_name ? esc(c.provider_name) + ' · ' : ''}${c.circuit_id ? 'ID ' + esc(c.circuit_id) : 'no circuit ID'}</div>
+    </div>${statusPill(c.status)}<i class="ti ti-chevron-right muted"></i></div>`).join('') || '<div class="row muted">No circuits yet</div>';
+}
+async function renderCircuit(id) {
+  const c = await api('/circuits/' + id);
+  const row = (l, v) => v ? `<div class="row"><div style="width:150px;color:var(--muted)">${l}</div><div style="flex:1">${v}</div></div>` : '';
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/circuits'"><i class="ti ti-chevron-left"></i> Circuits</div>
+    <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(c.label || (c.a_name + ' ↔ ' + c.z_name))}</h1>${statusPill(c.status)}</div>
+      <div class="small sec-muted" style="margin-top:3px">${endpointChip(c.a_name, c.a_type, c.a_href)} <span class="muted">↔</span> ${endpointChip(c.z_name, c.z_type, c.z_href)}</div></div>
+      ${isPriv() ? `<a class="btn" href="#/circuit/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a><button class="btn" onclick="delCkt(${c.id})"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
+    <div class="card" style="margin-top:14px">
+      ${row('A-end', endpointChip(c.a_name, c.a_type, c.a_href))}
+      ${row('Z-end', endpointChip(c.z_name, c.z_type, c.z_href))}
+      ${row('Carrier', c.provider_name ? esc(c.provider_name) : '')}
+      ${row('Circuit ID', c.circuit_id ? '<span class="mono">' + esc(c.circuit_id) + '</span>' : '')}
+      ${row('Type', c.ctype ? esc(c.ctype) : '')}
+      ${row('Bandwidth', c.bandwidth ? esc(c.bandwidth) : '')}
+      ${row('Monthly cost', c.monthly_cost != null ? '$' + Number(c.monthly_cost).toLocaleString(undefined, { minimumFractionDigits: 2 }) : '')}
+      ${row('Install date', c.install_date ? esc(c.install_date) : '')}
+      ${row('Notes', c.notes ? esc(c.notes) : '')}
+    </div>`;
+}
+function circRefOptions(type, sel) {
+  const o = window._circOpts || { sites: [], pops: [], carriers: [] };
+  const list = type === 'site' ? o.sites : type === 'pop' ? o.pops : o.carriers;
+  return list.map(x => `<option value="${x.id}" ${String(sel) === String(x.id) ? 'selected' : ''}>${esc(x.name)}</option>`).join('');
+}
+function circEndpoint(side, sel) {
+  const type = $('#' + side + '_type').value;
+  $('#' + side + '_ref').innerHTML = circRefOptions(type, sel);
+}
+async function formCircuit(qy) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  window._circOpts = await api('/circuits-options');
+  let c = { a_type: 'site', z_type: 'carrier', status: 'Up' };
+  if (qy.id) c = await api('/circuits/' + qy.id);
+  const typeSel = (side, cur) => `<select id="${side}_type" onchange="circEndpoint('${side}')" style="width:110px">${[['site', 'Site'], ['pop', 'POP'], ['carrier', 'Carrier']].map(t => `<option value="${t[0]}" ${cur === t[0] ? 'selected' : ''}>${t[1]}</option>`).join('')}</select>`;
+  view().innerHTML = `<div class="crumb" onclick="location.hash='${qy.id ? '#/circuit/' + qy.id : '#/circuits'}'"><i class="ti ti-chevron-left"></i> Back</div>
+    <h1>${qy.id ? 'Edit' : 'Add'} circuit</h1>
+    <div class="card" style="margin-top:14px;padding:16px" id="cf">
+      ${field('Label (optional)', 'label', c.label || '', { ph: 'e.g. HQ ↔ Warehouse dark fiber' })}
+      <div class="grid2">
+        <div class="fld"><label class="fl">A-end</label><div style="display:flex;gap:8px">${typeSel('a', c.a_type)}<select id="a_ref" style="flex:1"></select></div></div>
+        <div class="fld"><label class="fl">Z-end</label><div style="display:flex;gap:8px">${typeSel('z', c.z_type)}<select id="z_ref" style="flex:1"></select></div></div>
+      </div>
+      <div class="help">At least one end must be your own site or POP.</div>
+      <div class="grid2">${field('Carrier (owner, optional)', 'provider_id', c.provider_id || '', { type: 'select', options: [{ v: '', l: '— none —' }].concat((window._circOpts.carriers || []).map(x => ({ v: x.id, l: x.name }))) })}${field('Circuit ID', 'circuit_id', c.circuit_id || '', { mono: true, ph: 'carrier / internal reference' })}</div>
+      <div class="grid2">${field('Type', 'ctype', c.ctype || '', { type: 'select', options: [{ v: '', l: '—' }].concat(CIRCUIT_TYPES.map(t => ({ v: t, l: t }))) })}${field('Bandwidth', 'bandwidth', c.bandwidth || '', { ph: 'e.g. 1 Gbps' })}</div>
+      <div class="grid2">${field('Status', 'status', c.status || 'Up', { type: 'select', options: CIRCUIT_STATUSES })}${field('Monthly cost', 'monthly_cost', c.monthly_cost != null ? c.monthly_cost : '', { ph: 'e.g. 450' })}</div>
+      <div class="grid2">${field('Install / turn-up date', 'install_date', c.install_date || '', { type: 'date' })}${field('Notes', 'notes', c.notes || '', { ph: 'optional' })}</div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
+      <button class="btn primary" onclick="saveCkt(${qy.id || 'null'})"><i class="ti ti-check"></i> Save</button></div>
+    </div>`;
+  circEndpoint('a', c.a_ref_id); circEndpoint('z', c.z_ref_id);
+}
+async function saveCkt(id) {
+  const d = collect('#cf');
+  d.a_type = $('#a_type').value; d.a_ref_id = $('#a_ref').value;
+  d.z_type = $('#z_type').value; d.z_ref_id = $('#z_ref').value;
+  if (!d.a_ref_id || !d.z_ref_id) { toast('Pick both endpoints'); return; }
+  if (d.a_type === 'carrier' && d.z_type === 'carrier') { toast('At least one end must be a site or POP'); return; }
+  try {
+    if (id) { await api('/circuits/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/circuit/' + id; }
+    else { const r = await api('/circuits', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/circuit/' + r.id; }
+    toast('Saved');
+  } catch (e) { toast(e.message); }
+}
+async function delCkt(id) {
+  if (!confirm('Delete this circuit?')) return;
+  try { await api('/circuits/' + id, { method: 'DELETE' }); toast('Circuit deleted'); location.hash = '#/circuits'; }
+  catch (e) { toast(e.message); }
+}
+
 // ---------- Patch panel documentation (per site / POP) ----------
 const PATCH_STATUS_COL = { free: 'var(--muted)', used: 'var(--success,#1D9E75)', reserved: 'var(--warning)' };
 function patchDevName(idOrNull) { const d = (window._patch.devices || []).find(x => x.id === idOrNull); return d ? d.name : ''; }
