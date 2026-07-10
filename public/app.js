@@ -2212,7 +2212,7 @@ function panelCard(panel) {
   const usedCount = (panel.used_ports || []).filter(p => p.status !== 'free').length;
   return `<div class="card">
     <div class="hd" id="panelhd-${panel.id}"><h2>${esc(panel.name)} <span class="small sec-muted" style="font-weight:400">· ${panel.ports} ports · ${usedCount} used${panel.location ? ' · ' + esc(panel.location) : ''}</span></h2>
-      ${isPriv() ? `<span style="display:flex;gap:6px"><button class="btn sm" onclick="editPanel(${panel.id})" title="Edit panel"><i class="ti ti-edit"></i></button><button class="btn sm" onclick="delPanel(${panel.id})" title="Delete panel"><i class="ti ti-trash"></i></button></span>` : ''}</div>
+      ${isPriv() ? `<span style="display:flex;gap:6px"><button class="btn sm" onclick="editPanel(${panel.id})" title="Edit panel"><i class="ti ti-edit"></i> Edit</button><button class="btn sm" onclick="delPanel(${panel.id})" title="Delete panel"><i class="ti ti-trash"></i> Delete</button></span>` : ''}</div>
     ${panel.notes ? `<div class="small sec-muted" style="padding:0 14px 8px">${esc(panel.notes)}</div>` : ''}
     <div style="padding:0 6px 8px">${rows}</div></div>`;
 }
@@ -2230,7 +2230,7 @@ function portRow(panelId, n, pt) {
     <span class="mono" style="width:30px;text-align:right;color:var(--muted)">${n}</span>
     <span title="${status}" style="width:10px;height:10px;border-radius:50%;background:${PATCH_STATUS_COL[status]};flex:none"></span>
     <div style="flex:1;min-width:0;font-size:13px">${summary}${pt && pt.note ? `<div class="small sec-muted">${esc(pt.note)}</div>` : ''}</div>
-    ${isPriv() ? `<button class="btn sm" onclick="editPort(${panelId},${n})"><i class="ti ti-edit"></i></button>` : ''}</div>`;
+    ${isPriv() ? `<button class="btn sm" onclick="editPort(${panelId},${n})"><i class="ti ti-edit"></i> Edit</button>` : ''}</div>`;
 }
 function editPort(panelId, n) {
   const panel = window._patch.panels.find(p => p.id === panelId); const pt = (panel.used_ports || []).find(x => x.port_no === n) || {};
