@@ -1419,6 +1419,10 @@ function publicDevice(d) {
   for (const f of ALL_CREDS) { out['has_' + f] = !!out[f]; delete out[f]; }
   out.wg_provisioned = !!out.wg_private_key;
   delete out.wg_private_key; // only released via the audited config endpoint
+  if (out.owner_subaccount_id) {
+    const sa = db.prepare('SELECT sa.name, a.name AS account_name FROM account_subaccounts sa JOIN accounts a ON a.id=sa.account_id WHERE sa.id=?').get(out.owner_subaccount_id);
+    if (sa) { out.owner_subaccount_name = sa.name; out.owner_subaccount_account = sa.account_name; }
+  }
   return out;
 }
 
@@ -1512,14 +1516,18 @@ app.get('/api/accounts/:id', (req, res) => {
   a.has_pin = !!a.pin;
   a.has_portal_password = !!a.portal_password;
   a.has_security_questions = !!a.security_questions;
+  a.subaccounts = db.prepare('SELECT * FROM account_subaccounts WHERE account_id=? ORDER BY id').all(a.id).map(s => subAcctOut(s, req));
   if (!isPriv(req)) { delete a.pin; delete a.portal_password; delete a.security_questions; } // sensitive: NOC/Admin only
   res.json(a);
 });
+// PIN is NOC/Admin-only, mirror the account pattern
+function subAcctOut(s, req) { const o = { ...s, has_pin: !!s.pin }; if (!isPriv(req)) delete o.pin; return o; }
 
 app.post('/api/accounts', requireNoc, (req, res) => {
   const b = req.body || {};
-  const info = db.prepare('INSERT INTO accounts (name, account_number, sub_account, pin, email, portal_url, portal_password, security_questions, status, billing_address, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.pin), N(b.email), N(b.portal_url), N(b.portal_password), N(b.security_questions), b.status || 'Active', N(b.billing_address), N(b.notes));
+  const cost = b.monthly_cost === '' || b.monthly_cost == null ? null : (parseFloat(b.monthly_cost) || null);
+  const info = db.prepare('INSERT INTO accounts (name, account_number, sub_account, pin, email, portal_url, portal_password, security_questions, status, billing_address, notes, monthly_cost) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.pin), N(b.email), N(b.portal_url), N(b.portal_password), N(b.security_questions), b.status || 'Active', N(b.billing_address), N(b.notes), cost);
   const id = info.lastInsertRowid;
   for (const c of (b.contacts || [])) {
     db.prepare('INSERT INTO account_contacts (account_id,name,role,email,phone,is_primary,is_billing) VALUES (?,?,?,?,?,?,?)')
@@ -1537,6 +1545,7 @@ app.put('/api/accounts/:id', requireNoc, (req, res) => {
   const b = req.body || {};
   db.prepare('UPDATE accounts SET name=?, account_number=?, sub_account=?, email=?, portal_url=?, status=?, billing_address=?, notes=? WHERE id=?')
     .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.email), N(b.portal_url), N(b.status, 'Active'), N(b.billing_address), N(b.notes), req.params.id);
+  if (b.monthly_cost !== undefined) db.prepare('UPDATE accounts SET monthly_cost=? WHERE id=?').run(b.monthly_cost === '' ? null : (parseFloat(b.monthly_cost) || null), req.params.id);
   if (b.pin) db.prepare('UPDATE accounts SET pin=? WHERE id=?').run(b.pin, req.params.id);
   if (b.portal_password) db.prepare('UPDATE accounts SET portal_password=? WHERE id=?').run(b.portal_password, req.params.id);
   if (b.security_questions) db.prepare('UPDATE accounts SET security_questions=? WHERE id=?').run(b.security_questions, req.params.id);
@@ -1550,11 +1559,106 @@ app.delete('/api/accounts/:id', requireNoc, (req, res) => {
   const nc = db.prepare('SELECT COUNT(*) AS n FROM account_customers WHERE account_id=?').get(req.params.id).n;
   if (ns + nc > 0) return res.status(409).json({ error: `In use by ${nc} customer(s) and ${ns} site(s) — reassign or delete those first` });
   db.prepare('DELETE FROM accounts WHERE id=?').run(req.params.id);
+  db.prepare('DELETE FROM account_subaccounts WHERE account_id=?').run(req.params.id);
   audit(req, 'delete', 'account#' + req.params.id);
   res.json({ ok: true });
 });
 
+// ---- sub-accounts (many per account; each with its own PIN, status, monthly bill) ----
+const SUBACCT_STATUS = ['active', 'suspended', 'closed'];
+app.get('/api/accounts/:id/subaccounts', (req, res) => {
+  res.json(db.prepare('SELECT * FROM account_subaccounts WHERE account_id=? ORDER BY id').all(req.params.id).map(s => subAcctOut(s, req)));
+});
+// flat list across all accounts (for the device ownership picker)
+app.get('/api/subaccounts', (req, res) => {
+  res.json(db.prepare('SELECT sa.id, sa.account_id, sa.name, sa.status, a.name AS account_name FROM account_subaccounts sa JOIN accounts a ON a.id=sa.account_id ORDER BY a.name, sa.name').all());
+});
+app.post('/api/accounts/:id/subaccounts', requireNoc, (req, res) => {
+  const a = db.prepare('SELECT id FROM accounts WHERE id=?').get(req.params.id); if (!a) return res.status(404).json({ error: 'account not found' });
+  const b = req.body || {}; if (!b.name) return res.status(400).json({ error: 'Sub-account number/name required' });
+  const status = SUBACCT_STATUS.includes(b.status) ? b.status : 'active';
+  const cost = b.monthly_cost === '' || b.monthly_cost == null ? null : (parseFloat(b.monthly_cost) || null);
+  const info = db.prepare('INSERT INTO account_subaccounts (account_id,name,pin,status,monthly_cost,notes) VALUES (?,?,?,?,?,?)')
+    .run(a.id, String(b.name).slice(0, 120), N(b.pin) || null, status, cost, N(b.notes) || null);
+  audit(req, 'create', 'account#' + a.id, 'sub-account ' + b.name);
+  res.json({ id: info.lastInsertRowid });
+});
+app.put('/api/accounts/:id/subaccounts/:sid', requireNoc, (req, res) => {
+  const ex = db.prepare('SELECT * FROM account_subaccounts WHERE id=? AND account_id=?').get(req.params.sid, req.params.id);
+  if (!ex) return res.status(404).json({ error: 'not found' });
+  const b = req.body || {};
+  const status = SUBACCT_STATUS.includes(b.status) ? b.status : ex.status;
+  const cost = b.monthly_cost === '' ? null : (b.monthly_cost == null ? ex.monthly_cost : (parseFloat(b.monthly_cost) || null));
+  db.prepare('UPDATE account_subaccounts SET name=?, status=?, monthly_cost=?, notes=? WHERE id=?')
+    .run(N(b.name, ex.name), status, cost, N(b.notes) || null, ex.id);
+  if (b.pin) db.prepare('UPDATE account_subaccounts SET pin=? WHERE id=?').run(String(b.pin), ex.id); // blank = keep
+  audit(req, 'edit', 'account#' + req.params.id, 'sub-account#' + ex.id);
+  res.json({ ok: true });
+});
+app.delete('/api/accounts/:id/subaccounts/:sid', requireNoc, (req, res) => {
+  const ex = db.prepare('SELECT id FROM account_subaccounts WHERE id=? AND account_id=?').get(req.params.sid, req.params.id);
+  if (!ex) return res.status(404).json({ error: 'not found' });
+  db.prepare('UPDATE sites SET subaccount_id=NULL WHERE subaccount_id=?').run(ex.id);       // don't orphan references
+  db.prepare('UPDATE devices SET owner_subaccount_id=NULL WHERE owner_subaccount_id=?').run(ex.id);
+  db.prepare('DELETE FROM account_subaccounts WHERE id=?').run(ex.id);
+  audit(req, 'delete', 'account#' + req.params.id, 'sub-account#' + ex.id);
+  res.json({ ok: true });
+});
+
+// ---- profit & loss (per account: cost of accounts+sub-accounts vs recurring client revenue) ----
+const MONTHLY_FACTOR = { weekly: 52 / 12, monthly: 1, quarterly: 1 / 3, semiannual: 1 / 6, yearly: 1 / 12 };
+const monthlyize = (amt, freq) => r2(Number(amt || 0) * (MONTHLY_FACTOR[freq] || 1));
+// monthly recurring revenue per customer (pre-tax subtotal — tax is pass-through, not income)
+function customerMonthlyRevenue() {
+  const map = {}; // customer_id -> monthly subtotal
+  for (const r of db.prepare('SELECT customer_id, frequency, items_json, tax_rate FROM bill_recurring WHERE active=1').all()) {
+    let items = []; try { items = JSON.parse(r.items_json || '[]'); } catch {}
+    map[r.customer_id] = r2((map[r.customer_id] || 0) + monthlyize(computeTotals(items, 0).subtotal, r.frequency));
+  }
+  return map;
+}
+// full P&L across accounts. Revenue is attributed to each account serving a customer, split evenly.
+function computePnl() {
+  const custRev = customerMonthlyRevenue();
+  const accounts = db.prepare('SELECT id, name, status, monthly_cost FROM accounts ORDER BY name').all();
+  const acc = {}; for (const a of accounts) acc[a.id] = { account_id: a.id, name: a.name, status: a.status, base_cost: r2(a.monthly_cost || 0), sub_cost: 0, revenue: 0, customer_count: 0 };
+  // sub-account costs
+  for (const s of db.prepare('SELECT account_id, monthly_cost FROM account_subaccounts').all()) if (acc[s.account_id]) acc[s.account_id].sub_cost = r2(acc[s.account_id].sub_cost + (s.monthly_cost || 0));
+  // revenue: split each customer's monthly revenue evenly across the accounts serving it
+  for (const [cid, rev] of Object.entries(custRev)) {
+    const ids = db.prepare('SELECT account_id FROM account_customers WHERE customer_id=?').all(cid).map(r => r.account_id).filter(id => acc[id]);
+    if (!ids.length) continue;
+    const share = r2(rev / ids.length);
+    for (const id of ids) { acc[id].revenue = r2(acc[id].revenue + share); acc[id].customer_count++; }
+  }
+  const rows = Object.values(acc).map(a => { const cost = r2(a.base_cost + a.sub_cost); return { ...a, cost, margin: r2(a.revenue - cost), margin_pct: a.revenue ? r2(((a.revenue - cost) / a.revenue) * 100) : null }; });
+  const totals = rows.reduce((t, r) => ({ base_cost: r2(t.base_cost + r.base_cost), sub_cost: r2(t.sub_cost + r.sub_cost), cost: r2(t.cost + r.cost), revenue: r2(t.revenue + r.revenue), margin: r2(t.margin + r.margin) }), { base_cost: 0, sub_cost: 0, cost: 0, revenue: 0, margin: 0 });
+  return { rows, totals };
+}
+app.get('/api/pnl', requireNoc, (req, res) => res.json(computePnl()));
+app.get('/api/accounts/:id/pnl', requireNoc, (req, res) => {
+  const a = db.prepare('SELECT id, name, monthly_cost FROM accounts WHERE id=?').get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  const subs = db.prepare('SELECT id, name, monthly_cost, status FROM account_subaccounts WHERE account_id=? ORDER BY id').all(a.id);
+  const sub_cost = r2(subs.reduce((n, s) => n + (s.monthly_cost || 0), 0));
+  const base_cost = r2(a.monthly_cost || 0); const cost = r2(base_cost + sub_cost);
+  const custRev = customerMonthlyRevenue();
+  const custs = accountCustomers(a.id).map(c => {
+    const ids = db.prepare('SELECT account_id FROM account_customers WHERE customer_id=?').all(c.id).map(r => r.account_id);
+    const full = custRev[c.id] || 0; const share = ids.length ? r2(full / ids.length) : 0;
+    return { id: c.id, name: c.name, monthly_revenue: share, shared: ids.length > 1, accounts: ids.length };
+  }).filter(c => c.monthly_revenue > 0);
+  const revenue = r2(custs.reduce((n, c) => n + c.monthly_revenue, 0));
+  res.json({ account_id: a.id, name: a.name, base_cost, sub_cost, cost, revenue, margin: r2(revenue - cost), margin_pct: revenue ? r2(((revenue - cost) / revenue) * 100) : null, subaccounts: subs, customers: custs });
+});
+
 // ---- sites ----
+// returns the sub-account id only if it belongs to the given account, else null (prevents cross-account refs)
+function subaccountForAccount(subId, accountId) {
+  if (!subId) return null;
+  const r = db.prepare('SELECT id FROM account_subaccounts WHERE id=? AND account_id=?').get(Number(subId), Number(accountId));
+  return r ? r.id : null;
+}
 function withSiteSummary(s) {
   const devs = db.prepare('SELECT online FROM devices WHERE assigned_type=\'site\' AND assigned_site_id=?').all(s.id);
   const online = devs.filter(d => d.online).length;
@@ -1583,6 +1687,7 @@ app.get('/api/sites/:id', (req, res) => {
   const out = withSiteSummary(s);
   out.account = db.prepare('SELECT id, name FROM accounts WHERE id=?').get(s.account_id);
   out.customer = s.customer_id ? db.prepare('SELECT id, name FROM customers WHERE id=?').get(s.customer_id) : null;
+  out.subaccount = s.subaccount_id ? db.prepare('SELECT id, name, status FROM account_subaccounts WHERE id=?').get(s.subaccount_id) : null;
   out.connections = db.prepare('SELECT * FROM connections WHERE site_id=? ORDER BY priority').all(s.id).map(resolveConn);
   out.devices = db.prepare('SELECT d.*, m.manufacturer, m.model, m.device_type FROM devices d LEFT JOIN device_models m ON m.id=d.model_id WHERE d.assigned_type=\'site\' AND d.assigned_site_id=? ORDER BY d.name').all(s.id).map(publicDevice);
   out.notes = withNoteAttachments(db.prepare('SELECT * FROM site_notes WHERE site_id=? ORDER BY datetime(created_at) DESC').all(s.id));
@@ -1608,8 +1713,9 @@ app.post('/api/sites', (req, res) => {
   // a site is served by one account chosen from its customer's accounts (defaults to the customer's primary)
   const accountId = b.account_id || defaultAccountForCustomer(b.customer_id);
   if (!accountId) return res.status(400).json({ error: 'A customer (with at least one account) is required' });
-  const info = db.prepare('INSERT INTO sites (account_id,customer_id,name,service_address,lat,lng,status,current_mgmt_ip,current_public_ip,notes) VALUES (?,?,?,?,?,?,?,?,?,?)')
-    .run(N(accountId), N(b.customer_id || null), N(b.name), N(b.service_address), N(b.lat || null), N(b.lng || null), b.status || 'Active', N(b.current_mgmt_ip), N(b.current_public_ip), N(b.notes));
+  const subId = subaccountForAccount(b.subaccount_id, accountId); // only keep if it belongs to this account
+  const info = db.prepare('INSERT INTO sites (account_id,customer_id,name,service_address,lat,lng,status,current_mgmt_ip,current_public_ip,notes,subaccount_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+    .run(N(accountId), N(b.customer_id || null), N(b.name), N(b.service_address), N(b.lat || null), N(b.lng || null), b.status || 'Active', N(b.current_mgmt_ip), N(b.current_public_ip), N(b.notes), subId);
   audit(req, 'create', 'site#' + info.lastInsertRowid, b.name);
   res.json({ id: info.lastInsertRowid });
 });
@@ -1621,10 +1727,11 @@ app.put('/api/sites/:id', (req, res) => {
   // merge: fields not in the body keep their current values (so a customer-only change can't wipe the site)
   const customerId = b.customer_id !== undefined ? b.customer_id : ex.customer_id;
   const accountId = b.account_id || (b.customer_id !== undefined && b.customer_id !== ex.customer_id ? defaultAccountForCustomer(customerId) : null) || ex.account_id;
-  db.prepare('UPDATE sites SET account_id=?, customer_id=?, name=?, service_address=?, lat=?, lng=?, status=?, current_mgmt_ip=?, current_public_ip=?, notes=? WHERE id=?')
+  const subId = b.subaccount_id !== undefined ? subaccountForAccount(b.subaccount_id, accountId) : (subaccountForAccount(ex.subaccount_id, accountId)); // clear if it no longer belongs to the account
+  db.prepare('UPDATE sites SET account_id=?, customer_id=?, name=?, service_address=?, lat=?, lng=?, status=?, current_mgmt_ip=?, current_public_ip=?, notes=?, subaccount_id=? WHERE id=?')
     .run(N(accountId), N(customerId || null), N(b.name, ex.name), N(b.service_address, ex.service_address),
          b.lat === undefined ? ex.lat : (b.lat || null), b.lng === undefined ? ex.lng : (b.lng || null),
-         N(b.status, ex.status), N(b.current_mgmt_ip, ex.current_mgmt_ip), N(b.current_public_ip, ex.current_public_ip), N(b.notes, ex.notes), req.params.id);
+         N(b.status, ex.status), N(b.current_mgmt_ip, ex.current_mgmt_ip), N(b.current_public_ip, ex.current_public_ip), N(b.notes, ex.notes), subId, req.params.id);
   audit(req, 'edit', 'site#' + req.params.id, b.name || ex.name);
   res.json({ ok: true });
 });
@@ -2234,7 +2341,7 @@ app.put('/api/devices/:id', (req, res) => {
   const b = req.body || {};
   const existing = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'not found' });
-  const cols = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','account_number','owner_account','owner_sub_account','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_wifi_ssid','tech_username','zt_node_id','admin_username'];
+  const cols = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','account_number','owner_account','owner_sub_account','owner_subaccount_id','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_wifi_ssid','tech_username','zt_node_id','admin_username'];
   // credentials only overwritten if provided (non-empty)
   const credCols = ['factory_password','admin_password','tech_password','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase'];
   const sets = [], vals = [];

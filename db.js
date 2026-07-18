@@ -179,6 +179,24 @@ export function migrate() {
     created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
   db.exec('CREATE INDEX IF NOT EXISTS idx_circuits_a ON circuits(a_type, a_ref_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_circuits_z ON circuits(z_type, z_ref_id)');
+  // Multiple sub-accounts per account (each with its own PIN, status, monthly bill, notes)
+  db.exec(`CREATE TABLE IF NOT EXISTS account_subaccounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL,
+    name TEXT NOT NULL, pin TEXT, status TEXT NOT NULL DEFAULT 'active',
+    monthly_cost REAL, notes TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_subaccounts ON account_subaccounts(account_id)');
+  ensure('sites', 'subaccount_id', 'INTEGER');
+  ensure('devices', 'owner_subaccount_id', 'INTEGER');
+  ensure('accounts', 'monthly_cost', 'REAL'); // account base monthly cost (P&L); total cost = this + sub-accounts
+  // one-time: fold each account's legacy single sub_account into the new list
+  const migrated = db.prepare("SELECT value FROM settings WHERE key='subaccount_migrated'").get();
+  if (!migrated) {
+    for (const a of db.prepare("SELECT id, sub_account FROM accounts WHERE sub_account IS NOT NULL AND sub_account<>''").all()) {
+      const has = db.prepare('SELECT COUNT(*) AS n FROM account_subaccounts WHERE account_id=?').get(a.id).n;
+      if (!has) db.prepare('INSERT INTO account_subaccounts (account_id, name) VALUES (?,?)').run(a.id, a.sub_account);
+    }
+    db.prepare("INSERT INTO settings (key,value) VALUES ('subaccount_migrated','1') ON CONFLICT(key) DO UPDATE SET value='1'").run();
+  }
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

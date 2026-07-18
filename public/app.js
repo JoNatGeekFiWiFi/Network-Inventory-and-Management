@@ -63,6 +63,7 @@ function setupHeader() {
   $('#navBatch').style.display = isPriv() ? '' : 'none';
   $('#navAccess').style.display = isPriv() ? '' : 'none';
   $('#navBilling').style.display = isPriv() ? '' : 'none';
+  $('#navPnl').style.display = isPriv() ? '' : 'none';
   $('#navTickets').style.display = isPriv() ? '' : 'none';
   $('#navPackages').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
@@ -150,6 +151,7 @@ async function route() {
     if (p[0] === 'billing' && p[1] === 'quote' && p[2] === 'new') { setNav('billing'); return await formQuote({}); }
     if (p[0] === 'billing' && p[1] === 'quote' && p[3] === 'edit') { setNav('billing'); return await formQuote({ id: p[2] }); }
     if (p[0] === 'billing') { setNav('billing'); return await renderBilling(); }
+    if (p[0] === 'pnl') { setNav('pnl'); return await renderPnl(); }
     if (p[0] === 'tickets' && p[1] === 'new') { setNav('tickets'); return await formTicket(); }
     if (p[0] === 'tickets' && p[1]) { setNav('tickets'); return await renderTicket(p[1]); }
     if (p[0] === 'tickets') { setNav('tickets'); return await renderTickets(); }
@@ -284,7 +286,7 @@ async function renderSite(id) {
     <div class="crumb" onclick="location.hash='#/sites'"><i class="ti ti-chevron-left"></i> Sites</div>
     <div class="head"><div class="t">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(s.name)}</h1>${statusPill(s.status)}</div>
-      <div class="small sec-muted" style="margin-top:3px"><span id="custassign"><i class="ti ti-user"></i> ${s.customer ? `<a class="iplink" href="#/customer/${s.customer.id}">${esc(s.customer.name)}</a>` : '<span class="muted">no customer</span>'}${isPriv() ? ` <a class="iplink" style="cursor:pointer" onclick="assignCustomerUI(${s.id}, ${s.customer ? s.customer.id : 'null'})" title="Assign this site to a customer">(${s.customer ? 'change' : 'assign'})</a>` : ''}</span> &nbsp;·&nbsp; <i class="ti ti-building"></i> <a class="iplink" href="#/account/${s.account.id}">${esc(s.account.name)}</a> &nbsp;·&nbsp; <i class="ti ti-map-pin"></i> ${loc(s)}</div>
+      <div class="small sec-muted" style="margin-top:3px"><span id="custassign"><i class="ti ti-user"></i> ${s.customer ? `<a class="iplink" href="#/customer/${s.customer.id}">${esc(s.customer.name)}</a>` : '<span class="muted">no customer</span>'}${isPriv() ? ` <a class="iplink" style="cursor:pointer" onclick="assignCustomerUI(${s.id}, ${s.customer ? s.customer.id : 'null'})" title="Assign this site to a customer">(${s.customer ? 'change' : 'assign'})</a>` : ''}</span> &nbsp;·&nbsp; <i class="ti ti-building"></i> <a class="iplink" href="#/account/${s.account.id}">${esc(s.account.name)}</a>${s.subaccount ? ' &nbsp;·&nbsp; <i class="ti ti-list-tree"></i> ' + esc(s.subaccount.name) : ''} &nbsp;·&nbsp; <i class="ti ti-map-pin"></i> ${loc(s)}</div>
     </div><a class="btn" href="#/site/${s.id}/edit"><i class="ti ti-edit"></i> Edit</a>${isPriv() ? `<button class="btn" onclick="delSite(${s.id}, ${esc(JSON.stringify(s.name))})" title="Delete this site — hardware becomes unassigned"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
 
     <div class="grid2" style="margin:16px 0">
@@ -571,13 +573,13 @@ async function renderCustomers() {
 
 async function renderCustomer(id) {
   const a = await api('/accounts/' + id);
+  const pnl = isPriv() ? await api('/accounts/' + id + '/pnl').catch(() => null) : null;
   const contacts = a.contacts.map(c => `<div class="kv"><div><div>${esc(c.name)}</div><div class="small sec-muted">${esc(c.role || '')}${c.is_primary ? ' · Primary' : ''}${c.is_billing ? ' · Billing' : ''}</div></div>
     <div style="text-align:right" class="small">${c.phone ? `<a class="iplink" href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : ''}${c.email ? `<div><a class="iplink" href="mailto:${esc(c.email)}">${esc(c.email)}</a></div>` : ''}</div></div>`).join('');
   const prev = a.previous_isps.map(p => `<div class="kv" style="display:block">
     <div style="display:flex;justify-content:space-between"><span>${esc(p.provider)}</span><span class="small muted">${esc(p.until_label || '')}</span></div>
     <div class="small sec-muted" style="margin-top:3px"><span class="muted">Why they left:</span> ${esc(p.reason || '')}</div></div>`).join('');
   const det = [];
-  if (a.sub_account) det.push(kv('Sub-account', esc(a.sub_account)));
   if (isPriv() && a.has_pin) det.push(`<div class="kv"><span class="small sec-muted">PIN <span class="badge noc">NOC</span></span><span class="mono" style="cursor:pointer;filter:blur(5px)" title="click to reveal" onclick="this.style.filter='none'">${esc(a.pin)}</span></div>`);
   if (a.email) det.push(`<div class="kv"><span class="small sec-muted">Email</span><a class="iplink" href="mailto:${esc(a.email)}">${esc(a.email)}</a></div>`);
   if (a.portal_url) det.push(`<div class="kv"><span class="small sec-muted">Portal</span><a class="iplink" href="${esc(a.portal_url)}" target="_blank" rel="noopener">Open portal <i class="ti ti-external-link" style="font-size:11px"></i></a></div>`);
@@ -607,10 +609,55 @@ async function renderCustomer(id) {
       <div class="metric"><div class="l">Needs attention</div><div class="v" style="color:var(--warning)">${a.needs_attention}</div></div>
     </div>
     ${detCard}
+    ${pnlCard(pnl)}
+    ${subacctCard(a)}
     ${contacts ? `<div class="card"><div class="hd"><h2>Contacts</h2></div><div style="padding:0 14px 10px">${contacts}</div></div>` : ''}
     ${prev ? `<div class="card"><div class="hd"><h2><i class="ti ti-history-toggle"></i> Previous ISP</h2></div><div style="padding:0 14px 10px">${prev}</div></div>` : ''}
     <div class="card"><div class="hd"><h2>Customers · ${a.customers.length}</h2>${isPriv() ? `<a class="btn sm" href="#/customer/new?account=${a.id}"><i class="ti ti-plus"></i> Add customer</a>` : ''}</div>${custs || '<div class="row muted">No customers yet</div>'}</div>
     ${a.sites.length ? `<div class="card"><div class="hd"><h2>All sites · ${a.sites.length}</h2></div>${sites}</div>` : ''}`;
+}
+const money0 = n => '$' + Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const SUBACCT_STATUS = ['active', 'suspended', 'closed'];
+function subacctCard(a) {
+  const subs = a.subaccounts || [];
+  const total = subs.reduce((s, x) => s + (Number(x.monthly_cost) || 0), 0);
+  const rows = subs.map(s => `<div class="row" id="sarow-${s.id}">
+    <i class="ti ti-file-invoice sec-muted"></i>
+    <div style="flex:1;min-width:0"><div><b>${esc(s.name)}</b>${s.monthly_cost != null ? ' · ' + money0(s.monthly_cost) + '/mo' : ''}</div>
+      <div class="small sec-muted">${esc(s.status || 'active')}${isPriv() && s.has_pin ? ' · PIN <span class="mono" style="cursor:pointer;filter:blur(4px)" title="click to reveal" onclick="this.style.filter=\'none\'">' + esc(s.pin || '') + '</span>' : ''}${s.notes ? ' · ' + esc(s.notes) : ''}</div></div>
+    ${isPriv() ? `<button class="btn sm" onclick="editSubacct(${a.id},${s.id})"><i class="ti ti-edit"></i> Edit</button><button class="btn sm" onclick="delSubacct(${a.id},${s.id})"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>`).join('');
+  return `<div class="card"><div class="hd"><h2><i class="ti ti-list-tree"></i> Sub-accounts · ${subs.length}${total ? ' · ' + money0(total) + '/mo' : ''}</h2>${isPriv() ? `<button class="btn sm" onclick="addSubacct(${a.id})"><i class="ti ti-plus"></i> Add sub-account</button>` : ''}</div>
+    <div id="salist">${rows || '<div class="row muted">No sub-accounts yet</div>'}</div>
+    <div id="saform"></div></div>`;
+}
+function subacctFormHtml(accountId, s) {
+  s = s || {};
+  return `<div class="box" id="saf" style="margin:10px 14px">
+    <div class="grid2">${field('Sub-account number / name', 'name', s.name || '', { mono: true, ph: 'e.g. Sub 001' })}${field('Monthly cost', 'monthly_cost', s.monthly_cost != null ? s.monthly_cost : '', { ph: 'e.g. 89.99' })}</div>
+    <div class="grid2">${field('Status', 'status', s.status || 'active', { type: 'select', options: SUBACCT_STATUS })}${field('PIN', 'pin', '', { mono: true, ph: s.has_pin ? 'unchanged' : 'optional · NOC/Admin' })}</div>
+    ${field('Notes', 'notes', s.notes || '', { ph: 'optional' })}
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn sm" onclick="renderCustomer(${accountId})">Cancel</button>
+    <button class="btn sm primary" onclick="saveSubacct(${accountId},${s.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
+}
+function addSubacct(accountId) { $('#saform').innerHTML = subacctFormHtml(accountId, null); $('#saform').scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+async function editSubacct(accountId, sid) {
+  const a = await api('/accounts/' + accountId); const s = (a.subaccounts || []).find(x => x.id === sid);
+  $('#saform').innerHTML = subacctFormHtml(accountId, s || {});
+  $('#saform').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+async function saveSubacct(accountId, sid) {
+  const d = collect('#saf'); if (!d.name) { toast('Enter a sub-account number/name'); return; }
+  if (!d.pin) delete d.pin; // blank = keep existing on edit
+  try {
+    if (sid) await api('/accounts/' + accountId + '/subaccounts/' + sid, { method: 'PUT', body: JSON.stringify(d) });
+    else await api('/accounts/' + accountId + '/subaccounts', { method: 'POST', body: JSON.stringify(d) });
+    toast('Saved'); renderCustomer(accountId);
+  } catch (e) { toast(e.message); }
+}
+async function delSubacct(accountId, sid) {
+  if (!confirm('Delete this sub-account? Sites/devices pointing to it will be cleared.')) return;
+  try { await api('/accounts/' + accountId + '/subaccounts/' + sid, { method: 'DELETE' }); toast('Deleted'); renderCustomer(accountId); }
+  catch (e) { toast(e.message); }
 }
 
 // ---------- Customers (end clients; served by one or more accounts) ----------
@@ -793,7 +840,8 @@ async function renderDevice(id) {
   if (d.hfc_mac) info.push(['HFC MAC', d.hfc_mac]);
   info.push(['Ownership', d.ownership + (d.owner_org ? ' · ' + d.owner_org : '')]);
   if (d.account_number) info.push(['Account #', d.account_number]);
-  if (d.owner_sub_account) info.push(['Sub-account', d.owner_sub_account]);
+  if (d.owner_subaccount_name) info.push(['Sub-account', d.owner_subaccount_name + (d.owner_subaccount_account ? ' · ' + d.owner_subaccount_account : '')]);
+  else if (d.owner_sub_account) info.push(['Sub-account', d.owner_sub_account]);
   if (d.cell_carrier) { info.push(['Cellular carrier', d.cell_carrier]); info.push(['Phone', d.cell_phone || '—']); info.push(['IMEI', d.cell_imei || '—']); info.push(['SIM/ICCID', d.cell_sim || '—']); }
 
   let ifaces = [];
@@ -957,7 +1005,7 @@ function collect(formSel) {
 }
 
 // Type-to-search dropdown. host = element to fill; items = [{v,l}]; writes a hidden input[name].
-function attachSearch(host, items, name, value, placeholder) {
+function attachSearch(host, items, name, value, placeholder, onChange) {
   if (!host) return;
   host.classList.add('ss');
   const cur = items.find(i => String(i.v) === String(value == null ? '' : value));
@@ -972,7 +1020,7 @@ function attachSearch(host, items, name, value, placeholder) {
   };
   input.addEventListener('focus', () => { draw(''); list.style.display = 'block'; });
   input.addEventListener('input', () => { hidden.value = ''; draw(input.value); list.style.display = 'block'; });
-  list.addEventListener('mousedown', (e) => { const o = e.target.closest('.ss-opt'); if (!o || !o.dataset.v) return; hidden.value = o.dataset.v; input.value = o.textContent; list.style.display = 'none'; });
+  list.addEventListener('mousedown', (e) => { const o = e.target.closest('.ss-opt'); if (!o || !o.dataset.v) return; hidden.value = o.dataset.v; input.value = o.textContent; list.style.display = 'none'; if (onChange) onChange(o.dataset.v); });
   input.addEventListener('blur', () => setTimeout(() => { list.style.display = 'none'; }, 150));
 }
 
@@ -1023,8 +1071,9 @@ async function formCustomer(q) {
       ${field('Account name', 'name', a.name, { ph: 'e.g. Acme Logistics' })}
       <div class="grid2">${field('Account number', 'account_number', a.account_number, { mono: true })}
       ${field('Status', 'status', a.status, { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}</div>
-      <div class="grid2">${field('Sub-account (optional)', 'sub_account', a.sub_account, { mono: true })}
-      ${field('Account PIN', 'pin', '', { mono: true, ph: q.id ? 'unchanged' : 'NOC/Admin only' })}</div>
+      ${field('Account base monthly cost (P&L)', 'monthly_cost', a.monthly_cost != null ? a.monthly_cost : '', { ph: 'what this account costs you /mo (excl. sub-accounts)' })}
+      ${field('Account PIN', 'pin', '', { mono: true, ph: q.id ? 'unchanged' : 'NOC/Admin only' })}
+      ${q.id ? '<div class="help">Add sub-accounts (each with its own PIN, status &amp; monthly cost) from the account page after saving.</div>' : '<div class="help">Save the account first, then add its sub-accounts from the account page.</div>'}
       <div class="grid2">${field('Account email', 'email', a.email, { type: 'email', ph: 'login email / contact' })}
       ${field('Portal login URL', 'portal_url', a.portal_url, { ph: 'https://portal.carrier.com/login' })}</div>
       ${field('Account / portal password', 'portal_password', '', { mono: true, ph: q.id ? 'unchanged · NOC/Admin only' : 'NOC/Admin only' })}
@@ -1070,6 +1119,7 @@ async function formSite(q) {
         </div>
       </div>
       <div class="fld"><label class="fl">Served by account <span class="small sec-muted" style="font-weight:400">· optional, defaults to the customer's primary</span></label><div id="ss-siteacct"></div></div>
+      <div class="fld"><label class="fl">Sub-account <span class="small sec-muted" style="font-weight:400">· optional</span></label><select id="ss-subacct" name="subaccount_id"><option value="">— none —</option></select></div>
       ${field('Site name', 'name', s.name, { ph: 'e.g. Riverside Office' })}
       <div class="fld"><label class="fl">Service address</label><div id="ss-saddr"></div></div>
       <div class="grid2">${field('Latitude', 'lat', s.lat || '', { mono: true })}${field('Longitude', 'lng', s.lng || '', { mono: true })}</div>
@@ -1078,10 +1128,27 @@ async function formSite(q) {
       ${field('Current management IP', 'current_mgmt_ip', s.current_mgmt_ip, { mono: true })}
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
       <button class="btn primary" onclick="saveSite(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
-  attachSearch($('#ss-customer'), custOpts, 'customer_id', preCust, 'Search customer…');
+  attachSearch($('#ss-customer'), custOpts, 'customer_id', preCust, 'Search customer…', onSiteCustomerPick);
   attachSearch($('#ss-account'), accOpts, 'account_id', '', 'Search account…');
-  attachSearch($('#ss-siteacct'), accOpts, 'site_account_id', (s.account && s.account.id) || '', 'Search account…');
+  attachSearch($('#ss-siteacct'), accOpts, 'site_account_id', (s.account && s.account.id) || '', 'Search account…', () => loadSiteSubaccounts());
   attachAddressSearch($('#ss-saddr'), { name: 'service_address', value: s.service_address || '', latName: 'lat', lngName: 'lng', placeholder: 'Street, city, state (optional if GPS)' });
+  window._siteDefaultAcct = (s.account && s.account.id) || '';
+  window._sitePreSub = s.subaccount_id || '';
+  if (preCust && !window._siteDefaultAcct) onSiteCustomerPick(preCust); else loadSiteSubaccounts();
+}
+async function onSiteCustomerPick(customerId) {
+  try { const c = await api('/customers/' + customerId); window._siteDefaultAcct = (c.accounts && c.accounts[0] && c.accounts[0].id) || ''; }
+  catch { window._siteDefaultAcct = ''; }
+  loadSiteSubaccounts();
+}
+async function loadSiteSubaccounts() {
+  const sel = $('#ss-subacct'); if (!sel) return;
+  const explicit = (view().querySelector('#f [name=site_account_id]') || {}).value;
+  const acctId = explicit || window._siteDefaultAcct;
+  if (!acctId) { sel.innerHTML = '<option value="">— none —</option>'; return; }
+  let subs = []; try { subs = await api('/accounts/' + acctId + '/subaccounts'); } catch {}
+  const pre = window._sitePreSub;
+  sel.innerHTML = '<option value="">— none —</option>' + subs.map(s => `<option value="${s.id}" ${String(pre) === String(s.id) ? 'selected' : ''}>${esc(s.name)}${s.status && s.status !== 'active' ? ' (' + esc(s.status) + ')' : ''}</option>`).join('');
 }
 function toggleNewCust() {
   const on = $('#newCust').checked;
@@ -1134,6 +1201,9 @@ async function formDevice(q) {
   const siteOpts = (await api('/sites')).map(s => ({ v: s.id, l: s.name }));
   const popOpts = (await api('/pops')).map(p => ({ v: p.id, l: 'POP · ' + p.name }));
   const custOpts = (await api('/customers')).map(c => ({ v: c.id, l: c.name + (c.account_names ? ' · ' + c.account_names : '') }));
+  const subAll = await api('/subaccounts').catch(() => []);
+  const subGroups = {}; subAll.forEach(s => { (subGroups[s.account_name] = subGroups[s.account_name] || []).push(s); });
+  const subOptsHtml = '<option value="">— none —</option>' + Object.keys(subGroups).map(acc => `<optgroup label="${esc(acc)}">${subGroups[acc].map(s => `<option value="${s.id}" ${String(d.owner_subaccount_id) === String(s.id) ? 'selected' : ''}>${esc(s.name)}${s.status && s.status !== 'active' ? ' (' + esc(s.status) + ')' : ''}</option>`).join('')}</optgroup>`).join('');
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${q.id ? 'Edit' : 'Add'} hardware</h1>
     <div class="card" style="margin-top:14px;padding:16px;overflow:visible" id="f">
@@ -1156,7 +1226,10 @@ async function formDevice(q) {
         <button type="button" class="segbtn ${d.ownership === 'distributor' ? 'on' : ''}" id="ow-distributor" onclick="setOwn('distributor')">Distributor</button>
       </div><input type="hidden" name="ownership" value="${d.ownership}"/>
       <div class="grid2">${field('Carrier / distributor', 'owner_org', d.owner_org, { ph: 'e.g. Verizon, Granite' })}${field('Account number', 'account_number', d.account_number, { mono: true })}</div>
-      <div class="help">This is the carrier/distributor account the hardware sits on — not the customer. Always recorded, even for gear we own.</div>
+      <div class="fld"><label class="fl">Sub-account <span class="small sec-muted" style="font-weight:400">· pick from an account's sub-accounts</span></label>
+        <select name="owner_subaccount_id">${subOptsHtml}</select></div>
+      <div class="grid2">${field('Account (free text)', 'owner_account', d.owner_account, { mono: true, ph: 'if not linked above' })}${field('Sub-account (free text)', 'owner_sub_account', d.owner_sub_account, { mono: true, ph: 'if not linked above' })}</div>
+      <div class="help">This is the carrier/distributor account the hardware sits on — not the customer. Link to a managed sub-account above, or type the account/sub-account free-text. Always recorded, even for gear we own.</div>
       </div>
 
       <div id="platExtra" style="display:${d.management_mode === 'provider' ? 'none' : 'block'}">
@@ -2173,6 +2246,37 @@ async function showWg(id) {
 }
 
 // ---------- Support / trouble tickets ----------
+// ---------- Profit & Loss (per account: cost vs client revenue, monthly run-rate) ----------
+const marginColor = m => m > 0 ? 'var(--success,#1D9E75)' : m < 0 ? 'var(--danger)' : 'var(--muted)';
+async function renderPnl() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const d = await api('/pnl');
+  const t = d.totals;
+  const rows = d.rows.map(r => `<div class="row rowlink" onclick="location.hash='#/account/${r.account_id}'">
+    <div style="flex:1;min-width:0"><div><b>${esc(r.name)}</b>${r.customer_count ? ' <span class="small sec-muted">· ' + r.customer_count + ' client' + (r.customer_count === 1 ? '' : 's') + '</span>' : ''}</div>
+      <div class="small sec-muted">cost ${money0(r.cost)} (base ${money0(r.base_cost)} + subs ${money0(r.sub_cost)}) · revenue ${money0(r.revenue)}</div></div>
+    <div style="text-align:right;min-width:120px"><div style="font-weight:600;color:${marginColor(r.margin)}">${money0(r.margin)}/mo</div><div class="small sec-muted">${r.margin_pct == null ? '—' : r.margin_pct + '% margin'}</div></div>
+    <i class="ti ti-chevron-right muted"></i></div>`).join('');
+  view().innerHTML = `<div class="head"><div class="t"><h1>Profit &amp; Loss</h1><div class="small sec-muted" style="margin-top:3px">Per account · monthly run-rate · account + sub-account cost vs recurring client revenue</div></div></div>
+    <div class="grid3" style="margin:16px 0">
+      <div class="metric"><div class="l">Monthly cost</div><div class="v">${money0(t.cost)}</div></div>
+      <div class="metric"><div class="l">Monthly revenue</div><div class="v">${money0(t.revenue)}</div></div>
+      <div class="metric"><div class="l">Net margin</div><div class="v" style="color:${marginColor(t.margin)}">${money0(t.margin)}</div></div>
+    </div>
+    <div class="card">${rows || '<div class="row muted">No accounts</div>'}</div>
+    <div class="help">Revenue = active recurring invoices (pre-tax), normalized to monthly and split evenly across the accounts serving each client. Costs = account base cost + its sub-accounts' monthly costs. One-time invoices aren't included in the run-rate.</div>`;
+}
+function pnlCard(p) {
+  if (!p) return '';
+  return `<div class="card"><div class="hd"><h2><i class="ti ti-chart-bar"></i> Profit &amp; loss <span class="small sec-muted" style="font-weight:400">· monthly run-rate</span></h2></div>
+    <div class="grid3" style="padding:0 14px 6px">
+      <div class="metric"><div class="l">Cost</div><div class="v">${money0(p.cost)}</div></div>
+      <div class="metric"><div class="l">Revenue</div><div class="v">${money0(p.revenue)}</div></div>
+      <div class="metric"><div class="l">Margin</div><div class="v" style="color:${marginColor(p.margin)}">${money0(p.margin)}${p.margin_pct != null ? ' <span class="small">(' + p.margin_pct + '%)</span>' : ''}</div></div>
+    </div>
+    <div style="padding:0 14px 12px" class="small sec-muted">Cost = base ${money0(p.base_cost)} + sub-accounts ${money0(p.sub_cost)}. Revenue from ${p.customers.length} billed client${p.customers.length === 1 ? '' : 's'}${p.customers.some(c => c.shared) ? ' (some shared across accounts)' : ''}.</div></div>`;
+}
+
 // ---------- Circuits (standalone A<->Z inventory) ----------
 const CIRCUIT_TYPES = ['Fiber', 'Coax', 'Fixed Wireless', 'Ethernet', 'T1', 'Other'];
 const CIRCUIT_STATUSES = ['Up', 'Standby', 'Down', 'Planned', 'Decommissioned'];
