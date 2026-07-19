@@ -2143,6 +2143,21 @@ app.get('/api/sites/:id/access', (req, res) => {
   audit(req, 'access_read', 'site#' + req.params.id, 'site access');
   res.json(row ? JSON.parse(row.details_json) : {});
 });
+app.put('/api/sites/:id/access', requireNoc, (req, res) => {
+  const s = db.prepare('SELECT id FROM sites WHERE id=?').get(req.params.id); if (!s) return res.status(404).json({ error: 'not found' });
+  const b = req.body || {};
+  const details = {
+    gate_code: N(b.gate_code) || '', front_door: N(b.front_door) || '', lockbox: N(b.lockbox) || '',
+    access_hours: N(b.access_hours) || '', notes: N(b.notes) || '',
+    contacts: (Array.isArray(b.contacts) ? b.contacts : []).map(c => ({ name: String(c.name || '').trim(), phone: String(c.phone || '').trim() })).filter(c => c.name || c.phone)
+  };
+  const json = JSON.stringify(details);
+  const ex = db.prepare('SELECT site_id FROM site_access WHERE site_id=?').get(req.params.id);
+  if (ex) db.prepare('UPDATE site_access SET details_json=? WHERE site_id=?').run(json, req.params.id);
+  else db.prepare('INSERT INTO site_access (site_id, details_json) VALUES (?,?)').run(req.params.id, json);
+  audit(req, 'edit', 'site#' + req.params.id, 'site access');
+  res.json({ ok: true });
+});
 
 // connections
 app.post('/api/sites/:id/connections', (req, res) => {

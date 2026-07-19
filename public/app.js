@@ -491,16 +491,13 @@ async function renderNotes(id) {
   const s = await api('/sites/' + id);
   let access = null;
   if (isPriv()) { try { access = await api('/sites/' + id + '/access'); } catch {} }
-  const accessHtml = isPriv() && access ? `
+  window._siteAccess = access || {};
+  const accessHtml = isPriv() ? `
     <div class="card" style="border:2px solid var(--info)">
-      <div class="hd"><h2><i class="ti ti-pin" style="color:var(--info)"></i> Site access <span class="badge noc">NOC / Admin only</span></h2></div>
-      <div style="padding:0 14px 12px">
-        ${access.gate_code ? kv('Gate code', access.gate_code, true) : ''}
-        ${access.front_door ? kv('Front door', access.front_door, true) : ''}
-        ${access.lockbox ? kv('Lockbox', access.lockbox, true) : ''}
-        ${access.access_hours ? kv('Access hours', access.access_hours) : ''}
-        ${(access.contacts || []).map(c => kv(c.name, `<a class="iplink" href="tel:${esc(c.phone)}">${esc(c.phone)}</a>`)).join('')}
-      </div></div>` : (isPriv() ? '' : '<div class="card" style="padding:14px" class="muted">Site access codes are visible to NOC/Admin only.</div>');
+      <div class="hd"><h2><i class="ti ti-pin" style="color:var(--info)"></i> Site access <span class="badge noc">NOC / Admin only</span></h2>
+        <button class="btn sm" onclick="editSiteAccess(${id})"><i class="ti ti-edit"></i> Edit</button></div>
+      <div style="padding:0 14px 12px" id="siteacc">${siteAccessView(window._siteAccess)}</div>
+    </div>` : '<div class="card" style="padding:14px"><span class="muted">Site access codes are visible to NOC/Admin only.</span></div>';
 
   const notes = s.notes.map(n => `<div class="card" style="margin-bottom:12px"><div class="note" style="border:0">
     <div class="av">${initials(n.author)}</div>
@@ -518,6 +515,43 @@ async function renderNotes(id) {
 function kv(k, v, secret) {
   const val = secret ? `<span class="mono" style="cursor:pointer;filter:blur(5px)" onclick="this.style.filter='none'">${esc(v)}</span>` : `<span>${v}</span>`;
   return `<div class="kv"><span class="small sec-muted">${esc(k)}</span>${val}</div>`;
+}
+function siteAccessView(a) {
+  a = a || {};
+  const rows = [];
+  if (a.gate_code) rows.push(kv('Gate code', a.gate_code, true));
+  if (a.front_door) rows.push(kv('Front door', a.front_door, true));
+  if (a.lockbox) rows.push(kv('Lockbox', a.lockbox, true));
+  if (a.access_hours) rows.push(kv('Access hours', a.access_hours));
+  (a.contacts || []).forEach(c => { if (c.name || c.phone) rows.push(kv(c.name || 'Contact', c.phone ? `<a class="iplink" href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : '—')); });
+  if (a.notes) rows.push(`<div class="kv" style="display:block"><div class="small sec-muted" style="margin-bottom:4px">Notes</div><div style="white-space:pre-wrap">${esc(a.notes)}</div></div>`);
+  return rows.length ? rows.join('') : '<span class="muted small">No access info yet — click Edit to add gate codes, contacts, hours, etc.</span>';
+}
+function accessContactRow(c) {
+  c = c || {};
+  return `<div class="acrow" style="display:flex;gap:8px;margin-bottom:6px">
+    <input class="acname" placeholder="Name / label" value="${esc(c.name || '')}" style="flex:1"/>
+    <input class="acphone" placeholder="Phone" value="${esc(c.phone || '')}" style="flex:1"/>
+    <button class="btn sm" onclick="this.closest('.acrow').remove()"><i class="ti ti-x"></i> Remove</button></div>`;
+}
+function addAccessContact() { $('#acontacts').insertAdjacentHTML('beforeend', accessContactRow({})); }
+function editSiteAccess(id) {
+  const a = window._siteAccess || {};
+  const contacts = (a.contacts && a.contacts.length ? a.contacts : [{}]);
+  $('#siteacc').innerHTML = `<div id="saf">
+    <div class="grid2">${field('Gate code', 'gate_code', a.gate_code || '', { mono: true })}${field('Front door', 'front_door', a.front_door || '', { mono: true })}</div>
+    <div class="grid2">${field('Lockbox', 'lockbox', a.lockbox || '', { mono: true })}${field('Access hours', 'access_hours', a.access_hours || '', { ph: 'e.g. Mon–Fri 8–5, call ahead' })}</div>
+    <div class="fld"><label class="fl">Contacts</label><div id="acontacts">${contacts.map(accessContactRow).join('')}</div>
+      <button class="btn sm" onclick="addAccessContact()"><i class="ti ti-plus"></i> Add contact</button></div>
+    ${field('Notes', 'notes', a.notes || '', { type: 'textarea' })}
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn sm" onclick="renderNotes(${id})">Cancel</button>
+    <button class="btn sm primary" onclick="saveSiteAccess(${id})"><i class="ti ti-check"></i> Save</button></div></div>`;
+}
+async function saveSiteAccess(id) {
+  const d = collect('#saf');
+  d.contacts = Array.from(view().querySelectorAll('#acontacts .acrow')).map(r => ({ name: r.querySelector('.acname').value.trim(), phone: r.querySelector('.acphone').value.trim() })).filter(c => c.name || c.phone);
+  try { await api('/sites/' + id + '/access', { method: 'PUT', body: JSON.stringify(d) }); toast('Site access saved'); renderNotes(id); }
+  catch (e) { toast(e.message); }
 }
 // ---- note attachments (pictures + PDFs) ----
 const ATT_ACCEPT = 'image/png,image/jpeg,image/gif,image/webp,application/pdf';
