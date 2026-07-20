@@ -257,7 +257,16 @@ async function sendMail({ to, subject, text, html, replyTo, headers }) {
 const mailSafe = (opts) => { sendMail(opts).catch(e => console.warn('email send failed:', e.message)); };
 
 // ---------- Omnichannel messaging (email / SMS / WhatsApp via Twilio or Telnyx) ----------
-const normPhone = (s) => { s = String(s || '').trim(); if (!s) return ''; const p = s.replace(/[^\d+]/g, ''); return p.startsWith('+') ? p : (p ? '+' + p : ''); };
+// E.164-ish. Bare US 10-digit (or 11-digit starting with 1) gets +1 so SMS/WhatsApp matching works.
+const normPhone = (s) => {
+  s = String(s || '').trim(); if (!s) return '';
+  const p = s.replace(/[^\d+]/g, '');
+  if (p.startsWith('+')) return p;
+  const d = p.replace(/\D/g, ''); if (!d) return '';
+  if (d.length === 10) return '+1' + d;
+  if (d.length === 11 && d.startsWith('1')) return '+' + d;
+  return '+' + d;
+};
 // email Reply-To woven with a per-ticket token: support+<token>@domain  (so inbound replies thread back)
 function emailReplyTo(token) {
   const from = (getSetting('mail_from') || '').trim(); const m = from.match(/<([^>]+)>/); const addr = m ? m[1] : from;
@@ -1603,6 +1612,135 @@ app.delete('/api/accounts/:id/subaccounts/:sid', requireNoc, (req, res) => {
   db.prepare('DELETE FROM account_subaccounts WHERE id=?').run(ex.id);
   audit(req, 'delete', 'account#' + req.params.id, 'sub-account#' + ex.id);
   res.json({ ok: true });
+});
+
+// ---- Invoice Ninja import (JSON export or API-shaped payload) ----
+// Backup exports nest differently between versions, so hunt for the first array of objects under a key.
+function findEntityArray(root, key) {
+  const seen = new Set(); const stack = [root];
+  while (stack.length) {
+    const node = stack.shift();
+    if (!node || typeof node !== 'object' || seen.has(node)) continue;
+    seen.add(node);
+    if (Array.isArray(node)) { for (const v of node) if (v && typeof v === 'object') stack.push(v); continue; }
+    const direct = node[key];
+    if (Array.isArray(direct) && direct.every(x => x && typeof x === 'object')) return direct;
+    for (const v of Object.values(node)) if (v && typeof v === 'object') stack.push(v);
+  }
+  return [];
+}
+const IN_STATUS = { 1: 'draft', 2: 'sent', 3: 'partial', 4: 'paid', 5: 'void', 6: 'void' };
+function ninjaClientFields(c) {
+  const contacts = Array.isArray(c.contacts) ? c.contacts : [];
+  const c0 = contacts[0] || {};
+  const name = (c.name || c.display_name || [c0.first_name, c0.last_name].filter(Boolean).join(' ') || '').trim();
+  const email = String(c.email || c0.email || '').trim().toLowerCase();
+  const phone = String(c.phone || c0.phone || '').trim();
+  const notes = [c.public_notes, c.private_notes].filter(Boolean).join('\n').trim();
+  return { name, email, phone, notes };
+}
+function importNinja(data, accountId, commit) {
+  const clients = findEntityArray(data, 'clients');
+  const invoices = findEntityArray(data, 'invoices');
+  const payments = findEntityArray(data, 'payments');
+  const res = { customers_created: 0, customers_matched: 0, invoices_created: 0, invoices_skipped: 0, payments_created: 0, warnings: [], samples: { customers: [], invoices: [] } };
+  const custMap = {}; // ninja client id -> our customer id
+
+  for (const c of clients) {
+    const f = ninjaClientFields(c);
+    if (!f.name && !f.email) { res.warnings.push('Skipped a client with no name or email'); continue; }
+    const label = f.name || f.email;
+    let existing = null;
+    if (f.email) existing = db.prepare('SELECT id FROM customers WHERE lower(billing_email)=?').get(f.email);
+    if (!existing) existing = db.prepare('SELECT id FROM customers WHERE lower(name)=?').get(label.toLowerCase());
+    if (existing) {
+      res.customers_matched++; custMap[c.id] = existing.id;
+      if (commit) { // fill in blanks only — never overwrite what's already there
+        const cur = db.prepare('SELECT billing_email, sms_number, notes FROM customers WHERE id=?').get(existing.id);
+        if (f.email && !cur.billing_email) db.prepare('UPDATE customers SET billing_email=? WHERE id=?').run(f.email, existing.id);
+        if (f.phone && !cur.sms_number) db.prepare('UPDATE customers SET sms_number=? WHERE id=?').run(normPhone(f.phone), existing.id);
+        if (f.notes && !cur.notes) db.prepare('UPDATE customers SET notes=? WHERE id=?').run(f.notes, existing.id);
+      }
+    } else {
+      res.customers_created++;
+      if (res.samples.customers.length < 5) res.samples.customers.push({ name: label, email: f.email || null });
+      if (commit) {
+        const info = db.prepare('INSERT INTO customers (account_id,name,status,notes,billing_email,sms_number) VALUES (?,?,?,?,?,?)')
+          .run(accountId, label, 'Active', f.notes || null, f.email || null, normPhone(f.phone) || null);
+        setCustomerAccounts(info.lastInsertRowid, [accountId]);
+        custMap[c.id] = info.lastInsertRowid;
+      } else custMap[c.id] = 'preview'; // placeholder so the dry-run counts their invoices too
+    }
+  }
+
+  // payments grouped by the invoice they apply to
+  const payByInvoice = {};
+  for (const p of payments) {
+    const links = Array.isArray(p.paymentables) && p.paymentables.length
+      ? p.paymentables.filter(x => x.invoice_id || x.invoice_id === 0).map(x => ({ invoice_id: x.invoice_id, amount: Number(x.amount != null ? x.amount : p.amount) || 0 }))
+      : (p.invoice_id ? [{ invoice_id: p.invoice_id, amount: Number(p.amount) || 0 }] : []);
+    for (const l of links) {
+      (payByInvoice[l.invoice_id] = payByInvoice[l.invoice_id] || []).push({
+        date: (p.date || p.created_at || todayStr()).slice(0, 10), amount: r2(l.amount),
+        reference: p.transaction_reference || (p.type_id ? 'Invoice Ninja type ' + p.type_id : 'Invoice Ninja import')
+      });
+    }
+  }
+
+  for (const inv of invoices) {
+    const number = String(inv.number || '').trim();
+    if (!number) { res.warnings.push('Skipped an invoice with no number'); continue; }
+    const custId = custMap[inv.client_id];
+    if (!custId) { res.warnings.push(`Invoice ${number}: no matching client in the file — skipped`); res.invoices_skipped++; continue; }
+    if (db.prepare('SELECT id FROM bill_invoices WHERE number=?').get(number)) { res.invoices_skipped++; continue; } // already imported
+    const rawItems = Array.isArray(inv.line_items) ? inv.line_items : [];
+    const items = rawItems.map(it => ({
+      description: String(it.notes || it.product_key || 'Item').slice(0, 300),
+      quantity: Number(it.quantity != null ? it.quantity : 1) || 0,
+      unit_price: Number(it.cost != null ? it.cost : 0) || 0,
+      taxable: (Number(it.tax_rate1) > 0 || it.tax_name1) ? 1 : 0
+    }));
+    const taxRate = Number(inv.tax_rate1 || (rawItems[0] && rawItems[0].tax_rate1) || 0) || 0;
+    const computed = computeTotals(items, taxRate);
+    const subtotal = computed.subtotal;
+    const total = inv.amount != null && Number(inv.amount) ? r2(Number(inv.amount)) : computed.total;
+    const tax = r2(Math.max(0, total - subtotal));
+    const pays = payByInvoice[inv.id] || [];
+    const paid = r2(pays.reduce((n, p) => n + p.amount, 0));
+    // balance: derive from imported payments when we have them, else trust Invoice Ninja's balance
+    const balance = pays.length ? r2(Math.max(0, total - paid)) : (inv.balance != null ? r2(Number(inv.balance)) : total);
+    let status = IN_STATUS[inv.status_id] || 'sent';
+    if (status !== 'draft' && status !== 'void') status = balance <= 0 ? 'paid' : (balance < total ? 'partial' : status);
+    res.invoices_created++;
+    if (res.samples.invoices.length < 5) res.samples.invoices.push({ number, total, balance, status, items: items.length });
+    if (commit) {
+      const info = db.prepare(`INSERT INTO bill_invoices (number,customer_id,email,date,due_date,status,tax_rate,subtotal,tax,total,balance,notes,pay_token)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(number, custId, N(inv.email) || null, (inv.date || todayStr()).slice(0, 10), inv.due_date ? String(inv.due_date).slice(0, 10) : null,
+        status, taxRate, subtotal, tax, total, balance, N(inv.public_notes) || null, randomBytes(18).toString('hex'));
+      const invId = info.lastInsertRowid;
+      const insItem = db.prepare('INSERT INTO bill_items (invoice_id,description,quantity,unit_price,amount,taxable) VALUES (?,?,?,?,?,?)');
+      for (const it of items) insItem.run(invId, it.description, it.quantity, it.unit_price, r2(it.quantity * it.unit_price), it.taxable);
+      const insPay = db.prepare("INSERT INTO bill_payments (invoice_id,date,amount,method,reference,notes) VALUES (?,?,?,'other',?,'Imported from Invoice Ninja')");
+      for (const p of pays) { insPay.run(invId, p.date, p.amount, p.reference); res.payments_created++; }
+    } else {
+      res.payments_created += pays.length;
+    }
+  }
+  res.counts = { clients_in_file: clients.length, invoices_in_file: invoices.length, payments_in_file: payments.length };
+  return res;
+}
+app.post('/api/import/invoiceninja', requireNoc, (req, res) => {
+  const b = req.body || {};
+  let data = b.data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) { return res.status(400).json({ error: 'Could not parse that JSON: ' + e.message }); } }
+  if (!data || typeof data !== 'object') return res.status(400).json({ error: 'No JSON data provided' });
+  const accountId = Number(b.account_id);
+  if (!db.prepare('SELECT id FROM accounts WHERE id=?').get(accountId)) return res.status(400).json({ error: 'Pick a valid account to attach imported clients to' });
+  try {
+    const out = importNinja(data, accountId, !!b.commit);
+    if (b.commit) audit(req, 'import', 'invoiceninja', `${out.customers_created} customers, ${out.invoices_created} invoices, ${out.payments_created} payments`);
+    res.json({ ok: true, committed: !!b.commit, ...out });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ---- profit & loss (per account: cost of accounts+sub-accounts vs recurring client revenue) ----

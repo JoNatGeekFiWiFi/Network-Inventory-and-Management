@@ -152,6 +152,7 @@ async function route() {
     if (p[0] === 'billing' && p[1] === 'quote' && p[3] === 'edit') { setNav('billing'); return await formQuote({ id: p[2] }); }
     if (p[0] === 'billing') { setNav('billing'); return await renderBilling(); }
     if (p[0] === 'pnl') { setNav('pnl'); return await renderPnl(); }
+    if (p[0] === 'import') { setNav('settings'); return await renderImport(); }
     if (p[0] === 'tickets' && p[1] === 'new') { setNav('tickets'); return await formTicket(); }
     if (p[0] === 'tickets' && p[1]) { setNav('tickets'); return await renderTicket(p[1]); }
     if (p[0] === 'tickets') { setNav('tickets'); return await renderTickets(); }
@@ -1840,6 +1841,10 @@ async function renderSettings() {
         <div class="fld"><label class="fl">Email (Mailgun / Postmark / SendGrid parse)</label><input readonly value="${esc(s.public_base_url_effective + '/inbound/email/' + s.inbound_secret)}" style="font-family:var(--mono);background:var(--surface2)"/></div>` : '<div class="small sec-muted">Set the Public server URL (in Zero-touch provisioning) and save this section to generate your webhook URLs.</div>'}
         <div class="help">For email replies to thread automatically, keep the <span class="mono">[TKT-####]</span> subject tag and the <span class="mono">Reply-To</span> address intact (both are set on outgoing mail). IMAP polling needs no webhooks — just the mailbox login above.</div></div>
     </div>
+    <div class="card"><div class="row rowlink" onclick="location.hash='#/import'">
+      <i class="ti ti-file-import sec-muted"></i>
+      <div style="flex:1;min-width:0"><div>Import from Invoice Ninja</div><div class="small sec-muted">Bring clients, invoices &amp; payments across from a JSON export</div></div>
+      <i class="ti ti-chevron-right muted"></i></div></div>
     <div class="card" style="padding:16px" id="accesscfg">
       <h2 style="margin-bottom:12px"><i class="ti ti-id-badge-2"></i> Site access</h2>
       ${field('Auto check-out time (HH:MM, blank = off)', 'auto_checkout_at', s.auto_checkout_at, { mono: true, ph: 'e.g. 18:00' })}
@@ -2280,6 +2285,58 @@ async function showWg(id) {
 }
 
 // ---------- Support / trouble tickets ----------
+// ---------- Import from Invoice Ninja (JSON export) ----------
+async function renderImport() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const accOpts = (META.accounts || []).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/settings'"><i class="ti ti-chevron-left"></i> Settings</div>
+    <h1>Import from Invoice Ninja</h1>
+    <div class="small sec-muted" style="margin:4px 0 14px">Upload an Invoice Ninja JSON export. Clients become customers; invoices keep their original numbers, line items and payments.</div>
+    <div class="card" style="padding:16px">
+      <div class="fld"><label class="fl">Attach imported clients to account</label><select id="impAcct">${accOpts}</select>
+        <div class="help">Every imported client is attached to this account (you can reassign individually afterwards).</div></div>
+      <div class="fld"><label class="fl">Invoice Ninja JSON export</label>
+        <input type="file" id="impFile" accept="application/json,.json" onchange="impPicked()"/>
+        <div class="help" id="impFileInfo">In Invoice Ninja: Settings → Import | Export → export your data as JSON.</div></div>
+      <div style="display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn" onclick="runImport(false)"><i class="ti ti-eye"></i> Preview (no changes)</button>
+        <button class="btn primary" id="impGo" disabled onclick="runImport(true)"><i class="ti ti-upload"></i> Import now</button></div>
+    </div>
+    <div id="impOut"></div>`;
+}
+function impPicked() {
+  const f = $('#impFile').files[0];
+  $('#impFileInfo').textContent = f ? (f.name + ' · ' + Math.round(f.size / 1024) + ' KB — click Preview to check it first') : '';
+  $('#impGo').disabled = true; $('#impOut').innerHTML = '';
+}
+async function runImport(commit) {
+  const f = $('#impFile').files[0]; if (!f) { toast('Choose the JSON export file first'); return; }
+  const out = $('#impOut'); out.innerHTML = '<div class="card" style="padding:16px"><div class="loading">Reading…</div></div>';
+  let data; try { data = JSON.parse(await f.text()); } catch (e) { out.innerHTML = `<div class="card" style="padding:16px;color:var(--danger)">That file isn't valid JSON: ${esc(e.message)}</div>`; return; }
+  try {
+    const r = await api('/import/invoiceninja', { method: 'POST', body: JSON.stringify({ data, account_id: $('#impAcct').value, commit }) });
+    const warn = (r.warnings || []).length ? `<div class="box" style="margin-top:10px"><b class="small">Warnings (${r.warnings.length})</b>${r.warnings.slice(0, 20).map(w => `<div class="small sec-muted">${esc(w)}</div>`).join('')}${r.warnings.length > 20 ? `<div class="small muted">…and ${r.warnings.length - 20} more</div>` : ''}</div>` : '';
+    const sampC = (r.samples.customers || []).map(c => `<div class="small sec-muted">${esc(c.name)}${c.email ? ' · ' + esc(c.email) : ''}</div>`).join('');
+    const sampI = (r.samples.invoices || []).map(i => `<div class="small sec-muted">${esc(i.number)} · ${money0(i.total)} · ${esc(i.status)}${i.balance > 0 ? ' · ' + money0(i.balance) + ' due' : ''} · ${i.items} item(s)</div>`).join('');
+    out.innerHTML = `<div class="card" style="padding:16px;margin-top:14px">
+      <h2 style="margin-bottom:10px">${commit ? 'Import complete' : 'Preview — nothing saved yet'}</h2>
+      <div class="grid3">
+        <div class="metric"><div class="l">New customers</div><div class="v">${r.customers_created}</div></div>
+        <div class="metric"><div class="l">Matched existing</div><div class="v">${r.customers_matched}</div></div>
+        <div class="metric"><div class="l">Invoices</div><div class="v">${r.invoices_created}</div></div>
+        <div class="metric"><div class="l">Payments</div><div class="v">${r.payments_created}</div></div>
+        <div class="metric"><div class="l">Invoices skipped</div><div class="v">${r.invoices_skipped}</div></div>
+      </div>
+      <div class="small sec-muted" style="margin-top:10px">In file: ${r.counts.clients_in_file} clients · ${r.counts.invoices_in_file} invoices · ${r.counts.payments_in_file} payments. Skipped invoices are ones already imported (same number) or with no matching client.</div>
+      ${sampC ? `<div class="box" style="margin-top:10px"><b class="small">Sample new customers</b>${sampC}</div>` : ''}
+      ${sampI ? `<div class="box" style="margin-top:10px"><b class="small">Sample invoices</b>${sampI}</div>` : ''}
+      ${warn}
+      ${commit ? '<div class="help">Re-running the same file is safe — existing customers are matched and already-imported invoice numbers are skipped.</div>' : ''}</div>`;
+    if (!commit) { $('#impGo').disabled = false; toast('Preview ready — review, then Import now'); }
+    else { toast('Imported'); $('#impGo').disabled = true; }
+  } catch (e) { out.innerHTML = `<div class="card" style="padding:16px;color:var(--danger)">${esc(e.message)}</div>`; }
+}
+
 // ---------- Profit & Loss (per account: cost vs client revenue, monthly run-rate) ----------
 const marginColor = m => m > 0 ? 'var(--success,#1D9E75)' : m < 0 ? 'var(--danger)' : 'var(--muted)';
 async function renderPnl() {
