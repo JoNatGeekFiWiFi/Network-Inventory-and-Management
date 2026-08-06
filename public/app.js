@@ -2673,29 +2673,48 @@ async function renderFiberImport() {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
   view().innerHTML = `<div class="crumb" onclick="location.hash='#/fiber'"><i class="ti ti-chevron-left"></i> Fiber</div>
     <h1>Import fiber routes</h1>
-    <div class="small sec-muted" style="margin:4px 0 14px">Upload a Google Earth <b>KML</b> or a <b>GeoJSON</b> file. Paths become routes; placemarks become structures.</div>
-    <div class="card" style="padding:16px">
-      <div class="fld"><label class="fl">File</label><input type="file" id="fiFile" accept=".kml,.kmz,.json,.geojson,.gpx,.csv,.shp,.zip" onchange="$('#fiGo').disabled=true;$('#fiOut').innerHTML=''"/>
+    <div class="small sec-muted" style="margin:4px 0 14px">Upload Google Earth <b>KMZ/KML</b>, <b>GeoJSON</b>, <b>GPX</b>, <b>CSV</b> or a <b>Shapefile</b>. Paths become routes; placemarks become structures.</div>
+    <div class="card" style="padding:16px" id="fiForm">
+      <div class="fld"><label class="fl">File</label><input type="file" id="fiFile" accept=".kml,.kmz,.json,.geojson,.gpx,.csv,.shp,.zip" onchange="fiPicked()"/>
         <div class="help">Google Earth <b>.kmz</b>/<b>.kml</b>, <b>.geojson</b>, GPS <b>.gpx</b>, <b>.csv</b> (lat/lng columns or a WKT LINESTRING), or a <b>Shapefile</b> — zip the .shp + .dbf together, or upload the .shp alone. Lines become routes; points become structures.<br>Shapefiles must be in WGS84 (EPSG:4326); projected coordinate systems are rejected rather than placed wrongly.</div></div>
       <div class="grid2">${field('Import as status', 'status', 'as_built', { type: 'select', options: FIBER_ROUTE_STATUS.map(s => ({ v: s, l: s.replace('_', ' ') })) })}
       ${field('Placemarks become', 'structure_kind', 'handhole', { type: 'select', options: STRUCTURE_KINDS.map(k => ({ v: k, l: k.replace('_', ' ') })) })}</div>
-      <div style="display:flex;gap:10px;justify-content:flex-end">
+      <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center">
+        <span class="small sec-muted" id="fiPick" style="flex:1"></span>
         <button class="btn" onclick="runFiberImport(false)"><i class="ti ti-eye"></i> Preview</button>
-        <button class="btn primary" id="fiGo" disabled onclick="runFiberImport(true)"><i class="ti ti-upload"></i> Import</button></div>
+        <button class="btn primary" id="fiGo" onclick="runFiberImport(true)"><i class="ti ti-upload"></i> Import</button></div>
+      <div class="help">Preview is optional — it shows what the file contains without saving anything.</div>
     </div><div id="fiOut"></div>`;
 }
+function fiPicked() {
+  const f = $('#fiFile').files[0];
+  $('#fiOut').innerHTML = '';
+  $('#fiPick').textContent = f ? `${f.name} · ${f.size > 1048576 ? (f.size / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(f.size / 1024)) + ' KB'}` : '';
+}
 async function runFiberImport(commit) {
-  const f = $('#fiFile').files[0]; if (!f) { toast('Choose a KML or GeoJSON file'); return; }
-  const out = $('#fiOut'); out.innerHTML = '<div class="card" style="padding:16px"><div class="loading">Reading…</div></div>';
-  const opts = collect('.card');
-  const payload = { commit, status: opts.status, structure_kind: opts.structure_kind };
-  // Binary formats (KMZ, zipped shapefile, bare .shp) must go as bytes — reading them as text corrupts them
-  if (/\.(kmz|zip|shp|dbf)$/i.test(f.name)) {
-    const buf = new Uint8Array(await f.arrayBuffer());
-    let bin = ''; for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
-    payload.data_b64 = btoa(bin);
-  } else payload.data = await f.text();
+  const f = $('#fiFile').files[0];
+  if (!f) { toast('Choose a file first'); return; }
+  const out = $('#fiOut');
+  const fail = msg => { out.innerHTML = `<div class="card" style="padding:16px;margin-top:14px;color:var(--danger)"><b>Import failed</b><div style="margin-top:6px">${esc(msg)}</div></div>`; toast(msg); };
+  // base64 inflates by ~33%, and the server body cap is 60 MB
+  if (f.size > 40 * 1024 * 1024) return fail(`${f.name} is ${(f.size / 1048576).toFixed(1)} MB — too large to upload (limit ~40 MB). Split the export into smaller files.`);
+  out.innerHTML = '<div class="card" style="padding:16px"><div class="loading">Reading ' + esc(f.name) + '…</div></div>';
+  // NOTE: reading the file must live inside the try — it used to sit outside, so a failure here
+  // left the spinner up forever with no error shown.
   try {
+    const opts = collect('#fiForm');
+    const payload = { commit, status: opts.status, structure_kind: opts.structure_kind };
+    if (/\.(kmz|zip|shp|dbf)$/i.test(f.name)) {
+      // Binary: FileReader gives us base64 directly and handles multi-MB files, unlike the
+      // byte-at-a-time String.fromCharCode loop this used to do (slow enough to look like a hang).
+      const dataUrl = await fileToDataUrl(f);
+      const comma = dataUrl.indexOf(',');
+      if (comma < 0) throw new Error('Could not read that file');
+      payload.data_b64 = dataUrl.slice(comma + 1);
+    } else {
+      payload.data = await f.text();
+    }
+    out.innerHTML = '<div class="card" style="padding:16px"><div class="loading">' + (commit ? 'Importing…' : 'Analysing…') + '</div></div>';
     const r = await api('/fiber/import', { method: 'POST', body: JSON.stringify(payload) });
     const samp = r.samples ? `<div class="box" style="margin-top:10px"><b class="small">Sample</b>
       ${(r.samples.routes || []).map(x => `<div class="small sec-muted">${esc(x.name)} — ${x.points} points, ${(x.length_m / 1000).toFixed(2)} km</div>`).join('')}
@@ -2710,8 +2729,8 @@ async function runFiberImport(commit) {
       </div>
       <div class="small sec-muted" style="margin-top:8px">Detected format: ${esc(r.format)}. Duplicates (same name) are skipped, so re-importing is safe.</div>
       ${samp}</div>`;
-    if (!commit) { $('#fiGo').disabled = false; toast('Preview ready'); } else { toast('Imported'); $('#fiGo').disabled = true; }
-  } catch (e) { out.innerHTML = `<div class="card" style="padding:16px;color:var(--danger)">${esc(e.message)}</div>`; }
+    toast(commit ? `Imported ${r.routes_created} route(s), ${r.structures_created} structure(s)` : 'Preview ready — press Import to save');
+  } catch (e) { fail(e.message || String(e)); }
 }
 
 // ---------- Circuits (standalone A<->Z inventory) ----------

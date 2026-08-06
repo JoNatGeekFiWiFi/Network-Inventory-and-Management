@@ -352,4 +352,37 @@ ok((await call('/api/fiber/import', { method: 'POST', body: { data: 'just some p
   ok((await call('/api/attachments?parent_type=cable&parent_id=' + doomed)).json.length === 0, 'deleting a cable cascades its attachments away');
 }
 
+
+// ---- realistic Google Earth KMZ (nested Folders, styles, CDATA, MultiGeometry) ----
+{
+  cookie = ''; await call('/api/login', { body: { email: 'admin@geekitek.test', password: 'admin123' } });
+  const realKml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2">
+<Document><name>Plant.kmz</name>
+ <Style id="s_ylw"><LineStyle><color>ff00ffff</color><width>3</width></LineStyle></Style>
+ <Folder><name>Backbone</name>
+  <Placemark><name>GE Main 144ct</name><description><![CDATA[<b>144 count</b>]]></description><styleUrl>#s_ylw</styleUrl>
+   <LineString><tessellate>1</tessellate><coordinates>
+     -112.074036,33.448376,0 -112.070000,33.450000,0
+     -112.065000,33.452000,0
+   </coordinates></LineString></Placemark>
+  <Folder><name>Laterals</name>
+   <Placemark><name>GE 3rd Ave</name><LineString><coordinates>-112.06,33.45,0 -112.061,33.455,0</coordinates></LineString></Placemark>
+  </Folder>
+ </Folder>
+ <Folder><name>Structures</name>
+  <Placemark><name>GE HH-204</name><Point><coordinates>-112.07,33.45,0</coordinates></Point></Placemark>
+ </Folder>
+</Document></kml>`;
+  const p2 = parseKml(realKml);
+  ok(p2.routes.length === 2, 'KML: placemarks found inside nested <Folder> elements');
+  ok(p2.routes[0].coordinates.length === 3, 'KML: coordinates split across newlines/indentation parsed');
+  ok(p2.routes[0].notes.includes('144 count'), 'KML: CDATA description preserved');
+  ok(p2.structures.length === 1 && p2.structures[0].name === 'GE HH-204', 'KML: point inside a folder found');
+  // and the same content zipped as a KMZ, through the endpoint
+  const b64 = makeZip([{ name: 'doc.kml', data: Buffer.from(realKml) }]).toString('base64');
+  const rr = await call('/api/fiber/import', { method: 'POST', body: { data_b64: b64, commit: true } });
+  ok(rr.json.format === 'kmz' && rr.json.routes_created === 2 && rr.json.structures_created === 1, 'realistic KMZ imports 2 routes + 1 structure');
+}
+
 console.log('\nRESULT:', pass, 'passed,', fail, 'failed'); process.exit(fail ? 1 : 0);
