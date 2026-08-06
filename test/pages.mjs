@@ -28,4 +28,33 @@ ok((await call('/inbound/email/whatever', { method: 'POST' })).status === 403, '
 // staff API still requires auth
 ok((await call('/api/sites')).status === 401, 'API requires auth');
 
+// malformed percent-encoding (scanner probes) → clean 400, not a thrown URIError stack
+for (const bad of ['/.env.local.txt%85', '/%E0%A4%A', '/api/sites%ZZ', '/pay/%85']) {
+  const r = await call(bad);
+  ok(r.status === 400, `malformed URL ${bad} → 400 (got ${r.status})`);
+}
+// legitimate percent-encoding must still work
+ok((await call('/api/sites%20')).status === 401, 'valid encoding still routes normally');
+
+// scanner bait must 404, not hand back 200 + the whole SPA shell
+for (const bait of ['/.env', '/.git/config', '/wp-login.php', '/config.php', '/.aws/credentials']) {
+  const r = await call(bait);
+  ok(r.status === 404, `scanner probe ${bait} → 404 (got ${r.status})`);
+}
+// ...and must never contain real secrets even by accident
+{
+  const r = await call('/.env');
+  ok(!/smtp_pass|stripe_secret|twilio_token|password/i.test(r.t), '/.env body leaks nothing');
+}
+// Unauthenticated callers get 401 for any /api path — we deliberately don't reveal which
+// endpoints exist. Once signed in, an unknown path must fail as JSON rather than HTML.
+ok((await call('/api/definitely-not-a-route')).status === 401, 'unknown /api path → 401 while anonymous (no endpoint disclosure)');
+await call('/api/login', { method: 'POST', body: { email: 'admin@geekitek.test', password: 'admin123' } });
+{
+  const r = await call('/api/definitely-not-a-route');
+  ok(r.status === 404 && r.t.trim().startsWith('{'), `signed-in unknown /api path → JSON 404 (got ${r.status})`);
+}
+// real SPA deep links still serve the app
+ok((await call('/sites')).status === 200, 'extensionless SPA path still serves index.html');
+
 console.log('\nRESULT:', pass, 'passed,', fail, 'failed'); process.exit(fail ? 1 : 0);

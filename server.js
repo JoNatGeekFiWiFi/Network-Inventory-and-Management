@@ -121,6 +121,16 @@ async function pushBlocklistToDevice(d) {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
+
+// Reject malformed percent-encoding before anything tries to decode it. Internet scanners
+// probe constantly with junk like '/.env.local.txt%85'; without this, serve-static (and any
+// route with a :param) throws a URIError and dumps a stack trace per hit, burying real errors
+// in the log. Answer 400 quietly instead. Must be first so it covers every route.
+app.use((req, res, next) => {
+  try { decodeURIComponent(req.path); return next(); }
+  catch { return res.status(400).type('text/plain').send('Bad Request'); }
+});
+
 // Stripe webhook needs the RAW body for signature verification, so it registers before the JSON parser
 // handler lives in domains/billing.js; resolved at request time via ctx (registration must stay here,
 // ahead of the JSON parser, because Stripe signs the raw body)
@@ -1439,7 +1449,21 @@ app.delete('/api/access/:id', requireNoc, (req, res) => {
 
 // ---- static frontend ----
 app.use(express.static(join(__dirname, 'public')));
-app.get('*', (req, res) => res.sendFile(join(__dirname, 'public', 'index.html')));
+
+// An unmatched /api path is a bug or a typo — answer JSON so callers see a real error
+// instead of silently receiving the SPA's HTML (which looks like an empty page).
+app.use('/api', (req, res) => res.status(404).json({ error: 'Unknown API endpoint' }));
+
+// SPA fallback. The frontend uses hash routing (#/sites), so genuine navigation only ever
+// requests '/'. Anything with a file extension is a missing asset, and anything with a
+// dot-segment is a scanner probing for /.env, /.git/config and friends — 404 those rather
+// than handing back 200 + the whole login page, which only encourages the scanners.
+app.get('*', (req, res) => {
+  const segments = req.path.split('/').filter(Boolean);
+  const looksLikeFile = !!extname(req.path) || segments.some(s => s.startsWith('.'));
+  if (looksLikeFile) return res.status(404).type('text/plain').send('Not found');
+  res.sendFile(join(__dirname, 'public', 'index.html'));
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Network Inventory Platform running on http://localhost:${PORT}`));
