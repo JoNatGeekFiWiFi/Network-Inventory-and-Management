@@ -7,7 +7,8 @@
 // Geometry is GeoJSON stored as text — SQLite has no spatial type and we don't need spatial
 // queries, just "draw it on a map and tell me what's connected to what".
 import { r2 } from '../lib/core.js';
-import { extractKmlFromKmz, looksLikeZip } from '../lib/unzip.js';
+import { extractKmlFromKmz, looksLikeZip, listZipEntries, readZipEntry } from '../lib/unzip.js';
+import { shapefileToFeatures } from '../lib/shapefile.js';
 
 // TIA-598-C fibre colour sequence. Repeats every 12; beyond the first 12 units the standard
 // adds a black stripe (black itself gets a yellow stripe).
@@ -101,13 +102,69 @@ export function parseGeoJson(data) {
   return out;
 }
 
+// GPX — what a field crew's handheld GPS or phone app produces. Tracks/routes become fiber
+// routes; waypoints become structures.
+export function parseGpx(xml) {
+  const out = { routes: [], structures: [] };
+  const s = String(xml);
+  const tagText = (blk, t) => { const m = blk.match(new RegExp('<' + t + '[^>]*>([\\s\\S]*?)</' + t + '>', 'i')); return m ? m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim() : ''; };
+  const ptsOf = (blk, tag) => {
+    const pts = [];
+    for (const m of blk.matchAll(new RegExp('<' + tag + '\\b[^>]*?lat="([-\\d.]+)"[^>]*?lon="([-\\d.]+)"', 'gi'))) {
+      const lat = parseFloat(m[1]), lon = parseFloat(m[2]);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) pts.push([lon, lat]);
+    }
+    return pts;
+  };
+  for (const m of s.match(/<trk>[\s\S]*?<\/trk>/gi) || []) {
+    const cs = ptsOf(m, 'trkpt'); if (cs.length >= 2) out.routes.push({ name: tagText(m, 'name') || 'GPS track', notes: tagText(m, 'desc') || null, coordinates: cs });
+  }
+  for (const m of s.match(/<rte>[\s\S]*?<\/rte>/gi) || []) {
+    const cs = ptsOf(m, 'rtept'); if (cs.length >= 2) out.routes.push({ name: tagText(m, 'name') || 'GPS route', notes: tagText(m, 'desc') || null, coordinates: cs });
+  }
+  for (const m of s.match(/<wpt\b[\s\S]*?<\/wpt>/gi) || []) {
+    const cs = ptsOf(m, 'wpt'); if (cs.length) out.structures.push({ name: tagText(m, 'name') || 'Waypoint', notes: tagText(m, 'desc') || null, lng: cs[0][0], lat: cs[0][1] });
+  }
+  return out;
+}
+
+// CSV — a list of structures (one point per row), the format people hand you from a spreadsheet.
+// Also accepts a WKT LINESTRING column for routes.
+export function parseCsv(text) {
+  const out = { routes: [], structures: [] };
+  const lines = String(text).split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) return out;
+  const splitRow = l => { const cells = []; let cur = '', q = false; for (let i = 0; i < l.length; i++) { const ch = l[i]; if (ch === '"') { if (q && l[i + 1] === '"') { cur += '"'; i++; } else q = !q; } else if (ch === ',' && !q) { cells.push(cur); cur = ''; } else cur += ch; } cells.push(cur); return cells.map(c => c.trim()); };
+  const head = splitRow(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  const findCol = (...names) => { for (const n of names) { const i = head.indexOf(n); if (i >= 0) return i; } return -1; };
+  const latI = findCol('lat', 'latitude', 'y'), lngI = findCol('lng', 'lon', 'long', 'longitude', 'x');
+  const nameI = findCol('name', 'label', 'id', 'structure', 'site');
+  const kindI = findCol('kind', 'type', 'structuretype');
+  const noteI = findCol('notes', 'note', 'description', 'comment');
+  const wktI = findCol('wkt', 'geometry', 'geom', 'linestring');
+  for (let i = 1; i < lines.length; i++) {
+    const c = splitRow(lines[i]);
+    if (wktI >= 0 && /LINESTRING/i.test(c[wktI] || '')) {
+      const inner = (c[wktI].match(/LINESTRING\s*\(([^)]*)\)/i) || [])[1] || '';
+      const coords = inner.split(',').map(p => p.trim().split(/\s+/).map(Number)).filter(p => p.length >= 2 && p.every(Number.isFinite));
+      if (coords.length >= 2) out.routes.push({ name: (nameI >= 0 && c[nameI]) || 'CSV route ' + i, notes: noteI >= 0 ? (c[noteI] || null) : null, coordinates: coords });
+      continue;
+    }
+    if (latI < 0 || lngI < 0) continue;
+    const lat = parseFloat(c[latI]), lng = parseFloat(c[lngI]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    out.structures.push({ name: (nameI >= 0 && c[nameI]) || 'Point ' + i, notes: noteI >= 0 ? (c[noteI] || null) : null, lat, lng, kind: kindI >= 0 ? (c[kindI] || '').toLowerCase() : null });
+  }
+  return out;
+}
+
 const ROUTE_STATUS = ['planned', 'permitted', 'under_construction', 'as_built', 'retired'];
 const STRAND_STATUS = ['free', 'reserved', 'assigned', 'dark', 'damaged', 'abandoned'];
 const STRUCTURE_KINDS = ['handhole', 'vault', 'pole', 'cabinet', 'pedestal', 'building', 'splice_case'];
 const SPLICE_TYPES = ['fusion', 'mechanical', 'splitter', 'termination'];
 
 export default function registerFiber(app, ctx) {
-  const { db, N, audit, requireNoc } = ctx;
+  const { db, N, audit, requireNoc, attachmentsFor, deleteAttachmentsFor } = ctx;
 
   // ---- helpers ----
   const routeOut = r => ({ ...r, geometry: safeJson(r.geom_json) });
@@ -129,6 +186,7 @@ export default function registerFiber(app, ctx) {
     const r = db.prepare('SELECT * FROM fiber_routes WHERE id=?').get(req.params.id);
     if (!r) return res.status(404).json({ error: 'not found' });
     const out = routeOut(r);
+    out.attachments = attachmentsFor('route', r.id);
     out.cables = db.prepare('SELECT * FROM fiber_cables WHERE route_id=? ORDER BY name').all(r.id).map(cableSummary);
     res.json(out);
   });
@@ -164,12 +222,20 @@ export default function registerFiber(app, ctx) {
     const n = db.prepare('SELECT COUNT(*) n FROM fiber_cables WHERE route_id=?').get(req.params.id).n;
     if (n) return res.status(409).json({ error: `${n} cable(s) run on this route — delete or move them first` });
     db.prepare('DELETE FROM fiber_routes WHERE id=?').run(req.params.id);
+    deleteAttachmentsFor('route', req.params.id);
     audit(req, 'delete', 'fiber_route#' + req.params.id);
     res.json({ ok: true });
   });
 
   // ---- structures (handholes, vaults, poles, cabinets…) ----
   app.get('/api/fiber/structures', (req, res) => res.json(db.prepare('SELECT * FROM fiber_structures ORDER BY name').all()));
+  app.get('/api/fiber/structures/:id', (req, res) => {
+    const s2 = db.prepare('SELECT * FROM fiber_structures WHERE id=?').get(req.params.id);
+    if (!s2) return res.status(404).json({ error: 'not found' });
+    s2.attachments = attachmentsFor('structure', s2.id);
+    s2.splices = db.prepare('SELECT * FROM fiber_splices WHERE structure_id=?').all(s2.id).map(x => ({ ...x, attachments: attachmentsFor('splice', x.id) }));
+    res.json(s2);
+  });
   app.post('/api/fiber/structures', requireNoc, (req, res) => {
     const b = req.body || {};
     if (!b.name) return res.status(400).json({ error: 'Structure name required' });
@@ -200,6 +266,7 @@ export default function registerFiber(app, ctx) {
     db.prepare('UPDATE fiber_cables SET a_structure_id=NULL WHERE a_structure_id=?').run(req.params.id);
     db.prepare('UPDATE fiber_cables SET z_structure_id=NULL WHERE z_structure_id=?').run(req.params.id);
     db.prepare('DELETE FROM fiber_structures WHERE id=?').run(req.params.id);
+    deleteAttachmentsFor('structure', req.params.id);
     audit(req, 'delete', 'fiber_structure#' + req.params.id);
     res.json({ ok: true });
   });
@@ -225,11 +292,13 @@ export default function registerFiber(app, ctx) {
     const out = cableSummary(c);
     out.geometry = safeJson(c.geom_json); delete out.geom_json;
     out.strands = db.prepare('SELECT * FROM fiber_strands WHERE cable_id=? ORDER BY position').all(c.id);
+    out.attachments = attachmentsFor('cable', c.id);
     // splices touching this cable, so the strand grid can show what each fibre lands on
     out.splices = db.prepare(`SELECT s.*, st.name AS structure_name FROM fiber_splices s
       LEFT JOIN fiber_structures st ON st.id=s.structure_id
       WHERE s.a_strand_id IN (SELECT id FROM fiber_strands WHERE cable_id=?)
-         OR s.z_strand_id IN (SELECT id FROM fiber_strands WHERE cable_id=?)`).all(c.id, c.id);
+         OR s.z_strand_id IN (SELECT id FROM fiber_strands WHERE cable_id=?)`).all(c.id, c.id)
+      .map(s2 => ({ ...s2, attachments: attachmentsFor('splice', s2.id) }));
     res.json(out);
   });
   app.post('/api/fiber/cables', requireNoc, (req, res) => {
@@ -277,6 +346,7 @@ export default function registerFiber(app, ctx) {
     }
     db.prepare('DELETE FROM fiber_strands WHERE cable_id=?').run(req.params.id);
     db.prepare('DELETE FROM fiber_cables WHERE id=?').run(req.params.id);
+    deleteAttachmentsFor('cable', req.params.id);
     audit(req, 'delete', 'fiber_cable#' + req.params.id);
     res.json({ ok: true });
   });
@@ -329,6 +399,7 @@ export default function registerFiber(app, ctx) {
   });
   app.delete('/api/fiber/splices/:id', requireNoc, (req, res) => {
     db.prepare('DELETE FROM fiber_splices WHERE id=?').run(req.params.id);
+    deleteAttachmentsFor('splice', req.params.id);
     audit(req, 'delete', 'fiber_splice#' + req.params.id);
     res.json({ ok: true });
   });
@@ -372,21 +443,46 @@ export default function registerFiber(app, ctx) {
   // Text formats arrive in `data`; KMZ is binary so the browser sends it base64 in `data_b64`.
   app.post('/api/fiber/import', requireNoc, (req, res) => {
     const b = req.body || {};
-    let raw = '', format = 'geojson';
+    let raw = '', format = null, parsed = null;
     if (b.data_b64) {
       let buf; try { buf = Buffer.from(String(b.data_b64), 'base64'); } catch { return res.status(400).json({ error: 'Could not decode the uploaded file' }); }
       if (looksLikeZip(buf)) {
-        try { raw = extractKmlFromKmz(buf); format = 'kmz'; }
+        // A zip is either a KMZ or a zipped shapefile set — look inside to decide.
+        let entries; try { entries = listZipEntries(buf).filter(e => !e.name.endsWith('/')); }
         catch (e) { return res.status(400).json({ error: e.message }); }
-      } else raw = buf.toString('utf8');   // someone base64'd a plain .kml/.json — fine
+        const shp = entries.find(e => /\.shp$/i.test(e.name));
+        if (shp) {
+          const base = shp.name.replace(/\.shp$/i, '');
+          const dbfEntry = entries.find(e => e.name.toLowerCase() === (base + '.dbf').toLowerCase());
+          try {
+            parsed = shapefileToFeatures(readZipEntry(buf, shp), dbfEntry ? readZipEntry(buf, dbfEntry) : null);
+            format = 'shapefile';
+          } catch (e) { return res.status(400).json({ error: e.message }); }
+        } else {
+          try { raw = extractKmlFromKmz(buf); format = 'kmz'; }
+          catch (e) { return res.status(400).json({ error: e.message }); }
+        }
+      } else if (buf.length > 4 && buf.readInt32BE(0) === 9994) {
+        // a bare .shp with no .dbf alongside — geometry only, names auto-numbered
+        try { parsed = shapefileToFeatures(buf, null); format = 'shapefile'; }
+        catch (e) { return res.status(400).json({ error: e.message }); }
+      } else raw = buf.toString('utf8');   // someone base64'd a plain text format — fine
     } else {
       raw = typeof b.data === 'string' ? b.data : JSON.stringify(b.data || '');
     }
-    if (!raw.trim()) return res.status(400).json({ error: 'No file content received' });
-    let parsed;
-    const looksKml = format === 'kmz' || /<kml|<Placemark/i.test(raw.slice(0, 4000));
-    if (looksKml) { if (format !== 'kmz') format = 'kml'; parsed = parseKml(raw); }
-    else { let j; try { j = JSON.parse(raw); } catch (e) { return res.status(400).json({ error: 'Not valid GeoJSON, KML or KMZ: ' + e.message }); } parsed = parseGeoJson(j); }
+    if (!parsed) {
+      if (!raw.trim()) return res.status(400).json({ error: 'No file content received' });
+      const head = raw.slice(0, 4000);
+      if (format === 'kmz') parsed = parseKml(raw);
+      else if (/<gpx[\s>]/i.test(head)) { format = 'gpx'; parsed = parseGpx(raw); }
+      else if (/<kml|<Placemark/i.test(head)) { format = 'kml'; parsed = parseKml(raw); }
+      else if (/^\s*[{[]/.test(head)) {
+        let j; try { j = JSON.parse(raw); } catch (e) { return res.status(400).json({ error: 'Not valid GeoJSON: ' + e.message }); }
+        format = 'geojson'; parsed = parseGeoJson(j);
+      } else if (/[,;]/.test(head.split(/\r?\n/)[0] || '')) { format = 'csv'; parsed = parseCsv(raw); }
+      else return res.status(400).json({ error: 'Unrecognised file. Supported: GeoJSON, KML, KMZ, GPX, CSV, Shapefile (.shp or zipped).' });
+    }
+    if (!parsed.routes.length && !parsed.structures.length) return res.status(400).json({ error: `No routes or points found in that ${format} file` });
     const status = ROUTE_STATUS.includes(b.status) ? b.status : 'as_built';
     const result = { format, routes_found: parsed.routes.length, structures_found: parsed.structures.length, routes_created: 0, structures_created: 0, skipped: 0, total_length_m: 0 };
     if (!b.commit) { // dry run so the operator can look before importing
@@ -404,7 +500,8 @@ export default function registerFiber(app, ctx) {
     const insS = db.prepare('INSERT INTO fiber_structures (name,kind,lat,lng,status,notes) VALUES (?,?,?,?,?,?)');
     for (const s of parsed.structures) {
       if (db.prepare('SELECT id FROM fiber_structures WHERE name=? AND lat=? AND lng=?').get(s.name, s.lat, s.lng)) { result.skipped++; continue; }
-      insS.run(s.name.slice(0, 160), STRUCTURE_KINDS.includes(b.structure_kind) ? b.structure_kind : 'handhole', s.lat, s.lng, status, s.notes);
+      const kind = STRUCTURE_KINDS.includes(s.kind) ? s.kind : (STRUCTURE_KINDS.includes(b.structure_kind) ? b.structure_kind : 'handhole');
+      insS.run(s.name.slice(0, 160), kind, s.lat, s.lng, status, s.notes);
       result.structures_created++;
     }
     audit(req, 'import', 'fiber', `${result.routes_created} route(s), ${result.structures_created} structure(s) from ${result.format}`);

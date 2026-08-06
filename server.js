@@ -1158,37 +1158,82 @@ app.delete('/api/pops/:id', requireNoc, (req, res) => {
 });
 
 // ---- note attachments (pictures + PDFs) ----
-const ATT_MIME = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp', 'image/heic': '.heic', 'image/heif': '.heif', 'application/pdf': '.pdf' };
+// Photos render inline; documents are download-only (see the GET handler) so nothing
+// user-supplied can execute in the browser's origin.
+const ATT_IMAGE_MIME = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp', 'image/heic': '.heic', 'image/heif': '.heif' };
+const ATT_DOC_MIME = {
+  'application/pdf': '.pdf', 'text/plain': '.txt', 'text/csv': '.csv',
+  'application/msword': '.doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+  'application/vnd.ms-excel': '.xls', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+  'application/zip': '.zip',
+  // OTDR traces, CAD and other field artefacts have no registered type — browsers send octet-stream
+  'application/octet-stream': '.bin'
+};
+const ATT_MIME = { ...ATT_IMAGE_MIME, ...ATT_DOC_MIME };
 const ATT_MAX = 25 * 1024 * 1024; // 25 MB
+// Anything a photo/document can hang off. Fiber plant needs these for as-built evidence:
+// splice-tray photos, OTDR traces, locate tickets, permits.
+const ATT_PARENTS = ['site', 'pop', 'cable', 'splice', 'structure', 'route'];
 function withNoteAttachments(notes) {
-  const q = db.prepare('SELECT id, filename, mime, size FROM note_attachments WHERE note_id=? ORDER BY id');
+  const q = db.prepare('SELECT id, filename, mime, size, caption FROM note_attachments WHERE note_id=? ORDER BY id');
   for (const n of notes) n.attachments = q.all(n.id);
   return notes;
 }
+/** Attachments hung directly off a record (not off a note). */
+function attachmentsFor(parentType, parentId) {
+  return db.prepare('SELECT id, filename, mime, size, caption, author, created_at FROM note_attachments WHERE parent_type=? AND parent_id=? AND note_id IS NULL ORDER BY id')
+    .all(parentType, Number(parentId));
+}
+/** Remove every attachment for a record (called when the record itself is deleted). */
+function deleteAttachmentsFor(parentType, parentId) {
+  const rows = db.prepare('SELECT id, stored_name FROM note_attachments WHERE parent_type=? AND parent_id=?').all(parentType, Number(parentId));
+  for (const a of rows) { try { unlinkSync(join(UPLOADS_DIR, a.stored_name)); } catch {} }
+  if (rows.length) db.prepare('DELETE FROM note_attachments WHERE parent_type=? AND parent_id=?').run(parentType, Number(parentId));
+  return rows.length;
+}
+app.get('/api/attachments', (req, res) => {
+  const { parent_type, parent_id } = req.query;
+  if (!ATT_PARENTS.includes(parent_type) || !parent_id) return res.status(400).json({ error: 'parent_type and parent_id required' });
+  res.json(attachmentsFor(parent_type, parent_id));
+});
 app.post('/api/attachments', (req, res) => {
   const b = req.body || {};
-  if (!['site', 'pop'].includes(b.parent_type) || !b.parent_id) return res.status(400).json({ error: 'parent_type and parent_id required' });
-  if (!ATT_MIME[b.mime]) return res.status(400).json({ error: 'Only images (PNG/JPG/GIF/WebP) and PDF are allowed' });
+  if (!ATT_PARENTS.includes(b.parent_type) || !b.parent_id) return res.status(400).json({ error: 'parent_type and parent_id required' });
+  if (!ATT_MIME[b.mime]) return res.status(400).json({ error: 'Unsupported file type — images, PDF, Office documents, CSV/text and ZIP are allowed' });
   let raw = String(b.data || '');
   const comma = raw.indexOf(','); if (raw.startsWith('data:') && comma !== -1) raw = raw.slice(comma + 1); // strip data URL prefix
   let buf; try { buf = Buffer.from(raw, 'base64'); } catch { return res.status(400).json({ error: 'Bad file data' }); }
   if (!buf.length) return res.status(400).json({ error: 'Empty file' });
   if (buf.length > ATT_MAX) return res.status(413).json({ error: 'File too large (max 25 MB)' });
-  const stored = randomUUID() + ATT_MIME[b.mime];
+  // keep the real extension for octet-stream uploads (.sor OTDR traces, .dwg, …) so downloads open correctly
+  let ext = ATT_MIME[b.mime];
+  if (b.mime === 'application/octet-stream') { const m = String(b.filename || '').match(/(\.[A-Za-z0-9]{1,8})$/); if (m) ext = m[1].toLowerCase(); }
+  const stored = randomUUID() + ext;
   try { writeFileSync(join(UPLOADS_DIR, stored), buf); } catch (e) { return res.status(500).json({ error: 'Could not save file' }); }
-  const info = db.prepare('INSERT INTO note_attachments (parent_type,parent_id,note_id,filename,mime,size,stored_name,author) VALUES (?,?,?,?,?,?,?,?)')
-    .run(b.parent_type, b.parent_id, N(b.note_id), N(b.filename, 'file'), b.mime, buf.length, stored, (req.user && req.user.email) || '');
+  const info = db.prepare('INSERT INTO note_attachments (parent_type,parent_id,note_id,filename,mime,size,stored_name,author,caption) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(b.parent_type, b.parent_id, N(b.note_id), N(b.filename, 'file'), b.mime, buf.length, stored, (req.user && req.user.email) || '', N(b.caption) || null);
   audit(req, 'attach', b.parent_type + '#' + b.parent_id, b.filename || stored);
   res.json({ id: info.lastInsertRowid, filename: b.filename, mime: b.mime, size: buf.length });
+});
+app.put('/api/attachments/:id', (req, res) => {
+  const a = db.prepare('SELECT * FROM note_attachments WHERE id=?').get(req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  if (!isPriv(req) && a.author !== (req.user && req.user.email)) return res.status(403).json({ error: 'Only the author or NOC/Admin can edit' });
+  db.prepare('UPDATE note_attachments SET caption=? WHERE id=?').run(N((req.body || {}).caption) || null, a.id);
+  res.json({ ok: true });
 });
 app.get('/api/attachments/:id', (req, res) => {
   const a = db.prepare('SELECT * FROM note_attachments WHERE id=?').get(req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
   const fp = join(UPLOADS_DIR, a.stored_name);
   if (!existsSync(fp)) return res.status(404).json({ error: 'file missing' });
+  // Only images and PDFs render inline; everything else downloads, so an uploaded file can never
+  // be interpreted as script in our origin. nosniff stops the browser second-guessing the type.
+  const inline = !!ATT_IMAGE_MIME[a.mime] || a.mime === 'application/pdf';
   res.setHeader('Content-Type', a.mime || 'application/octet-stream');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Length', statSync(fp).size);
-  res.setHeader('Content-Disposition', `inline; filename="${(a.filename || 'file').replace(/"/g, '')}"`);
+  res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${(a.filename || 'file').replace(/[^\w.\-() ]/g, '_')}"`);
   createReadStream(fp).pipe(res);
 });
 app.delete('/api/attachments/:id', (req, res) => {
@@ -1280,6 +1325,7 @@ const ctx = {
   restReq, rosHeaders, rosErr, publicDevice, pollDeviceCore,
   UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR,
   harvestThreats, pushBlocklistToDevice, activeBlockIps, blocklistMinHits,
+  attachmentsFor, deleteAttachmentsFor,
   jobs: {}
 };
 registerNetwork(app, ctx);

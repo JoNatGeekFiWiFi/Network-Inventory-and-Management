@@ -75,6 +75,8 @@ export function migrate() {
   // Note attachments (pictures + PDFs) — files stored on disk, metadata here
   db.exec("CREATE TABLE IF NOT EXISTS note_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_type TEXT NOT NULL, parent_id INTEGER NOT NULL, note_id INTEGER, filename TEXT, mime TEXT, size INTEGER, stored_name TEXT NOT NULL, author TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
   db.exec("CREATE INDEX IF NOT EXISTS idx_note_att ON note_attachments(note_id)");
+  ensure('note_attachments', 'caption', 'TEXT');   // short description shown under the thumbnail
+  db.exec('CREATE INDEX IF NOT EXISTS idx_note_att_parent ON note_attachments(parent_type, parent_id)');
   // Weekly router config backups (.rsc exports); files on disk, metadata here
   db.exec("CREATE TABLE IF NOT EXISTS router_backups (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'ok', error TEXT, size INTEGER, stored_name TEXT, format TEXT DEFAULT 'rsc', source TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
   db.exec("CREATE INDEX IF NOT EXISTS idx_rbak ON router_backups(device_id, created_at)");

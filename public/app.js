@@ -129,6 +129,7 @@ async function route() {
     if (p[0] === 'fiber' && p[1] === 'import') { setNav('fiber'); return await renderFiberImport(); }
     if (p[0] === 'fiber' && p[1] === 'cable' && p[2]) { setNav('fiber'); return await renderCable(p[2]); }
     if (p[0] === 'fiber' && p[1] === 'route' && p[2]) { setNav('fiber'); return await renderFiberRoute(p[2]); }
+    if (p[0] === 'fiber' && p[1] === 'structure' && p[2]) { setNav('fiber'); return await renderStructure(p[2]); }
     if (p[0] === 'fiber') { setNav('fiber'); return await renderFiber(); }
 
     if (p[0] === 'circuit' && p[1] === 'new') { setNav('circuits'); return await formCircuit(q); }
@@ -2322,6 +2323,61 @@ function pnlCard(p) {
     <div style="padding:0 14px 12px" class="small sec-muted">Cost = base ${money0(p.base_cost)} + sub-accounts ${money0(p.sub_cost)}. Revenue from ${p.customers.length} billed client${p.customers.length === 1 ? '' : 's'}${p.customers.some(c => c.shared) ? ' (some shared across accounts)' : ''}.</div></div>`;
 }
 
+// ---------- Reusable photo + document panel (any record: cable, splice, structure, route…) ----------
+const DOC_ACCEPT = 'image/*,application/pdf,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.zip,.sor,.trc,.dwg';
+function attachPanel(parentType, parentId, atts, title) {
+  const items = (atts || []).map(a => {
+    const url = '/api/attachments/' + a.id;
+    const isImg = (a.mime || '').startsWith('image/');
+    const kb = a.size ? (a.size > 1048576 ? (a.size / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(a.size / 1024)) + ' KB') : '';
+    const del = isPriv() ? `<button class="btn sm" style="position:absolute;top:4px;right:4px;padding:2px 6px" onclick="event.preventDefault();event.stopPropagation();delAtt(${a.id},'${parentType}',${parentId})">Remove</button>` : '';
+    const cap = `<div class="small sec-muted" style="margin-top:3px;max-width:150px;word-break:break-word">${esc(a.caption || a.filename || '')}<span class="muted"> ${kb}</span></div>`;
+    return isImg
+      ? `<div style="position:relative"><a href="${url}" target="_blank"><img src="${url}" loading="lazy" style="height:110px;width:150px;object-fit:cover;border-radius:8px;border:.5px solid var(--border)"/></a>${del}${cap}</div>`
+      : `<div style="position:relative"><a href="${url}" target="_blank" class="tag" style="display:flex;align-items:center;justify-content:center;height:110px;width:150px;border-radius:8px;text-align:center">
+           <span><i class="ti ti-file-text" style="font-size:22px"></i><br><span class="small">${esc((a.filename || 'file').slice(0, 24))}</span></span></a>${del}${cap}</div>`;
+  }).join('');
+  return `<div class="card"><div class="hd"><h2><i class="ti ti-photo"></i> ${esc(title || 'Photos &amp; documents')} · ${(atts || []).length}</h2></div>
+    <div style="padding:0 14px 12px">
+      <div style="display:flex;flex-wrap:wrap;gap:12px">${items || '<span class="muted small">Nothing attached yet.</span>'}</div>
+      ${isPriv() ? `<div class="box" style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="file" id="att-${parentType}-${parentId}" multiple accept="${DOC_ACCEPT}" style="flex:1;min-width:200px"/>
+        <input id="attcap-${parentType}-${parentId}" placeholder="Caption (optional)" style="flex:1;min-width:160px"/>
+        <button class="btn sm primary" onclick="uploadAtts('${parentType}',${parentId})"><i class="ti ti-upload"></i> Upload</button>
+      </div><div class="help">Photos (splice trays, handhole interiors, labels), PDFs, Office docs, OTDR traces. Max 25 MB each.</div>` : ''}
+    </div></div>`;
+}
+async function uploadAtts(parentType, parentId) {
+  const input = $('#att-' + parentType + '-' + parentId);
+  const capEl = $('#attcap-' + parentType + '-' + parentId);
+  const files = input && input.files ? Array.from(input.files) : [];
+  if (!files.length) { toast('Choose a file first'); return; }
+  const caption = capEl ? capEl.value.trim() : '';
+  let done = 0;
+  for (const f of files) {
+    if (f.size > 25 * 1024 * 1024) { toast(f.name + ' is over 25 MB — skipped'); continue; }
+    try {
+      const data = await fileToDataUrl(f);
+      await api('/attachments', { method: 'POST', body: JSON.stringify({ parent_type: parentType, parent_id: parentId, filename: f.name, mime: f.type || 'application/octet-stream', data, caption: caption || null }) });
+      done++;
+    } catch (e) { toast('Upload failed (' + f.name + '): ' + e.message); }
+  }
+  if (done) toast(done + ' file(s) attached');
+  refreshAfterAttach(parentType, parentId);
+}
+async function delAtt(id, parentType, parentId) {
+  if (!confirm('Remove this attachment?')) return;
+  try { await api('/attachments/' + id, { method: 'DELETE' }); toast('Removed'); refreshAfterAttach(parentType, parentId); }
+  catch (e) { toast(e.message); }
+}
+function refreshAfterAttach(parentType, parentId) {
+  if (parentType === 'cable') return renderCable(parentId);
+  if (parentType === 'route') return renderFiberRoute(parentId);
+  if (parentType === 'splice' && window._cable) return renderCable(window._cable.id);
+  if (parentType === 'structure') return renderStructure(parentId);
+  route();
+}
+
 // ---------- Fiber plant (GIS): routes on a map, cables, strands, splices ----------
 const TIA_HEX = { Blue: '#1f6fd0', Orange: '#f07c1e', Green: '#1f9d4d', Brown: '#7b4a26', Slate: '#8a94a0', White: '#e9edf2', Red: '#d93636', Black: '#22262b', Yellow: '#e8c72c', Violet: '#8b5cd6', Rose: '#e87fa8', Aqua: '#43c8d4' };
 const ROUTE_STATUS_COL = { planned: '#8b5cd6', permitted: '#e8c72c', under_construction: '#f07c1e', as_built: '#1f9d4d', retired: '#8a94a0' };
@@ -2381,7 +2437,7 @@ async function fiberMapLoad() {
       if (p.kind === 'route') {
         layer.bindPopup(`<b>${esc(p.name)}</b><br>${esc((p.status || '').replace('_', ' '))}${p.placement ? ' · ' + esc(p.placement) : ''}<br>${(p.length_m / 1000).toFixed(2)} km · ${p.cables} cable(s), ${p.strand_total} strands<br><a href="#/fiber/route/${p.id}">Open route</a>`);
       } else {
-        layer.bindPopup(`<b>${esc(p.name)}</b><br>${esc(p.structure_kind)}${isPriv() ? `<br><a href="#" onclick="event.preventDefault();delStructure(${p.id})">Delete</a>` : ''}`);
+        layer.bindPopup(`<b>${esc(p.name)}</b><br>${esc(p.structure_kind)}<br><a href="#/fiber/structure/${p.id}">Open structure</a>`);
       }
     }
   }).addTo(_fiberMap);
@@ -2496,6 +2552,7 @@ async function renderFiberRoute(id) {
       <div class="small sec-muted" style="margin-top:3px">${(r.length_m / 1000).toFixed(2)} km${r.placement ? ' · ' + esc(r.placement) : ''}${r.owner ? ' · ' + esc(r.owner) : ''}</div></div>
       ${isPriv() ? `<button class="btn" onclick="delFiberRoute(${r.id})"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
     ${r.notes ? `<div class="card" style="padding:12px 14px" class="small sec-muted">${esc(r.notes)}</div>` : ''}
+    ${attachPanel('route', r.id, r.attachments, 'Route photos &amp; documents')}
     <div class="card"><div class="hd"><h2>Cables on this route · ${r.cables.length}</h2></div>
       ${r.cables.map(c => `<div class="row rowlink" onclick="location.hash='#/fiber/cable/${c.id}'">
         <i class="ti ti-cable sec-muted"></i><div style="flex:1"><div>${esc(c.name)} · ${c.strand_count}ct</div>
@@ -2538,7 +2595,40 @@ async function renderCable(id) {
       <div class="grid2">${field('Label', 'label', '', { ph: 'e.g. Tower A / Customer X' })}${field('Assigned type', 'assigned_type', '', { type: 'select', options: [{ v: '', l: '—' }, 'circuit', 'customer', 'site', 'pop'] })}</div>
       <div style="display:flex;justify-content:flex-end"><button class="btn sm primary" onclick="assignRange(${c.id})"><i class="ti ti-check"></i> Apply to range</button></div></div>` : ''}
     <div id="traceout"></div>
+    ${attachPanel('cable', c.id, c.attachments, 'Cable photos &amp; documents')}
+    ${(c.splices || []).length ? `<div class="card"><div class="hd"><h2><i class="ti ti-git-merge"></i> Splices · ${c.splices.length}</h2></div>
+      ${c.splices.map(s => `<div class="row" style="display:block;padding:10px 14px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <i class="ti ti-git-merge sec-muted"></i>
+          <div style="flex:1"><div>${esc(s.splice_type)}${s.structure_name ? ' at ' + esc(s.structure_name) : ''}${s.tray ? ' · tray ' + esc(s.tray) : ''}${s.loss_db != null ? ' · ' + s.loss_db + ' dB' : ''}</div>
+            <div class="small sec-muted">strand #${s.a_strand_id}${s.z_strand_id ? ' ↔ #' + s.z_strand_id : ' (terminated)'}${(s.attachments || []).length ? ' · ' + s.attachments.length + ' attachment(s)' : ''}</div></div>
+          <button class="btn sm" onclick="toggleSpliceAtt(${s.id})">Photos &amp; docs</button>
+          ${isPriv() ? `<button class="btn sm" onclick="delSplice(${s.id})"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
+        <div id="spatt-${s.id}" style="display:none;margin-top:10px">${attachPanel('splice', s.id, s.attachments, 'Splice photos &amp; documents')}</div>
+      </div>`).join('')}</div>` : ''}
     <div class="card"><div class="hd"><h2>Strands · ${c.strand_count}</h2></div><div style="padding:0 6px 8px">${rows}</div></div>`;
+}
+function toggleSpliceAtt(id) { const el = $('#spatt-' + id); if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none'; }
+async function delSplice(id) {
+  if (!confirm('Delete this splice and its attachments?')) return;
+  try { await api('/fiber/splices/' + id, { method: 'DELETE' }); toast('Splice deleted'); renderCable(window._cable.id); }
+  catch (e) { toast(e.message); }
+}
+async function renderStructure(id) {
+  const s = await api('/fiber/structures/' + id);
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/fiber'"><i class="ti ti-chevron-left"></i> Fiber</div>
+    <div class="head"><div class="t"><h1>${esc(s.name)}</h1>
+      <div class="small sec-muted" style="margin-top:3px">${esc(s.kind.replace('_', ' '))} · ${esc(s.status.replace('_', ' '))} · <span class="mono">${s.lat}, ${s.lng}</span></div></div>
+      ${isPriv() ? `<button class="btn" onclick="delStructure(${s.id})"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
+    ${s.notes ? `<div class="card" style="padding:12px 14px"><div class="small sec-muted">${esc(s.notes)}</div></div>` : ''}
+    ${attachPanel('structure', s.id, s.attachments, 'Structure photos &amp; documents')}
+    <div class="card"><div class="hd"><h2>Splices here · ${s.splices.length}</h2></div>
+      ${s.splices.map(x => `<div class="row" style="display:block;padding:10px 14px">
+        <div style="display:flex;align-items:center;gap:8px"><i class="ti ti-git-merge sec-muted"></i>
+        <div style="flex:1">${esc(x.splice_type)}${x.tray ? ' · tray ' + esc(x.tray) : ''} <span class="small sec-muted">strand #${x.a_strand_id}${x.z_strand_id ? ' ↔ #' + x.z_strand_id : ''}</span></div>
+        <button class="btn sm" onclick="toggleSpliceAtt(${x.id})">Photos &amp; docs</button></div>
+        <div id="spatt-${x.id}" style="display:none;margin-top:10px">${attachPanel('splice', x.id, x.attachments, 'Splice photos &amp; documents')}</div>
+      </div>`).join('') || '<div class="row muted">No splices recorded here</div>'}</div>`;
 }
 async function assignRange(cableId) {
   const d = collect('#rangeform');
@@ -2585,8 +2675,8 @@ async function renderFiberImport() {
     <h1>Import fiber routes</h1>
     <div class="small sec-muted" style="margin:4px 0 14px">Upload a Google Earth <b>KML</b> or a <b>GeoJSON</b> file. Paths become routes; placemarks become structures.</div>
     <div class="card" style="padding:16px">
-      <div class="fld"><label class="fl">File</label><input type="file" id="fiFile" accept=".kml,.kmz,.json,.geojson,application/json,application/vnd.google-earth.kmz" onchange="$('#fiGo').disabled=true;$('#fiOut').innerHTML=''"/>
-        <div class="help">Google Earth <b>.kmz</b> or <b>.kml</b>, or a <b>.geojson</b>/<b>.json</b> file. Paths become routes, placemarks become structures.</div></div>
+      <div class="fld"><label class="fl">File</label><input type="file" id="fiFile" accept=".kml,.kmz,.json,.geojson,.gpx,.csv,.shp,.zip" onchange="$('#fiGo').disabled=true;$('#fiOut').innerHTML=''"/>
+        <div class="help">Google Earth <b>.kmz</b>/<b>.kml</b>, <b>.geojson</b>, GPS <b>.gpx</b>, <b>.csv</b> (lat/lng columns or a WKT LINESTRING), or a <b>Shapefile</b> — zip the .shp + .dbf together, or upload the .shp alone. Lines become routes; points become structures.<br>Shapefiles must be in WGS84 (EPSG:4326); projected coordinate systems are rejected rather than placed wrongly.</div></div>
       <div class="grid2">${field('Import as status', 'status', 'as_built', { type: 'select', options: FIBER_ROUTE_STATUS.map(s => ({ v: s, l: s.replace('_', ' ') })) })}
       ${field('Placemarks become', 'structure_kind', 'handhole', { type: 'select', options: STRUCTURE_KINDS.map(k => ({ v: k, l: k.replace('_', ' ') })) })}</div>
       <div style="display:flex;gap:10px;justify-content:flex-end">
@@ -2599,8 +2689,8 @@ async function runFiberImport(commit) {
   const out = $('#fiOut'); out.innerHTML = '<div class="card" style="padding:16px"><div class="loading">Reading…</div></div>';
   const opts = collect('.card');
   const payload = { commit, status: opts.status, structure_kind: opts.structure_kind };
-  // KMZ is a ZIP — read it as bytes and ship it base64 rather than mangling it as text
-  if (/\.kmz$/i.test(f.name)) {
+  // Binary formats (KMZ, zipped shapefile, bare .shp) must go as bytes — reading them as text corrupts them
+  if (/\.(kmz|zip|shp|dbf)$/i.test(f.name)) {
     const buf = new Uint8Array(await f.arrayBuffer());
     let bin = ''; for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
     payload.data_b64 = btoa(bin);

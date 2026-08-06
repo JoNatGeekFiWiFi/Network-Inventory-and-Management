@@ -196,4 +196,160 @@ const kmzDoc = `<?xml version="1.0"?><kml><Document>
   ok((await call('/api/fiber/import', { method: 'POST', body: { data_b64: junk } })).status === 400, 'corrupt KMZ rejected with 400');
 }
 
+
+// ---- Shapefile / GPX / CSV ----
+import { parseShp, parseDbf, shapefileToFeatures, looksProjected } from '../lib/shapefile.js';
+import { parseGpx, parseCsv } from '../domains/fiber.js';
+
+// Build a real .shp (and matching .dbf) so this exercises the actual binary parser.
+function makeShp(shapes) { // shapes: [{type:'Point',coords:[x,y]} | {type:'Line',coords:[[x,y],...]}]
+  const recs = [];
+  shapes.forEach((s, i) => {
+    let content;
+    if (s.type === 'Point') { content = Buffer.alloc(20); content.writeInt32LE(1, 0); content.writeDoubleLE(s.coords[0], 4); content.writeDoubleLE(s.coords[1], 12); }
+    else {
+      const n = s.coords.length;
+      content = Buffer.alloc(44 + 4 + n * 16);
+      content.writeInt32LE(3, 0);                     // PolyLine
+      content.writeInt32LE(1, 36); content.writeInt32LE(n, 40); content.writeInt32LE(0, 44);
+      s.coords.forEach((c, j) => { content.writeDoubleLE(c[0], 48 + j * 16); content.writeDoubleLE(c[1], 48 + j * 16 + 8); });
+    }
+    const hdr = Buffer.alloc(8); hdr.writeInt32BE(i + 1, 0); hdr.writeInt32BE(content.length / 2, 4);
+    recs.push(hdr, content);
+  });
+  const body = Buffer.concat(recs);
+  const head = Buffer.alloc(100); head.writeInt32BE(9994, 0); head.writeInt32BE((100 + body.length) / 2, 24); head.writeInt32LE(1000, 28);
+  return Buffer.concat([head, body]);
+}
+function makeDbf(rows, field = 'NAME', width = 20) {
+  const headerLen = 32 + 32 + 1, recordLen = 1 + width;
+  const h = Buffer.alloc(headerLen); h[0] = 3;
+  h.writeInt32LE(rows.length, 4); h.writeInt16LE(headerLen, 8); h.writeInt16LE(recordLen, 10);
+  h.write(field.padEnd(11, '\0'), 32, 'latin1'); h.write('C', 43, 'latin1'); h[48] = width;
+  h[64] = 0x0d;
+  const recs = rows.map(v => { const b = Buffer.alloc(recordLen, 0x20); b.write(String(v).slice(0, width), 1, 'latin1'); return b; });
+  return Buffer.concat([h, ...recs, Buffer.from([0x1a])]);
+}
+
+{
+  const shp = makeShp([{ type: 'Line', coords: [[-112.9, 33.9], [-112.95, 33.95]] }, { type: 'Point', coords: [-112.92, 33.92] }]);
+  const parsedShapes = parseShp(shp);
+  ok(parsedShapes.length === 2 && parsedShapes[0].type === 'LineString' && parsedShapes[1].type === 'Point', 'shp parser reads PolyLine + Point');
+  ok(Math.abs(parsedShapes[1].coordinates[0] + 112.92) < 1e-9, 'shp point coordinates exact');
+  const dbf = makeDbf(['Feeder A', 'HH-77']);
+  const attrs = parseDbf(dbf);
+  ok(attrs.length === 2 && attrs[0].NAME === 'Feeder A', 'dbf attribute table parsed');
+  const feats = shapefileToFeatures(shp, dbf);
+  ok(feats.routes.length === 1 && feats.routes[0].name === 'Feeder A', 'shapefile route takes its name from the dbf');
+  ok(feats.structures.length === 1 && feats.structures[0].name === 'HH-77', 'shapefile point takes its name from the dbf');
+  ok(shapefileToFeatures(shp, null).routes[0].name.startsWith('Route'), 'shapefile without dbf falls back to generated names');
+  // projected coordinates must be refused, not silently mis-placed
+  const proj = makeShp([{ type: 'Line', coords: [[656123.4, 3712345.6], [656200.1, 3712400.2]] }]);
+  ok(looksProjected(parseShp(proj)), 'projected coordinates detected');
+  let threw = ''; try { shapefileToFeatures(proj, null); } catch (e) { threw = e.message; }
+  ok(/WGS84|projected/i.test(threw), 'projected shapefile rejected with a clear message');
+
+  // through the API: zipped .shp + .dbf
+  cookie = ''; await call('/api/login', { body: { email: 'admin@geekitek.test', password: 'admin123' } });
+  const zipped = makeZip([{ name: 'plant.shp', data: shp }, { name: 'plant.dbf', data: dbf }, { name: 'plant.prj', data: Buffer.from('GEOGCS["WGS 84"]') }]).toString('base64');
+  let rr = await call('/api/fiber/import', { method: 'POST', body: { data_b64: zipped, commit: false } });
+  ok(rr.json.format === 'shapefile' && rr.json.routes_found === 1 && rr.json.structures_found === 1, 'zipped shapefile detected and previewed');
+  rr = await call('/api/fiber/import', { method: 'POST', body: { data_b64: zipped, commit: true } });
+  ok(rr.json.routes_created === 1 && rr.json.structures_created === 1, 'zipped shapefile imported');
+  // bare .shp (no dbf)
+  rr = await call('/api/fiber/import', { method: 'POST', body: { data_b64: makeShp([{ type: 'Line', coords: [[-113.1, 34.1], [-113.2, 34.2]] }]).toString('base64'), commit: true } });
+  ok(rr.json.format === 'shapefile' && rr.json.routes_created === 1, 'bare .shp imported without a dbf');
+  // projected shapefile refused end to end
+  rr = await call('/api/fiber/import', { method: 'POST', body: { data_b64: proj.toString('base64') } });
+  ok(rr.status === 400 && /WGS84/i.test(rr.json.error), 'projected shapefile refused by the API');
+}
+
+// GPX
+{
+  const gpx = `<?xml version="1.0"?><gpx version="1.1">
+    <wpt lat="33.71" lon="-112.71"><name>Pole 12</name><desc>riser</desc></wpt>
+    <trk><name>Aerial Run</name><trkseg><trkpt lat="33.7" lon="-112.7"/><trkpt lat="33.72" lon="-112.72"/><trkpt lat="33.74" lon="-112.74"/></trkseg></trk>
+  </gpx>`;
+  const g = parseGpx(gpx);
+  ok(g.routes.length === 1 && g.routes[0].coordinates.length === 3 && g.routes[0].name === 'Aerial Run', 'GPX track → route with all points');
+  ok(g.structures.length === 1 && g.structures[0].name === 'Pole 12', 'GPX waypoint → structure');
+  ok(g.routes[0].coordinates[0][0] === -112.7 && g.routes[0].coordinates[0][1] === 33.7, 'GPX coordinates are lng,lat ordered');
+  const rr = await call('/api/fiber/import', { method: 'POST', body: { data: gpx, commit: true } });
+  ok(rr.json.format === 'gpx' && rr.json.routes_created === 1 && rr.json.structures_created === 1, 'GPX imported via API');
+}
+
+// CSV
+{
+  const csv = 'name,lat,lng,kind,notes\n"HH-200",33.61,-112.61,handhole,"corner of 3rd"\n"Vault 9",33.62,-112.62,vault,\n';
+  const c = parseCsv(csv);
+  ok(c.structures.length === 2 && c.structures[0].name === 'HH-200' && c.structures[0].kind === 'handhole', 'CSV lat/lng rows → structures with kind');
+  ok(c.structures[0].notes === 'corner of 3rd', 'CSV quoted field with a comma handled');
+  const wkt = 'name,wkt\n"WKT Route","LINESTRING(-112.8 33.8, -112.85 33.85)"\n';
+  ok(parseCsv(wkt).routes.length === 1, 'CSV WKT LINESTRING → route');
+  let rr = await call('/api/fiber/import', { method: 'POST', body: { data: csv, commit: true } });
+  ok(rr.json.format === 'csv' && rr.json.structures_created === 2, 'CSV imported via API');
+  // per-row kind is honoured
+  const made = (await call('/api/fiber/structures')).json.find(s => s.name === 'Vault 9');
+  ok(made && made.kind === 'vault', 'CSV per-row structure kind applied');
+}
+
+// unknown format
+ok((await call('/api/fiber/import', { method: 'POST', body: { data: 'just some prose with no structure' } })).status === 400, 'unrecognised file rejected with guidance');
+
+
+// ---- photos + documents on cables, splices, structures, routes ----
+{
+  cookie = ''; await call('/api/login', { body: { email: 'admin@geekitek.test', password: 'admin123' } });
+  const png = 'data:image/png;base64,' + Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,1,2,3,4]).toString('base64');
+  const pdf = Buffer.from('%PDF-1.4 fake').toString('base64');
+
+  // cable
+  let a = await call('/api/attachments', { method: 'POST', body: { parent_type: 'cable', parent_id: cableId, filename: 'tray.png', mime: 'image/png', data: png, caption: 'Tray 1 after splicing' } });
+  ok(a.status === 200 && a.json.id > 0, 'photo attached to a cable');
+  const photoId = a.json.id;
+  const withAtt = (await call('/api/fiber/cables/' + cableId)).json;
+  ok(withAtt.attachments.length === 1 && withAtt.attachments[0].caption === 'Tray 1 after splicing', 'cable detail returns its attachments + caption');
+
+  // splice
+  const spliceId = withAtt.splices[0].id;
+  a = await call('/api/attachments', { method: 'POST', body: { parent_type: 'splice', parent_id: spliceId, filename: 'otdr.sor', mime: 'application/octet-stream', data: Buffer.from('OTDR').toString('base64') } });
+  ok(a.status === 200, 'OTDR trace attached to a splice');
+  const spliceDoc = a.json.id;
+  const c2b = (await call('/api/fiber/cables/' + cableId)).json;
+  ok(c2b.splices[0].attachments.length === 1, 'splice attachments come back on the cable detail');
+
+  // structure + route
+  ok((await call('/api/attachments', { method: 'POST', body: { parent_type: 'structure', parent_id: st1, filename: 'hh.png', mime: 'image/png', data: png } })).status === 200, 'photo attached to a structure');
+  ok((await call('/api/fiber/structures/' + st1)).json.attachments.length === 1, 'structure detail returns attachments');
+  ok((await call('/api/attachments', { method: 'POST', body: { parent_type: 'route', parent_id: routeId, filename: 'permit.pdf', mime: 'application/pdf', data: pdf } })).status === 200, 'PDF attached to a route');
+  ok((await call('/api/fiber/routes/' + routeId)).json.attachments.length === 1, 'route detail returns attachments');
+
+  // list endpoint
+  const listed = (await call('/api/attachments?parent_type=cable&parent_id=' + cableId)).json;
+  ok(Array.isArray(listed) && listed.length === 1, 'attachment list endpoint filters by parent');
+  ok((await call('/api/attachments?parent_type=bogus&parent_id=1')).status === 400, 'unknown parent type rejected');
+
+  // caption edit
+  await call('/api/attachments/' + photoId, { method: 'PUT', body: { caption: 'Updated caption' } });
+  ok((await call('/api/attachments?parent_type=cable&parent_id=' + cableId)).json[0].caption === 'Updated caption', 'caption can be edited');
+
+  // serving: images inline, documents forced to download (so nothing executes in our origin)
+  let raw = await fetch(B + '/api/attachments/' + photoId, { headers: { cookie } });
+  ok(raw.headers.get('content-disposition').startsWith('inline'), 'image served inline');
+  ok(raw.headers.get('x-content-type-options') === 'nosniff', 'nosniff header present');
+  raw = await fetch(B + '/api/attachments/' + spliceDoc, { headers: { cookie } });
+  ok(raw.headers.get('content-disposition').startsWith('attachment'), 'non-image document forced to download');
+
+  // rejects
+  ok((await call('/api/attachments', { method: 'POST', body: { parent_type: 'cable', parent_id: cableId, filename: 'x.svg', mime: 'image/svg+xml', data: png } })).status === 400, 'SVG (script-capable) rejected');
+  ok((await call('/api/attachments', { method: 'POST', body: { parent_type: 'cable', parent_id: cableId, filename: 'e.png', mime: 'image/png', data: '' } })).status === 400, 'empty file rejected');
+
+  // deleting the parent removes its files
+  const doomed = (await call('/api/fiber/cables', { method: 'POST', body: { name: 'TEMP-12', strand_count: 12 } })).json.id;
+  await call('/api/attachments', { method: 'POST', body: { parent_type: 'cable', parent_id: doomed, filename: 'x.png', mime: 'image/png', data: png } });
+  ok((await call('/api/attachments?parent_type=cable&parent_id=' + doomed)).json.length === 1, 'temp cable has an attachment');
+  await call('/api/fiber/cables/' + doomed, { method: 'DELETE' });
+  ok((await call('/api/attachments?parent_type=cable&parent_id=' + doomed)).json.length === 0, 'deleting a cable cascades its attachments away');
+}
+
 console.log('\nRESULT:', pass, 'passed,', fail, 'failed'); process.exit(fail ? 1 : 0);
