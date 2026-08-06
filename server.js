@@ -17,6 +17,7 @@ import { r2, todayStr, esc2, normPhone } from './lib/core.js';
 import registerBilling from './domains/billing.js';
 import registerSupport from './domains/support.js';
 import registerNetwork from './domains/network.js';
+import registerFiber from './domains/fiber.js';
 
 // HTTP(S) JSON request with a timeout; https tolerates self-signed certs (RouterOS). Returns {status, body}.
 function reqJson(mod, urlStr, opts = {}) {
@@ -1282,6 +1283,7 @@ const ctx = {
   jobs: {}
 };
 registerNetwork(app, ctx);
+registerFiber(app, ctx);
 registerSupport(app, ctx);   // messaging helpers first: billing has no dependency, but portal/pubBase are shared
 registerBilling(app, ctx);
 

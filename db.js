@@ -188,6 +188,49 @@ export function migrate() {
   ensure('sites', 'subaccount_id', 'INTEGER');
   ensure('devices', 'owner_subaccount_id', 'INTEGER');
   ensure('accounts', 'monthly_cost', 'REAL'); // account base monthly cost (P&L); total cost = this + sub-accounts
+  // ---- Fiber plant (GIS): routes → cables → strands, with structures + splices ----
+  // Geometry is stored as GeoJSON text (SQLite has no spatial type); routes are LineStrings,
+  // structures are Points. Modelled on how OSP tools (VETRO/3-GIS/OSPInsight) separate the
+  // physical PATH from the CABLE riding it from the individual STRAND.
+  db.exec(`CREATE TABLE IF NOT EXISTS fiber_routes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'as_built',      -- planned|permitted|under_construction|as_built|retired
+    placement TEXT,                                -- aerial|buried|conduit|underground|other
+    owner TEXT, length_m REAL, geom_json TEXT NOT NULL, notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_fiber_routes ON fiber_routes(status)');
+  db.exec(`CREATE TABLE IF NOT EXISTS fiber_structures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'handhole',         -- handhole|vault|pole|cabinet|pedestal|building|splice_case
+    lat REAL, lng REAL, site_id INTEGER, pop_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'as_built', notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_fiber_structures ON fiber_structures(kind)');
+  db.exec(`CREATE TABLE IF NOT EXISTS fiber_cables (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, route_id INTEGER,
+    strand_count INTEGER NOT NULL DEFAULT 12, cable_type TEXT,
+    a_structure_id INTEGER, z_structure_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'as_built', notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_fiber_cables ON fiber_cables(route_id)');
+  // One row per physical fiber, generated when the cable is created. position is 1-based across
+  // the whole cable; tube/colour are derived per TIA-598-C (12-colour sequence, repeating).
+  db.exec(`CREATE TABLE IF NOT EXISTS fiber_strands (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, cable_id INTEGER NOT NULL,
+    position INTEGER NOT NULL, tube INTEGER NOT NULL, tube_color TEXT, color TEXT,
+    status TEXT NOT NULL DEFAULT 'free',           -- free|reserved|assigned|dark|damaged|abandoned
+    assigned_type TEXT, assigned_id INTEGER,       -- circuit|customer|site|pop (soft ref)
+    label TEXT, notes TEXT,
+    UNIQUE(cable_id, position))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_fiber_strands ON fiber_strands(cable_id, status)');
+  db.exec(`CREATE TABLE IF NOT EXISTS fiber_splices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, structure_id INTEGER,
+    a_strand_id INTEGER NOT NULL, z_strand_id INTEGER,
+    splice_type TEXT NOT NULL DEFAULT 'fusion',    -- fusion|mechanical|splitter|termination
+    tray TEXT, loss_db REAL, notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_fiber_splices_a ON fiber_splices(a_strand_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_fiber_splices_z ON fiber_splices(z_strand_id)');
   // Consolidation: POP upstream feeds (pop_circuits) fold into the single `circuits` inventory.
   // A-end = the upstream source (pop|account), Z-end = the POP being fed. Runs once.
   ensure('connections', 'circuit_ref_id', 'INTEGER'); // optional link from a site WAN uplink to a circuit record

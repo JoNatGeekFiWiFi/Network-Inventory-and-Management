@@ -126,6 +126,11 @@ async function route() {
     if (p[0] === 'pop' && p[2] === 'patch') { setNav('sites'); return await renderPatch('pop', p[1]); }
     if (p[0] === 'pop') { setNav('sites'); return await renderPop(p[1]); }
     if (p[0] === 'circuits') { setNav('circuits'); return await renderCircuits(); }
+    if (p[0] === 'fiber' && p[1] === 'import') { setNav('fiber'); return await renderFiberImport(); }
+    if (p[0] === 'fiber' && p[1] === 'cable' && p[2]) { setNav('fiber'); return await renderCable(p[2]); }
+    if (p[0] === 'fiber' && p[1] === 'route' && p[2]) { setNav('fiber'); return await renderFiberRoute(p[2]); }
+    if (p[0] === 'fiber') { setNav('fiber'); return await renderFiber(); }
+
     if (p[0] === 'circuit' && p[1] === 'new') { setNav('circuits'); return await formCircuit(q); }
     if (p[0] === 'circuit' && p[2] === 'edit') { setNav('circuits'); return await formCircuit({ id: p[1] }); }
     if (p[0] === 'circuit') { setNav('circuits'); return await renderCircuit(p[1]); }
@@ -2315,6 +2320,308 @@ function pnlCard(p) {
       <div class="metric"><div class="l">Margin</div><div class="v" style="color:${marginColor(p.margin)}">${money0(p.margin)}${p.margin_pct != null ? ' <span class="small">(' + p.margin_pct + '%)</span>' : ''}</div></div>
     </div>
     <div style="padding:0 14px 12px" class="small sec-muted">Cost = base ${money0(p.base_cost)} + sub-accounts ${money0(p.sub_cost)}. Revenue from ${p.customers.length} billed client${p.customers.length === 1 ? '' : 's'}${p.customers.some(c => c.shared) ? ' (some shared across accounts)' : ''}.</div></div>`;
+}
+
+// ---------- Fiber plant (GIS): routes on a map, cables, strands, splices ----------
+const TIA_HEX = { Blue: '#1f6fd0', Orange: '#f07c1e', Green: '#1f9d4d', Brown: '#7b4a26', Slate: '#8a94a0', White: '#e9edf2', Red: '#d93636', Black: '#22262b', Yellow: '#e8c72c', Violet: '#8b5cd6', Rose: '#e87fa8', Aqua: '#43c8d4' };
+const ROUTE_STATUS_COL = { planned: '#8b5cd6', permitted: '#e8c72c', under_construction: '#f07c1e', as_built: '#1f9d4d', retired: '#8a94a0' };
+const FIBER_ROUTE_STATUS = ['planned', 'permitted', 'under_construction', 'as_built', 'retired'];
+const STRUCTURE_KINDS = ['handhole', 'vault', 'pole', 'cabinet', 'pedestal', 'building', 'splice_case'];
+const STRAND_STATUS = ['free', 'reserved', 'assigned', 'dark', 'damaged', 'abandoned'];
+const STRAND_STATUS_COL = { free: 'var(--muted)', reserved: 'var(--warning)', assigned: 'var(--success,#1D9E75)', dark: 'var(--text2)', damaged: 'var(--danger)', abandoned: '#7b4a26' };
+let _fiberMap = null, _fiberDraw = null;
+
+async function renderFiber() {
+  const sum = await api('/fiber/summary');
+  view().innerHTML = `<div class="head"><div class="t"><h1>Fiber plant</h1>
+      <div class="small sec-muted" style="margin-top:3px">Routes, cables, strand assignments &amp; splices</div></div>
+    ${isPriv() ? `<a class="btn" href="#/fiber/import"><i class="ti ti-file-import"></i> Import</a>` : ''}</div>
+    <div class="grid3" style="margin:14px 0">
+      <div class="metric"><div class="l">Route km</div><div class="v">${sum.route_km}</div></div>
+      <div class="metric"><div class="l">As-built km</div><div class="v" style="color:var(--success,#1D9E75)">${sum.as_built_km}</div></div>
+      <div class="metric"><div class="l">Cables</div><div class="v">${sum.cables}</div></div>
+      <div class="metric"><div class="l">Structures</div><div class="v">${sum.structures}</div></div>
+      <div class="metric"><div class="l">Strands</div><div class="v">${sum.strand_total}</div></div>
+      <div class="metric"><div class="l">Splices</div><div class="v">${sum.splices}</div></div>
+    </div>
+    ${isPriv() ? `<div class="box" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+      <b class="small">Add to map:</b>
+      <button class="btn sm" id="drawRouteBtn" onclick="fiberDrawRoute()"><i class="ti ti-line"></i> Draw route</button>
+      <button class="btn sm" id="drawStructBtn" onclick="fiberDrawStructure()"><i class="ti ti-map-pin-plus"></i> Place structure</button>
+      <span class="small sec-muted" id="drawHint" style="flex:1"></span>
+      <button class="btn sm" id="drawCancel" style="display:none" onclick="fiberCancelDraw()">Cancel</button>
+      <button class="btn sm primary" id="drawFinish" style="display:none" onclick="fiberFinishRoute()"><i class="ti ti-check"></i> Finish route</button>
+    </div>` : ''}
+    <div class="card" style="padding:0;overflow:hidden"><div id="fibermap" style="height:520px;width:100%"></div></div>
+    <div class="small sec-muted" style="margin:8px 0 14px">
+      ${FIBER_ROUTE_STATUS.map(s => `<span style="margin-right:12px"><span style="display:inline-block;width:14px;height:3px;background:${ROUTE_STATUS_COL[s]};vertical-align:middle"></span> ${s.replace('_', ' ')}</span>`).join('')}
+    </div>
+    <div class="card"><div class="hd"><h2>Cables</h2>${isPriv() ? `<button class="btn sm" onclick="formCable()"><i class="ti ti-plus"></i> Add cable</button>` : ''}</div>
+      <div id="cablelist"><div class="loading">Loading…</div></div></div>`;
+  fiberMapInit();
+  loadCables();
+}
+function fiberMapInit() {
+  const el = $('#fibermap'); if (!el || typeof L === 'undefined') return;
+  if (_fiberMap) { _fiberMap.remove(); _fiberMap = null; }
+  _fiberMap = L.map(el).setView([33.45, -112.07], 11); // Phoenix default; fits bounds below once data loads
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(_fiberMap);
+  _fiberMap.on('click', e => { if (_fiberDraw) fiberMapClick(e); });
+  fiberMapLoad();
+}
+async function fiberMapLoad() {
+  if (!_fiberMap) return;
+  const gj = await api('/fiber/geojson');
+  if (window._fiberLayer) _fiberMap.removeLayer(window._fiberLayer);
+  window._fiberLayer = L.geoJSON(gj, {
+    style: f => ({ color: ROUTE_STATUS_COL[f.properties.status] || '#378ADD', weight: 4, opacity: .9, dashArray: f.properties.status === 'planned' ? '6,6' : null }),
+    pointToLayer: (f, latlng) => L.circleMarker(latlng, { radius: 6, color: '#fff', weight: 2, fillColor: '#378ADD', fillOpacity: 1 }),
+    onEachFeature: (f, layer) => {
+      const p = f.properties;
+      if (p.kind === 'route') {
+        layer.bindPopup(`<b>${esc(p.name)}</b><br>${esc((p.status || '').replace('_', ' '))}${p.placement ? ' · ' + esc(p.placement) : ''}<br>${(p.length_m / 1000).toFixed(2)} km · ${p.cables} cable(s), ${p.strand_total} strands<br><a href="#/fiber/route/${p.id}">Open route</a>`);
+      } else {
+        layer.bindPopup(`<b>${esc(p.name)}</b><br>${esc(p.structure_kind)}${isPriv() ? `<br><a href="#" onclick="event.preventDefault();delStructure(${p.id})">Delete</a>` : ''}`);
+      }
+    }
+  }).addTo(_fiberMap);
+  try { const b = window._fiberLayer.getBounds(); if (b.isValid()) _fiberMap.fitBounds(b, { padding: [30, 30] }); } catch {}
+}
+function fiberDrawRoute() {
+  _fiberDraw = { mode: 'route', pts: [], line: null };
+  $('#drawHint').textContent = 'Click along the path on the map. Double-click or Finish when done.';
+  $('#drawCancel').style.display = ''; $('#drawFinish').style.display = '';
+}
+function fiberDrawStructure() {
+  _fiberDraw = { mode: 'structure' };
+  $('#drawHint').textContent = 'Click the map where the structure sits.';
+  $('#drawCancel').style.display = ''; $('#drawFinish').style.display = 'none';
+}
+function fiberCancelDraw() {
+  if (_fiberDraw && _fiberDraw.line) _fiberMap.removeLayer(_fiberDraw.line);
+  _fiberDraw = null; $('#drawHint').textContent = '';
+  $('#drawCancel').style.display = 'none'; $('#drawFinish').style.display = 'none';
+}
+function fiberMapClick(e) {
+  if (_fiberDraw.mode === 'structure') { const { lat, lng } = e.latlng; fiberCancelDraw(); formStructure({ lat, lng }); return; }
+  _fiberDraw.pts.push([e.latlng.lat, e.latlng.lng]);
+  if (_fiberDraw.line) _fiberMap.removeLayer(_fiberDraw.line);
+  _fiberDraw.line = L.polyline(_fiberDraw.pts, { color: '#378ADD', weight: 4, dashArray: '5,5' }).addTo(_fiberMap);
+  $('#drawHint').textContent = `${_fiberDraw.pts.length} point(s) — click Finish route when the path is complete.`;
+}
+function fiberFinishRoute() {
+  if (!_fiberDraw || _fiberDraw.pts.length < 2) { toast('Click at least two points on the map'); return; }
+  const coords = _fiberDraw.pts.map(([lat, lng]) => [lng, lat]); // GeoJSON is lng,lat
+  fiberCancelDraw();
+  formFiberRoute({ coordinates: coords });
+}
+function formFiberRoute(q) {
+  view().insertAdjacentHTML('afterbegin', `<div class="card" style="padding:16px;margin-bottom:12px;border:2px solid var(--info)" id="rf">
+    <h2 style="margin-bottom:10px">New fiber route · ${q.coordinates.length} points</h2>
+    ${field('Route name', 'name', '', { ph: 'e.g. Main St — POP-A to Cabinet 3' })}
+    <div class="grid2">${field('Status', 'status', 'as_built', { type: 'select', options: FIBER_ROUTE_STATUS.map(s => ({ v: s, l: s.replace('_', ' ') })) })}
+    ${field('Placement', 'placement', '', { type: 'select', options: [{ v: '', l: '—' }, 'aerial', 'buried', 'conduit', 'underground', 'other'] })}</div>
+    <div class="grid2">${field('Owner', 'owner', '', { ph: 'optional' })}${field('Notes', 'notes', '', { ph: 'optional' })}</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" onclick="renderFiber()">Cancel</button>
+    <button class="btn primary" onclick="saveFiberRoute()"><i class="ti ti-check"></i> Save route</button></div></div>`);
+  window._pendingRoute = q.coordinates;
+  $('#rf').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+async function saveFiberRoute() {
+  const d = collect('#rf'); if (!d.name) { toast('Enter a route name'); return; }
+  d.geometry = { type: 'LineString', coordinates: window._pendingRoute };
+  try { await api('/fiber/routes', { method: 'POST', body: JSON.stringify(d) }); toast('Route saved'); renderFiber(); }
+  catch (e) { toast(e.message); }
+}
+function formStructure(q) {
+  view().insertAdjacentHTML('afterbegin', `<div class="card" style="padding:16px;margin-bottom:12px;border:2px solid var(--info)" id="sf">
+    <h2 style="margin-bottom:10px">New structure</h2>
+    <div class="grid2">${field('Name / ID', 'name', '', { ph: 'e.g. HH-104' })}
+    ${field('Type', 'kind', 'handhole', { type: 'select', options: STRUCTURE_KINDS.map(k => ({ v: k, l: k.replace('_', ' ') })) })}</div>
+    <div class="grid2">${field('Latitude', 'lat', q.lat.toFixed(6), { mono: true })}${field('Longitude', 'lng', q.lng.toFixed(6), { mono: true })}</div>
+    ${field('Notes', 'notes', '', { ph: 'optional' })}
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" onclick="renderFiber()">Cancel</button>
+    <button class="btn primary" onclick="saveStructure()"><i class="ti ti-check"></i> Save structure</button></div></div>`);
+  $('#sf').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+async function saveStructure() {
+  const d = collect('#sf'); if (!d.name) { toast('Enter a name'); return; }
+  try { await api('/fiber/structures', { method: 'POST', body: JSON.stringify(d) }); toast('Structure saved'); renderFiber(); }
+  catch (e) { toast(e.message); }
+}
+async function delStructure(id) {
+  if (!confirm('Delete this structure?')) return;
+  try { await api('/fiber/structures/' + id, { method: 'DELETE' }); toast('Deleted'); renderFiber(); } catch (e) { toast(e.message); }
+}
+async function loadCables() {
+  const box = $('#cablelist'); if (!box) return;
+  const rows = await api('/fiber/cables');
+  box.innerHTML = rows.map(c => {
+    const pct = c.strand_count ? Math.round((c.strands_used / c.strand_count) * 100) : 0;
+    return `<div class="row rowlink" onclick="location.hash='#/fiber/cable/${c.id}'">
+      <i class="ti ti-cable sec-muted"></i>
+      <div style="flex:1;min-width:0"><div><b>${esc(c.name)}</b> · ${c.strand_count}ct${c.route_name ? ' · ' + esc(c.route_name) : ''}</div>
+        <div class="small sec-muted">${c.a_structure_name ? esc(c.a_structure_name) : '—'} → ${c.z_structure_name ? esc(c.z_structure_name) : '—'} · ${c.strands_used} used / ${c.strands_free} free</div></div>
+      <div style="width:90px"><div style="height:6px;background:var(--surface2);border-radius:3px;overflow:hidden"><div style="width:${pct}%;height:100%;background:var(--success,#1D9E75)"></div></div>
+        <div class="small sec-muted" style="text-align:right">${pct}%</div></div>
+      ${statusPill(c.status === 'as_built' ? 'Up' : 'Standby')}<i class="ti ti-chevron-right muted"></i></div>`;
+  }).join('') || '<div class="row muted">No cables yet — draw a route, then add a cable to it.</div>';
+}
+async function formCable() {
+  const [routes, structures] = await Promise.all([api('/fiber/routes'), api('/fiber/structures')]);
+  const rOpts = [{ v: '', l: '— none —' }].concat(routes.map(r => ({ v: r.id, l: r.name })));
+  const sOpts = [{ v: '', l: '— none —' }].concat(structures.map(s => ({ v: s.id, l: s.name + ' (' + s.kind + ')' })));
+  view().insertAdjacentHTML('afterbegin', `<div class="card" style="padding:16px;margin-bottom:12px;border:2px solid var(--info)" id="cf2">
+    <h2 style="margin-bottom:10px">New cable</h2>
+    <div class="grid2">${field('Cable name', 'name', '', { ph: 'e.g. BB-144-01' })}
+    ${field('Strand count', 'strand_count', '144', { type: 'select', options: ['12', '24', '48', '72', '96', '144', '288', '432', '864'] })}</div>
+    <div class="grid2">${field('Route', 'route_id', '', { type: 'select', options: rOpts })}${field('Cable type', 'cable_type', '', { ph: 'e.g. loose tube, ADSS' })}</div>
+    <div class="grid2">${field('A-end structure', 'a_structure_id', '', { type: 'select', options: sOpts })}${field('Z-end structure', 'z_structure_id', '', { type: 'select', options: sOpts })}</div>
+    <div class="grid2">${field('Status', 'status', 'as_built', { type: 'select', options: FIBER_ROUTE_STATUS.map(s => ({ v: s, l: s.replace('_', ' ') })) })}${field('Notes', 'notes', '')}</div>
+    <div class="help">Strands are created automatically with TIA-598-C tube &amp; fibre colours.</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" onclick="renderFiber()">Cancel</button>
+    <button class="btn primary" onclick="saveCable()"><i class="ti ti-check"></i> Create cable</button></div></div>`);
+  $('#cf2').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+async function saveCable() {
+  const d = collect('#cf2'); if (!d.name) { toast('Enter a cable name'); return; }
+  try { const r = await api('/fiber/cables', { method: 'POST', body: JSON.stringify(d) }); toast(`Cable created with ${r.strand_count} strands`); location.hash = '#/fiber/cable/' + r.id; }
+  catch (e) { toast(e.message); }
+}
+async function renderFiberRoute(id) {
+  const r = await api('/fiber/routes/' + id);
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/fiber'"><i class="ti ti-chevron-left"></i> Fiber</div>
+    <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(r.name)}</h1>
+      <span class="pill" style="border-color:${ROUTE_STATUS_COL[r.status]};color:${ROUTE_STATUS_COL[r.status]}">${esc(r.status.replace('_', ' '))}</span></div>
+      <div class="small sec-muted" style="margin-top:3px">${(r.length_m / 1000).toFixed(2)} km${r.placement ? ' · ' + esc(r.placement) : ''}${r.owner ? ' · ' + esc(r.owner) : ''}</div></div>
+      ${isPriv() ? `<button class="btn" onclick="delFiberRoute(${r.id})"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
+    ${r.notes ? `<div class="card" style="padding:12px 14px" class="small sec-muted">${esc(r.notes)}</div>` : ''}
+    <div class="card"><div class="hd"><h2>Cables on this route · ${r.cables.length}</h2></div>
+      ${r.cables.map(c => `<div class="row rowlink" onclick="location.hash='#/fiber/cable/${c.id}'">
+        <i class="ti ti-cable sec-muted"></i><div style="flex:1"><div>${esc(c.name)} · ${c.strand_count}ct</div>
+        <div class="small sec-muted">${c.strands_used} used / ${c.strands_free} free</div></div>
+        <i class="ti ti-chevron-right muted"></i></div>`).join('') || '<div class="row muted">No cables on this route yet</div>'}</div>`;
+}
+async function delFiberRoute(id) {
+  if (!confirm('Delete this route?')) return;
+  try { await api('/fiber/routes/' + id, { method: 'DELETE' }); toast('Route deleted'); location.hash = '#/fiber'; } catch (e) { toast(e.message); }
+}
+async function renderCable(id) {
+  const c = await api('/fiber/cables/' + id);
+  window._cable = c;
+  const spliceBy = {}; (c.splices || []).forEach(s => { spliceBy[s.a_strand_id] = s; spliceBy[s.z_strand_id] = s; });
+  const rows = c.strands.map(s => {
+    const sw = TIA_HEX[s.color] || '#888';
+    const sp = spliceBy[s.id];
+    return `<div class="row" style="padding:5px 8px">
+      <span class="mono" style="width:38px;text-align:right;color:var(--muted)">${s.position}</span>
+      <span title="${esc(s.color)}" style="width:14px;height:14px;border-radius:3px;background:${sw};border:1px solid rgba(128,128,128,.5);flex:none"></span>
+      <span class="small sec-muted" style="width:96px">${esc(s.color)}<span class="muted"> · T${s.tube}</span></span>
+      <span style="width:90px;color:${STRAND_STATUS_COL[s.status]};font-size:12px">${esc(s.status)}</span>
+      <div style="flex:1;min-width:0;font-size:13px">${s.label ? esc(s.label) : '<span class="muted">—</span>'}${sp ? ` <span class="small sec-muted">· spliced${sp.structure_name ? ' at ' + esc(sp.structure_name) : ''}</span>` : ''}</div>
+      <button class="btn sm" onclick="traceStrand(${s.id})">Trace</button>
+      ${isPriv() ? `<button class="btn sm" onclick="editStrand(${s.id})"><i class="ti ti-edit"></i> Edit</button>` : ''}</div>`;
+  }).join('');
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/fiber'"><i class="ti ti-chevron-left"></i> Fiber</div>
+    <div class="head"><div class="t"><h1>${esc(c.name)}</h1>
+      <div class="small sec-muted" style="margin-top:3px">${c.strand_count}ct${c.route_name ? ' · ' + esc(c.route_name) : ''} · ${c.a_structure_name || '—'} → ${c.z_structure_name || '—'}</div></div>
+      ${isPriv() ? `<button class="btn" onclick="delCable(${c.id})"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
+    <div class="grid3" style="margin:14px 0">
+      <div class="metric"><div class="l">Assigned</div><div class="v" style="color:var(--success,#1D9E75)">${c.strand_counts.assigned || 0}</div></div>
+      <div class="metric"><div class="l">Free</div><div class="v">${c.strands_free}</div></div>
+      <div class="metric"><div class="l">Abandoned</div><div class="v" style="color:#7b4a26">${c.strand_counts.abandoned || 0}</div></div>
+    </div>
+    ${isPriv() ? `<div class="box" id="rangeform" style="margin-bottom:10px">
+      <b class="small">Assign a range</b>
+      <div class="grid3" style="margin-top:6px">${field('From', 'from', '1', { mono: true })}${field('To', 'to', '12', { mono: true })}
+      ${field('Status', 'status', 'assigned', { type: 'select', options: STRAND_STATUS })}</div>
+      <div class="grid2">${field('Label', 'label', '', { ph: 'e.g. Tower A / Customer X' })}${field('Assigned type', 'assigned_type', '', { type: 'select', options: [{ v: '', l: '—' }, 'circuit', 'customer', 'site', 'pop'] })}</div>
+      <div style="display:flex;justify-content:flex-end"><button class="btn sm primary" onclick="assignRange(${c.id})"><i class="ti ti-check"></i> Apply to range</button></div></div>` : ''}
+    <div id="traceout"></div>
+    <div class="card"><div class="hd"><h2>Strands · ${c.strand_count}</h2></div><div style="padding:0 6px 8px">${rows}</div></div>`;
+}
+async function assignRange(cableId) {
+  const d = collect('#rangeform');
+  try { const r = await api('/fiber/cables/' + cableId + '/strands/assign', { method: 'POST', body: JSON.stringify(d) }); toast(`Updated ${r.updated} strand(s)`); renderCable(cableId); }
+  catch (e) { toast(e.message); }
+}
+function editStrand(id) {
+  const s = (window._cable.strands || []).find(x => x.id === id); if (!s) return;
+  const body = `<div class="box" id="sedit" style="margin:8px 0">
+    <b class="small">Strand ${s.position} · ${esc(s.color)} (tube ${s.tube})</b>
+    <div class="grid2" style="margin-top:6px">${field('Status', 'status', s.status, { type: 'select', options: STRAND_STATUS })}${field('Label', 'label', s.label || '')}</div>
+    <div class="grid2">${field('Assigned type', 'assigned_type', s.assigned_type || '', { type: 'select', options: [{ v: '', l: '—' }, 'circuit', 'customer', 'site', 'pop'] })}${field('Assigned id', 'assigned_id', s.assigned_id || '', { mono: true })}</div>
+    ${field('Notes', 'notes', s.notes || '')}
+    <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn sm" onclick="renderCable(window._cable.id)">Cancel</button>
+    <button class="btn sm primary" onclick="saveStrand(${s.id})"><i class="ti ti-check"></i> Save</button></div></div>`;
+  $('#traceout').innerHTML = body;
+  $('#traceout').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+async function saveStrand(id) {
+  const d = collect('#sedit');
+  try { await api('/fiber/strands/' + id, { method: 'PUT', body: JSON.stringify(d) }); toast('Strand saved'); renderCable(window._cable.id); }
+  catch (e) { toast(e.message); }
+}
+async function traceStrand(id) {
+  const t = await api('/fiber/strands/' + id + '/trace');
+  $('#traceout').innerHTML = `<div class="card" style="padding:14px;margin-bottom:10px;border:2px solid var(--info)">
+    <div class="hd" style="padding:0 0 8px"><h2><i class="ti ti-route"></i> Strand trace · ${t.hops.length} hop(s)</h2>
+      <button class="btn sm" onclick="$('#traceout').innerHTML=''">Close</button></div>
+    ${t.hops.map((h, i) => `<div class="row" style="padding:6px 0">
+      <span class="mono muted" style="width:22px">${i + 1}</span>
+      <span style="width:14px;height:14px;border-radius:3px;background:${TIA_HEX[h.color] || '#888'};border:1px solid rgba(128,128,128,.5);flex:none"></span>
+      <div style="flex:1"><div>${esc(h.cable_name || 'cable')} · strand ${h.position} (${esc(h.color)}, T${h.tube})${h.label ? ' · ' + esc(h.label) : ''}</div>
+        ${h.splice ? `<div class="small sec-muted">↓ ${esc(h.splice.type)} splice${h.splice.at ? ' at ' + esc(h.splice.at) : ''}${h.splice.tray ? ' · tray ' + esc(h.splice.tray) : ''}</div>` : '<div class="small sec-muted">end of path</div>'}</div></div>`).join('')}
+    ${t.terminated ? '<div class="help">Path ends here — no further splice recorded.</div>' : ''}</div>`;
+  $('#traceout').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+async function delCable(id) {
+  if (!confirm('Delete this cable, its strands and their splices?')) return;
+  try { await api('/fiber/cables/' + id, { method: 'DELETE' }); toast('Cable deleted'); location.hash = '#/fiber'; } catch (e) { toast(e.message); }
+}
+async function renderFiberImport() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/fiber'"><i class="ti ti-chevron-left"></i> Fiber</div>
+    <h1>Import fiber routes</h1>
+    <div class="small sec-muted" style="margin:4px 0 14px">Upload a Google Earth <b>KML</b> or a <b>GeoJSON</b> file. Paths become routes; placemarks become structures.</div>
+    <div class="card" style="padding:16px">
+      <div class="fld"><label class="fl">File</label><input type="file" id="fiFile" accept=".kml,.kmz,.json,.geojson,application/json,application/vnd.google-earth.kmz" onchange="$('#fiGo').disabled=true;$('#fiOut').innerHTML=''"/>
+        <div class="help">Google Earth <b>.kmz</b> or <b>.kml</b>, or a <b>.geojson</b>/<b>.json</b> file. Paths become routes, placemarks become structures.</div></div>
+      <div class="grid2">${field('Import as status', 'status', 'as_built', { type: 'select', options: FIBER_ROUTE_STATUS.map(s => ({ v: s, l: s.replace('_', ' ') })) })}
+      ${field('Placemarks become', 'structure_kind', 'handhole', { type: 'select', options: STRUCTURE_KINDS.map(k => ({ v: k, l: k.replace('_', ' ') })) })}</div>
+      <div style="display:flex;gap:10px;justify-content:flex-end">
+        <button class="btn" onclick="runFiberImport(false)"><i class="ti ti-eye"></i> Preview</button>
+        <button class="btn primary" id="fiGo" disabled onclick="runFiberImport(true)"><i class="ti ti-upload"></i> Import</button></div>
+    </div><div id="fiOut"></div>`;
+}
+async function runFiberImport(commit) {
+  const f = $('#fiFile').files[0]; if (!f) { toast('Choose a KML or GeoJSON file'); return; }
+  const out = $('#fiOut'); out.innerHTML = '<div class="card" style="padding:16px"><div class="loading">Reading…</div></div>';
+  const opts = collect('.card');
+  const payload = { commit, status: opts.status, structure_kind: opts.structure_kind };
+  // KMZ is a ZIP — read it as bytes and ship it base64 rather than mangling it as text
+  if (/\.kmz$/i.test(f.name)) {
+    const buf = new Uint8Array(await f.arrayBuffer());
+    let bin = ''; for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+    payload.data_b64 = btoa(bin);
+  } else payload.data = await f.text();
+  try {
+    const r = await api('/fiber/import', { method: 'POST', body: JSON.stringify(payload) });
+    const samp = r.samples ? `<div class="box" style="margin-top:10px"><b class="small">Sample</b>
+      ${(r.samples.routes || []).map(x => `<div class="small sec-muted">${esc(x.name)} — ${x.points} points, ${(x.length_m / 1000).toFixed(2)} km</div>`).join('')}
+      ${(r.samples.structures || []).map(x => `<div class="small sec-muted">📍 ${esc(x.name)}</div>`).join('')}</div>` : '';
+    out.innerHTML = `<div class="card" style="padding:16px;margin-top:14px">
+      <h2 style="margin-bottom:10px">${commit ? 'Import complete' : 'Preview — nothing saved yet'}</h2>
+      <div class="grid3">
+        <div class="metric"><div class="l">Routes ${commit ? 'created' : 'found'}</div><div class="v">${commit ? r.routes_created : r.routes_found}</div></div>
+        <div class="metric"><div class="l">Structures ${commit ? 'created' : 'found'}</div><div class="v">${commit ? r.structures_created : r.structures_found}</div></div>
+        <div class="metric"><div class="l">Total km</div><div class="v">${(r.total_length_m / 1000).toFixed(2)}</div></div>
+        <div class="metric"><div class="l">Skipped</div><div class="v">${r.skipped}</div></div>
+      </div>
+      <div class="small sec-muted" style="margin-top:8px">Detected format: ${esc(r.format)}. Duplicates (same name) are skipped, so re-importing is safe.</div>
+      ${samp}</div>`;
+    if (!commit) { $('#fiGo').disabled = false; toast('Preview ready'); } else { toast('Imported'); $('#fiGo').disabled = true; }
+  } catch (e) { out.innerHTML = `<div class="card" style="padding:16px;color:var(--danger)">${esc(e.message)}</div>`; }
 }
 
 // ---------- Circuits (standalone A<->Z inventory) ----------

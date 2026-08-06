@@ -1,0 +1,428 @@
+// Fiber plant domain (GIS): routes → cables → strands, plus structures and splices.
+//
+// Modelled on how purpose-built OSP tools (VETRO FiberMap, 3-GIS, OSPInsight) structure fiber,
+// rather than on a general-purpose GIS: the physical PATH (route), the CABLE riding it, and the
+// individual STRAND are separate things, and splices join strands at a structure.
+//
+// Geometry is GeoJSON stored as text — SQLite has no spatial type and we don't need spatial
+// queries, just "draw it on a map and tell me what's connected to what".
+import { r2 } from '../lib/core.js';
+import { extractKmlFromKmz, looksLikeZip } from '../lib/unzip.js';
+
+// TIA-598-C fibre colour sequence. Repeats every 12; beyond the first 12 units the standard
+// adds a black stripe (black itself gets a yellow stripe).
+export const TIA_COLORS = ['Blue', 'Orange', 'Green', 'Brown', 'Slate', 'White', 'Red', 'Black', 'Yellow', 'Violet', 'Rose', 'Aqua'];
+export const TIA_HEX = { Blue: '#1f6fd0', Orange: '#f07c1e', Green: '#1f9d4d', Brown: '#7b4a26', Slate: '#8a94a0', White: '#e9edf2', Red: '#d93636', Black: '#22262b', Yellow: '#e8c72c', Violet: '#8b5cd6', Rose: '#e87fa8', Aqua: '#43c8d4' };
+
+/** Colour + tube for a 1-based strand position, per TIA-598-C. */
+export function strandColor(position) {
+  const idx = ((position - 1) % 12);
+  const tube = Math.floor((position - 1) / 12) + 1;
+  const tubeIdx = ((tube - 1) % 12);
+  const striped = tube > 12;                      // >144ct: units repeat with a tracer stripe
+  return {
+    tube,
+    position_in_tube: idx + 1,
+    color: TIA_COLORS[idx],
+    tube_color: TIA_COLORS[tubeIdx] + (striped ? (TIA_COLORS[tubeIdx] === 'Black' ? '/Yellow' : '/Black') : '')
+  };
+}
+
+/** Rough great-circle length of a GeoJSON LineString, in metres. */
+export function lineLengthM(coords) {
+  const R = 6371000, rad = d => d * Math.PI / 180;
+  let m = 0;
+  for (let i = 1; i < coords.length; i++) {
+    const [lon1, lat1] = coords[i - 1], [lon2, lat2] = coords[i];
+    const dLat = rad(lat2 - lat1), dLon = rad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(dLon / 2) ** 2;
+    m += 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+  }
+  return Math.round(m);
+}
+
+/** Accept a GeoJSON LineString (geometry or Feature) and return its coordinate array, or null. */
+export function lineCoords(input) {
+  if (!input) return null;
+  const g = input.type === 'Feature' ? input.geometry : input;
+  if (!g || g.type !== 'LineString' || !Array.isArray(g.coordinates)) return null;
+  const cs = g.coordinates.filter(c => Array.isArray(c) && c.length >= 2 && Number.isFinite(+c[0]) && Number.isFinite(+c[1]))
+    .map(c => [+c[0], +c[1]]);
+  return cs.length >= 2 ? cs : null;
+}
+
+// Minimal KML reader — Google Earth is where most small ISPs keep their fiber, and its
+// Placemark/LineString/Point subset is simple enough not to justify an XML dependency.
+export function parseKml(xml) {
+  const out = { routes: [], structures: [] };
+  const placemarks = String(xml).match(/<Placemark[\s\S]*?<\/Placemark>/gi) || [];
+  const tag = (s, t) => { const m = s.match(new RegExp('<' + t + '[^>]*>([\\s\\S]*?)</' + t + '>', 'i')); return m ? m[1].trim() : ''; };
+  const strip = s => s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim();
+  const coordsOf = s => strip(s).split(/\s+/).map(p => p.split(',')).filter(p => p.length >= 2)
+    .map(p => [parseFloat(p[0]), parseFloat(p[1])]).filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+  for (const pm of placemarks) {
+    const name = strip(tag(pm, 'name')) || 'Imported';
+    const desc = strip(tag(pm, 'description'));
+    const lineBlock = pm.match(/<LineString[\s\S]*?<\/LineString>/i);
+    const pointBlock = pm.match(/<Point[\s\S]*?<\/Point>/i);
+    if (lineBlock) {
+      const cs = coordsOf(tag(lineBlock[0], 'coordinates'));
+      if (cs.length >= 2) out.routes.push({ name, notes: desc || null, coordinates: cs });
+    } else if (pointBlock) {
+      const cs = coordsOf(tag(pointBlock[0], 'coordinates'));
+      if (cs.length) out.structures.push({ name, notes: desc || null, lng: cs[0][0], lat: cs[0][1] });
+    }
+  }
+  return out;
+}
+
+/** Pull routes + structures out of a GeoJSON FeatureCollection / Feature / geometry. */
+export function parseGeoJson(data) {
+  const out = { routes: [], structures: [] };
+  const feats = data && data.type === 'FeatureCollection' ? (data.features || [])
+    : (data && data.type === 'Feature' ? [data] : (data && data.type ? [{ type: 'Feature', properties: {}, geometry: data }] : []));
+  for (const f of feats) {
+    const g = f && f.geometry; if (!g) continue;
+    const p = f.properties || {};
+    const name = p.name || p.Name || p.label || p.NAME || 'Imported';
+    const notes = p.description || p.notes || null;
+    if (g.type === 'LineString') {
+      const cs = lineCoords(g); if (cs) out.routes.push({ name, notes, coordinates: cs });
+    } else if (g.type === 'MultiLineString') {
+      (g.coordinates || []).forEach((part, i) => {
+        const cs = lineCoords({ type: 'LineString', coordinates: part });
+        if (cs) out.routes.push({ name: name + (i ? ` (${i + 1})` : ''), notes, coordinates: cs });
+      });
+    } else if (g.type === 'Point' && Array.isArray(g.coordinates)) {
+      const [lng, lat] = g.coordinates;
+      if (Number.isFinite(+lng) && Number.isFinite(+lat)) out.structures.push({ name, notes, lng: +lng, lat: +lat });
+    }
+  }
+  return out;
+}
+
+const ROUTE_STATUS = ['planned', 'permitted', 'under_construction', 'as_built', 'retired'];
+const STRAND_STATUS = ['free', 'reserved', 'assigned', 'dark', 'damaged', 'abandoned'];
+const STRUCTURE_KINDS = ['handhole', 'vault', 'pole', 'cabinet', 'pedestal', 'building', 'splice_case'];
+const SPLICE_TYPES = ['fusion', 'mechanical', 'splitter', 'termination'];
+
+export default function registerFiber(app, ctx) {
+  const { db, N, audit, requireNoc } = ctx;
+
+  // ---- helpers ----
+  const routeOut = r => ({ ...r, geometry: safeJson(r.geom_json) });
+  const safeJson = s => { try { return JSON.parse(s); } catch { return null; } };
+  function generateStrands(cableId, count) {
+    const ins = db.prepare('INSERT INTO fiber_strands (cable_id,position,tube,tube_color,color) VALUES (?,?,?,?,?)');
+    for (let p = 1; p <= count; p++) { const c = strandColor(p); ins.run(cableId, p, c.tube, c.tube_color, c.color); }
+  }
+  function cableSummary(c) {
+    const counts = db.prepare('SELECT status, COUNT(*) n FROM fiber_strands WHERE cable_id=? GROUP BY status').all(c.id);
+    const by = {}; counts.forEach(x => by[x.status] = x.n);
+    const used = (by.assigned || 0) + (by.reserved || 0);
+    return { ...c, strand_counts: by, strands_used: used, strands_free: by.free || 0 };
+  }
+
+  // ---- routes ----
+  app.get('/api/fiber/routes', (req, res) => res.json(db.prepare('SELECT * FROM fiber_routes ORDER BY name').all().map(routeOut)));
+  app.get('/api/fiber/routes/:id', (req, res) => {
+    const r = db.prepare('SELECT * FROM fiber_routes WHERE id=?').get(req.params.id);
+    if (!r) return res.status(404).json({ error: 'not found' });
+    const out = routeOut(r);
+    out.cables = db.prepare('SELECT * FROM fiber_cables WHERE route_id=? ORDER BY name').all(r.id).map(cableSummary);
+    res.json(out);
+  });
+  app.post('/api/fiber/routes', requireNoc, (req, res) => {
+    const b = req.body || {};
+    if (!b.name) return res.status(400).json({ error: 'Route name required' });
+    const cs = lineCoords(b.geometry);
+    if (!cs) return res.status(400).json({ error: 'Draw a route line with at least two points' });
+    const geom = JSON.stringify({ type: 'LineString', coordinates: cs });
+    const info = db.prepare('INSERT INTO fiber_routes (name,status,placement,owner,length_m,geom_json,notes) VALUES (?,?,?,?,?,?,?)')
+      .run(String(b.name).slice(0, 160), ROUTE_STATUS.includes(b.status) ? b.status : 'as_built', N(b.placement) || null,
+        N(b.owner) || null, lineLengthM(cs), geom, N(b.notes) || null);
+    audit(req, 'create', 'fiber_route#' + info.lastInsertRowid, b.name);
+    res.json({ id: info.lastInsertRowid, length_m: lineLengthM(cs) });
+  });
+  app.put('/api/fiber/routes/:id', requireNoc, (req, res) => {
+    const ex = db.prepare('SELECT * FROM fiber_routes WHERE id=?').get(req.params.id);
+    if (!ex) return res.status(404).json({ error: 'not found' });
+    const b = req.body || {};
+    let geom = ex.geom_json, len = ex.length_m;
+    if (b.geometry !== undefined) {
+      const cs = lineCoords(b.geometry);
+      if (!cs) return res.status(400).json({ error: 'Route needs at least two points' });
+      geom = JSON.stringify({ type: 'LineString', coordinates: cs }); len = lineLengthM(cs);
+    }
+    db.prepare('UPDATE fiber_routes SET name=?, status=?, placement=?, owner=?, length_m=?, geom_json=?, notes=? WHERE id=?')
+      .run(N(b.name, ex.name), ROUTE_STATUS.includes(b.status) ? b.status : ex.status, N(b.placement, ex.placement),
+        N(b.owner, ex.owner), len, geom, N(b.notes, ex.notes), ex.id);
+    audit(req, 'edit', 'fiber_route#' + ex.id, b.name || ex.name);
+    res.json({ ok: true, length_m: len });
+  });
+  app.delete('/api/fiber/routes/:id', requireNoc, (req, res) => {
+    const n = db.prepare('SELECT COUNT(*) n FROM fiber_cables WHERE route_id=?').get(req.params.id).n;
+    if (n) return res.status(409).json({ error: `${n} cable(s) run on this route — delete or move them first` });
+    db.prepare('DELETE FROM fiber_routes WHERE id=?').run(req.params.id);
+    audit(req, 'delete', 'fiber_route#' + req.params.id);
+    res.json({ ok: true });
+  });
+
+  // ---- structures (handholes, vaults, poles, cabinets…) ----
+  app.get('/api/fiber/structures', (req, res) => res.json(db.prepare('SELECT * FROM fiber_structures ORDER BY name').all()));
+  app.post('/api/fiber/structures', requireNoc, (req, res) => {
+    const b = req.body || {};
+    if (!b.name) return res.status(400).json({ error: 'Structure name required' });
+    if (!Number.isFinite(+b.lat) || !Number.isFinite(+b.lng)) return res.status(400).json({ error: 'Place the structure on the map' });
+    const info = db.prepare('INSERT INTO fiber_structures (name,kind,lat,lng,site_id,pop_id,status,notes) VALUES (?,?,?,?,?,?,?,?)')
+      .run(String(b.name).slice(0, 160), STRUCTURE_KINDS.includes(b.kind) ? b.kind : 'handhole', +b.lat, +b.lng,
+        b.site_id ? Number(b.site_id) : null, b.pop_id ? Number(b.pop_id) : null,
+        ROUTE_STATUS.includes(b.status) ? b.status : 'as_built', N(b.notes) || null);
+    audit(req, 'create', 'fiber_structure#' + info.lastInsertRowid, b.name);
+    res.json({ id: info.lastInsertRowid });
+  });
+  app.put('/api/fiber/structures/:id', requireNoc, (req, res) => {
+    const ex = db.prepare('SELECT * FROM fiber_structures WHERE id=?').get(req.params.id);
+    if (!ex) return res.status(404).json({ error: 'not found' });
+    const b = req.body || {};
+    db.prepare('UPDATE fiber_structures SET name=?, kind=?, lat=?, lng=?, site_id=?, pop_id=?, status=?, notes=? WHERE id=?')
+      .run(N(b.name, ex.name), STRUCTURE_KINDS.includes(b.kind) ? b.kind : ex.kind,
+        Number.isFinite(+b.lat) ? +b.lat : ex.lat, Number.isFinite(+b.lng) ? +b.lng : ex.lng,
+        b.site_id !== undefined ? (b.site_id ? Number(b.site_id) : null) : ex.site_id,
+        b.pop_id !== undefined ? (b.pop_id ? Number(b.pop_id) : null) : ex.pop_id,
+        ROUTE_STATUS.includes(b.status) ? b.status : ex.status, N(b.notes, ex.notes), ex.id);
+    audit(req, 'edit', 'fiber_structure#' + ex.id, b.name || ex.name);
+    res.json({ ok: true });
+  });
+  app.delete('/api/fiber/structures/:id', requireNoc, (req, res) => {
+    const n = db.prepare('SELECT COUNT(*) n FROM fiber_splices WHERE structure_id=?').get(req.params.id).n;
+    if (n) return res.status(409).json({ error: `${n} splice(s) recorded here — remove them first` });
+    db.prepare('UPDATE fiber_cables SET a_structure_id=NULL WHERE a_structure_id=?').run(req.params.id);
+    db.prepare('UPDATE fiber_cables SET z_structure_id=NULL WHERE z_structure_id=?').run(req.params.id);
+    db.prepare('DELETE FROM fiber_structures WHERE id=?').run(req.params.id);
+    audit(req, 'delete', 'fiber_structure#' + req.params.id);
+    res.json({ ok: true });
+  });
+
+  // ---- cables (strands are generated automatically) ----
+  app.get('/api/fiber/cables', (req, res) => {
+    const rows = db.prepare(`SELECT c.*, r.name AS route_name,
+        a.name AS a_structure_name, z.name AS z_structure_name
+      FROM fiber_cables c
+      LEFT JOIN fiber_routes r ON r.id=c.route_id
+      LEFT JOIN fiber_structures a ON a.id=c.a_structure_id
+      LEFT JOIN fiber_structures z ON z.id=c.z_structure_id ORDER BY c.name`).all();
+    res.json(rows.map(cableSummary));
+  });
+  app.get('/api/fiber/cables/:id', (req, res) => {
+    const c = db.prepare(`SELECT c.*, r.name AS route_name, r.geom_json,
+        a.name AS a_structure_name, z.name AS z_structure_name
+      FROM fiber_cables c
+      LEFT JOIN fiber_routes r ON r.id=c.route_id
+      LEFT JOIN fiber_structures a ON a.id=c.a_structure_id
+      LEFT JOIN fiber_structures z ON z.id=c.z_structure_id WHERE c.id=?`).get(req.params.id);
+    if (!c) return res.status(404).json({ error: 'not found' });
+    const out = cableSummary(c);
+    out.geometry = safeJson(c.geom_json); delete out.geom_json;
+    out.strands = db.prepare('SELECT * FROM fiber_strands WHERE cable_id=? ORDER BY position').all(c.id);
+    // splices touching this cable, so the strand grid can show what each fibre lands on
+    out.splices = db.prepare(`SELECT s.*, st.name AS structure_name FROM fiber_splices s
+      LEFT JOIN fiber_structures st ON st.id=s.structure_id
+      WHERE s.a_strand_id IN (SELECT id FROM fiber_strands WHERE cable_id=?)
+         OR s.z_strand_id IN (SELECT id FROM fiber_strands WHERE cable_id=?)`).all(c.id, c.id);
+    res.json(out);
+  });
+  app.post('/api/fiber/cables', requireNoc, (req, res) => {
+    const b = req.body || {};
+    if (!b.name) return res.status(400).json({ error: 'Cable name required' });
+    const count = Math.min(Math.max(parseInt(b.strand_count, 10) || 12, 1), 864);
+    const info = db.prepare('INSERT INTO fiber_cables (name,route_id,strand_count,cable_type,a_structure_id,z_structure_id,status,notes) VALUES (?,?,?,?,?,?,?,?)')
+      .run(String(b.name).slice(0, 160), b.route_id ? Number(b.route_id) : null, count, N(b.cable_type) || null,
+        b.a_structure_id ? Number(b.a_structure_id) : null, b.z_structure_id ? Number(b.z_structure_id) : null,
+        ROUTE_STATUS.includes(b.status) ? b.status : 'as_built', N(b.notes) || null);
+    generateStrands(info.lastInsertRowid, count);
+    audit(req, 'create', 'fiber_cable#' + info.lastInsertRowid, `${b.name} (${count}ct)`);
+    res.json({ id: info.lastInsertRowid, strand_count: count });
+  });
+  app.put('/api/fiber/cables/:id', requireNoc, (req, res) => {
+    const ex = db.prepare('SELECT * FROM fiber_cables WHERE id=?').get(req.params.id);
+    if (!ex) return res.status(404).json({ error: 'not found' });
+    const b = req.body || {};
+    db.prepare('UPDATE fiber_cables SET name=?, route_id=?, cable_type=?, a_structure_id=?, z_structure_id=?, status=?, notes=? WHERE id=?')
+      .run(N(b.name, ex.name), b.route_id !== undefined ? (b.route_id ? Number(b.route_id) : null) : ex.route_id,
+        N(b.cable_type, ex.cable_type),
+        b.a_structure_id !== undefined ? (b.a_structure_id ? Number(b.a_structure_id) : null) : ex.a_structure_id,
+        b.z_structure_id !== undefined ? (b.z_structure_id ? Number(b.z_structure_id) : null) : ex.z_structure_id,
+        ROUTE_STATUS.includes(b.status) ? b.status : ex.status, N(b.notes, ex.notes), ex.id);
+    // growing a cable adds strands; shrinking is refused if the doomed strands are in use
+    const want = b.strand_count === undefined ? ex.strand_count : Math.min(Math.max(parseInt(b.strand_count, 10) || ex.strand_count, 1), 864);
+    if (want > ex.strand_count) {
+      const ins = db.prepare('INSERT INTO fiber_strands (cable_id,position,tube,tube_color,color) VALUES (?,?,?,?,?)');
+      for (let p = ex.strand_count + 1; p <= want; p++) { const c = strandColor(p); ins.run(ex.id, p, c.tube, c.tube_color, c.color); }
+      db.prepare('UPDATE fiber_cables SET strand_count=? WHERE id=?').run(want, ex.id);
+    } else if (want < ex.strand_count) {
+      const inUse = db.prepare("SELECT COUNT(*) n FROM fiber_strands WHERE cable_id=? AND position>? AND status!='free'").get(ex.id, want).n;
+      if (inUse) return res.status(409).json({ error: `${inUse} strand(s) above position ${want} are in use — free them first` });
+      db.prepare('DELETE FROM fiber_strands WHERE cable_id=? AND position>?').run(ex.id, want);
+      db.prepare('UPDATE fiber_cables SET strand_count=? WHERE id=?').run(want, ex.id);
+    }
+    audit(req, 'edit', 'fiber_cable#' + ex.id, b.name || ex.name);
+    res.json({ ok: true });
+  });
+  app.delete('/api/fiber/cables/:id', requireNoc, (req, res) => {
+    const ids = db.prepare('SELECT id FROM fiber_strands WHERE cable_id=?').all(req.params.id).map(x => x.id);
+    if (ids.length) {
+      const ph = ids.map(() => '?').join(',');
+      db.prepare(`DELETE FROM fiber_splices WHERE a_strand_id IN (${ph}) OR z_strand_id IN (${ph})`).run(...ids, ...ids);
+    }
+    db.prepare('DELETE FROM fiber_strands WHERE cable_id=?').run(req.params.id);
+    db.prepare('DELETE FROM fiber_cables WHERE id=?').run(req.params.id);
+    audit(req, 'delete', 'fiber_cable#' + req.params.id);
+    res.json({ ok: true });
+  });
+
+  // ---- strands ----
+  app.put('/api/fiber/strands/:id', requireNoc, (req, res) => {
+    const ex = db.prepare('SELECT * FROM fiber_strands WHERE id=?').get(req.params.id);
+    if (!ex) return res.status(404).json({ error: 'not found' });
+    const b = req.body || {};
+    const status = STRAND_STATUS.includes(b.status) ? b.status : ex.status;
+    db.prepare('UPDATE fiber_strands SET status=?, assigned_type=?, assigned_id=?, label=?, notes=? WHERE id=?')
+      .run(status, b.assigned_type !== undefined ? (N(b.assigned_type) || null) : ex.assigned_type,
+        b.assigned_id !== undefined ? (b.assigned_id ? Number(b.assigned_id) : null) : ex.assigned_id,
+        b.label !== undefined ? (N(b.label) || null) : ex.label,
+        b.notes !== undefined ? (N(b.notes) || null) : ex.notes, ex.id);
+    res.json({ ok: true });
+  });
+  // bulk range assignment — "strands 1-12 to Tower A" is how this work is actually done
+  app.post('/api/fiber/cables/:id/strands/assign', requireNoc, (req, res) => {
+    const b = req.body || {};
+    const cable = db.prepare('SELECT * FROM fiber_cables WHERE id=?').get(req.params.id);
+    if (!cable) return res.status(404).json({ error: 'not found' });
+    const from = Math.max(1, parseInt(b.from, 10) || 1);
+    const to = Math.min(cable.strand_count, parseInt(b.to, 10) || from);
+    if (to < from) return res.status(400).json({ error: 'End of range is before the start' });
+    const status = STRAND_STATUS.includes(b.status) ? b.status : 'assigned';
+    const info = db.prepare('UPDATE fiber_strands SET status=?, assigned_type=?, assigned_id=?, label=? WHERE cable_id=? AND position BETWEEN ? AND ?')
+      .run(status, N(b.assigned_type) || null, b.assigned_id ? Number(b.assigned_id) : null, N(b.label) || null, cable.id, from, to);
+    audit(req, 'edit', 'fiber_cable#' + cable.id, `strands ${from}-${to} → ${status}${b.label ? ' (' + b.label + ')' : ''}`);
+    res.json({ ok: true, updated: info.changes, from, to });
+  });
+
+  // ---- splices ----
+  app.post('/api/fiber/splices', requireNoc, (req, res) => {
+    const b = req.body || {};
+    const a = db.prepare('SELECT * FROM fiber_strands WHERE id=?').get(b.a_strand_id);
+    if (!a) return res.status(400).json({ error: 'Pick the A-side strand' });
+    const z = b.z_strand_id ? db.prepare('SELECT * FROM fiber_strands WHERE id=?').get(b.z_strand_id) : null;
+    if (b.z_strand_id && !z) return res.status(400).json({ error: 'Z-side strand not found' });
+    if (z && z.id === a.id) return res.status(400).json({ error: 'A strand cannot be spliced to itself' });
+    const dup = db.prepare('SELECT id FROM fiber_splices WHERE (a_strand_id=? AND z_strand_id=?) OR (a_strand_id=? AND z_strand_id=?)')
+      .get(a.id, z ? z.id : null, z ? z.id : null, a.id);
+    if (dup) return res.status(409).json({ error: 'That splice already exists' });
+    const info = db.prepare('INSERT INTO fiber_splices (structure_id,a_strand_id,z_strand_id,splice_type,tray,loss_db,notes) VALUES (?,?,?,?,?,?,?)')
+      .run(b.structure_id ? Number(b.structure_id) : null, a.id, z ? z.id : null,
+        SPLICE_TYPES.includes(b.splice_type) ? b.splice_type : 'fusion', N(b.tray) || null,
+        b.loss_db != null && b.loss_db !== '' ? r2(b.loss_db) : null, N(b.notes) || null);
+    audit(req, 'create', 'fiber_splice#' + info.lastInsertRowid, `strand#${a.id}${z ? ' ↔ strand#' + z.id : ''}`);
+    res.json({ id: info.lastInsertRowid });
+  });
+  app.delete('/api/fiber/splices/:id', requireNoc, (req, res) => {
+    db.prepare('DELETE FROM fiber_splices WHERE id=?').run(req.params.id);
+    audit(req, 'delete', 'fiber_splice#' + req.params.id);
+    res.json({ ok: true });
+  });
+
+  // Follow a strand through splices end to end — the question this whole module exists to answer.
+  app.get('/api/fiber/strands/:id/trace', (req, res) => {
+    const start = db.prepare('SELECT * FROM fiber_strands WHERE id=?').get(req.params.id);
+    if (!start) return res.status(404).json({ error: 'not found' });
+    const hop = [], seen = new Set();
+    let cur = start;
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      const cable = db.prepare('SELECT id,name,strand_count FROM fiber_cables WHERE id=?').get(cur.cable_id) || {};
+      hop.push({ strand_id: cur.id, position: cur.position, color: cur.color, tube: cur.tube, status: cur.status, label: cur.label, cable_id: cable.id, cable_name: cable.name });
+      const sp = db.prepare(`SELECT s.*, st.name AS structure_name FROM fiber_splices s LEFT JOIN fiber_structures st ON st.id=s.structure_id
+        WHERE (s.a_strand_id=? OR s.z_strand_id=?)`).all(cur.id, cur.id)
+        .find(s => { const other = s.a_strand_id === cur.id ? s.z_strand_id : s.a_strand_id; return other && !seen.has(other); });
+      if (!sp) break;
+      hop[hop.length - 1].splice = { type: sp.splice_type, at: sp.structure_name || null, tray: sp.tray || null };
+      const nextId = sp.a_strand_id === cur.id ? sp.z_strand_id : sp.a_strand_id;
+      cur = nextId ? db.prepare('SELECT * FROM fiber_strands WHERE id=?').get(nextId) : null;
+    }
+    res.json({ hops: hop, terminated: hop.length > 0 && !hop[hop.length - 1].splice });
+  });
+
+  // ---- map feed: everything as one GeoJSON FeatureCollection ----
+  app.get('/api/fiber/geojson', (req, res) => {
+    const features = [];
+    for (const r of db.prepare('SELECT * FROM fiber_routes').all()) {
+      const g = safeJson(r.geom_json); if (!g) continue;
+      const cables = db.prepare('SELECT id,name,strand_count FROM fiber_cables WHERE route_id=?').all(r.id);
+      features.push({ type: 'Feature', geometry: g, properties: { kind: 'route', id: r.id, name: r.name, status: r.status, placement: r.placement, length_m: r.length_m, cables: cables.length, strand_total: cables.reduce((n, c) => n + c.strand_count, 0) } });
+    }
+    for (const s of db.prepare('SELECT * FROM fiber_structures WHERE lat IS NOT NULL AND lng IS NOT NULL').all()) {
+      features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [s.lng, s.lat] }, properties: { kind: 'structure', id: s.id, name: s.name, structure_kind: s.kind, status: s.status } });
+    }
+    res.json({ type: 'FeatureCollection', features });
+  });
+
+  // ---- import: GeoJSON, KML, or KMZ (Google Earth) ----
+  // Text formats arrive in `data`; KMZ is binary so the browser sends it base64 in `data_b64`.
+  app.post('/api/fiber/import', requireNoc, (req, res) => {
+    const b = req.body || {};
+    let raw = '', format = 'geojson';
+    if (b.data_b64) {
+      let buf; try { buf = Buffer.from(String(b.data_b64), 'base64'); } catch { return res.status(400).json({ error: 'Could not decode the uploaded file' }); }
+      if (looksLikeZip(buf)) {
+        try { raw = extractKmlFromKmz(buf); format = 'kmz'; }
+        catch (e) { return res.status(400).json({ error: e.message }); }
+      } else raw = buf.toString('utf8');   // someone base64'd a plain .kml/.json — fine
+    } else {
+      raw = typeof b.data === 'string' ? b.data : JSON.stringify(b.data || '');
+    }
+    if (!raw.trim()) return res.status(400).json({ error: 'No file content received' });
+    let parsed;
+    const looksKml = format === 'kmz' || /<kml|<Placemark/i.test(raw.slice(0, 4000));
+    if (looksKml) { if (format !== 'kmz') format = 'kml'; parsed = parseKml(raw); }
+    else { let j; try { j = JSON.parse(raw); } catch (e) { return res.status(400).json({ error: 'Not valid GeoJSON, KML or KMZ: ' + e.message }); } parsed = parseGeoJson(j); }
+    const status = ROUTE_STATUS.includes(b.status) ? b.status : 'as_built';
+    const result = { format, routes_found: parsed.routes.length, structures_found: parsed.structures.length, routes_created: 0, structures_created: 0, skipped: 0, total_length_m: 0 };
+    if (!b.commit) { // dry run so the operator can look before importing
+      result.total_length_m = parsed.routes.reduce((n, r) => n + lineLengthM(r.coordinates), 0);
+      result.samples = { routes: parsed.routes.slice(0, 5).map(r => ({ name: r.name, points: r.coordinates.length, length_m: lineLengthM(r.coordinates) })), structures: parsed.structures.slice(0, 5).map(s => ({ name: s.name })) };
+      return res.json({ ok: true, committed: false, ...result });
+    }
+    const insR = db.prepare('INSERT INTO fiber_routes (name,status,placement,geom_json,length_m,notes) VALUES (?,?,?,?,?,?)');
+    for (const r of parsed.routes) {
+      if (db.prepare('SELECT id FROM fiber_routes WHERE name=?').get(r.name)) { result.skipped++; continue; }
+      const len = lineLengthM(r.coordinates);
+      insR.run(r.name.slice(0, 160), status, N(b.placement) || null, JSON.stringify({ type: 'LineString', coordinates: r.coordinates }), len, r.notes);
+      result.routes_created++; result.total_length_m += len;
+    }
+    const insS = db.prepare('INSERT INTO fiber_structures (name,kind,lat,lng,status,notes) VALUES (?,?,?,?,?,?)');
+    for (const s of parsed.structures) {
+      if (db.prepare('SELECT id FROM fiber_structures WHERE name=? AND lat=? AND lng=?').get(s.name, s.lat, s.lng)) { result.skipped++; continue; }
+      insS.run(s.name.slice(0, 160), STRUCTURE_KINDS.includes(b.structure_kind) ? b.structure_kind : 'handhole', s.lat, s.lng, status, s.notes);
+      result.structures_created++;
+    }
+    audit(req, 'import', 'fiber', `${result.routes_created} route(s), ${result.structures_created} structure(s) from ${result.format}`);
+    res.json({ ok: true, committed: true, ...result });
+  });
+
+  // summary for the dashboard/nav
+  app.get('/api/fiber/summary', (req, res) => {
+    const routes = db.prepare('SELECT COUNT(*) n, IFNULL(SUM(length_m),0) m FROM fiber_routes').get();
+    const built = db.prepare("SELECT COUNT(*) n, IFNULL(SUM(length_m),0) m FROM fiber_routes WHERE status='as_built'").get();
+    const strands = db.prepare('SELECT status, COUNT(*) n FROM fiber_strands GROUP BY status').all();
+    const by = {}; strands.forEach(s => by[s.status] = s.n);
+    res.json({
+      routes: routes.n, route_km: r2(routes.m / 1000), as_built_km: r2(built.m / 1000),
+      structures: db.prepare('SELECT COUNT(*) n FROM fiber_structures').get().n,
+      cables: db.prepare('SELECT COUNT(*) n FROM fiber_cables').get().n,
+      splices: db.prepare('SELECT COUNT(*) n FROM fiber_splices').get().n,
+      strands: by, strand_total: Object.values(by).reduce((a, b2) => a + b2, 0)
+    });
+  });
+}
