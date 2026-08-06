@@ -188,6 +188,31 @@ export function migrate() {
   ensure('sites', 'subaccount_id', 'INTEGER');
   ensure('devices', 'owner_subaccount_id', 'INTEGER');
   ensure('accounts', 'monthly_cost', 'REAL'); // account base monthly cost (P&L); total cost = this + sub-accounts
+  // Consolidation: POP upstream feeds (pop_circuits) fold into the single `circuits` inventory.
+  // A-end = the upstream source (pop|account), Z-end = the POP being fed. Runs once.
+  ensure('connections', 'circuit_ref_id', 'INTEGER'); // optional link from a site WAN uplink to a circuit record
+  const popcMigrated = db.prepare("SELECT value FROM settings WHERE key='popcircuits_merged'").get();
+  if (!popcMigrated) {
+    let moved = 0;
+    const hasPopc = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pop_circuits'").get();
+    if (hasPopc) {
+      for (const c of db.prepare('SELECT * FROM pop_circuits').all()) {
+        const zId = c.pop_id;
+        const aType = c.source_type === 'account' ? 'account' : 'pop';
+        const aId = c.source_type === 'account' ? c.source_account_id : c.source_pop_id;
+        if (!aId || !zId) continue;                                   // broken ref — leave the old row in place
+        if (aType === 'pop' && Number(aId) === Number(zId)) continue; // self-loop — not a valid circuit
+        const dup = db.prepare('SELECT id FROM circuits WHERE a_type=? AND a_ref_id=? AND z_type=? AND z_ref_id=? AND IFNULL(circuit_id,\'\')=IFNULL(?,\'\')').get(aType, aId, 'pop', zId, c.circuit_id || '');
+        if (dup) continue;
+        db.prepare(`INSERT INTO circuits (label,a_type,a_ref_id,z_type,z_ref_id,circuit_id,bandwidth,status,notes,created_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?)`).run(null, aType, aId, 'pop', zId, c.circuit_id || null, c.bandwidth || null,
+          c.status || 'Up', c.notes || null, c.created_at || new Date().toISOString());
+        moved++;
+      }
+      if (moved) console.log(`Merged ${moved} POP upstream circuit(s) into the circuits inventory.`);
+    }
+    db.prepare("INSERT INTO settings (key,value) VALUES ('popcircuits_merged','1') ON CONFLICT(key) DO UPDATE SET value='1'").run();
+  }
   // one-time: fold each account's legacy single sub_account into the new list
   const migrated = db.prepare("SELECT value FROM settings WHERE key='subaccount_migrated'").get();
   if (!migrated) {

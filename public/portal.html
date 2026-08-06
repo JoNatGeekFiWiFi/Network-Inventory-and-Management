@@ -113,7 +113,7 @@
       const rows = await (await fetch('/portal/api/tickets')).json();
       body.innerHTML = `<div style="display:flex;justify-content:flex-end;margin-bottom:12px"><button class="btn sm" id="newtk">+ New request</button></div>
         <div class="card">${rows.map(t => `<div class="row rowlink" data-id="${t.id}" style="cursor:pointer">
-          <div class="g"><div><b>${esc(t.number)}</b> · ${esc(t.subject)}</div><div class="small muted">Updated ${esc(t.updated_at)}${t.last_from ? ' · last: ' + esc(t.last_from) : ''}</div></div>
+          <div class="g"><div><b>${esc(t.number)}</b> · ${esc(t.subject)}</div><div class="small muted">Updated ${esc(t.updated_at)}${t.msg_count ? ' · ' + t.msg_count + ' message' + (t.msg_count === 1 ? '' : 's') : ''}</div></div>
           ${statusPill(t.status)}</div>`).join('') || '<div class="row muted">No support requests yet.</div>'}</div>`;
       $('#newtk').onclick = () => { TK_VIEW = { mode: 'new' }; renderTab(); };
       body.querySelectorAll('.rowlink').forEach(r => r.onclick = () => { TK_VIEW = { mode: 'thread', id: r.dataset.id }; renderTab(); });

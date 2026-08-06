@@ -1,0 +1,56 @@
+const B='http://localhost:3941'; let cookie='';
+async function call(path,{method='GET',body}={}){ const h={}; if(body!==undefined){h['content-type']='application/json';method=method==='GET'?'POST':method;} if(cookie)h.cookie=cookie; const r=await fetch(B+path,{method,headers:h,body:body!==undefined?JSON.stringify(body):undefined}); const sc=r.headers.get('set-cookie'); if(sc)cookie=sc.split(';')[0]; const t=await r.text(); let j=null;try{j=JSON.parse(t);}catch{} return {status:r.status,json:j,t}; }
+let pass=0,fail=0; const ok=(c,m)=>{c?pass++:fail++;console.log(c?'PASS':'FAIL',m);};
+await call('/api/login',{body:{email:'admin@geekitek.test',password:'admin123'}});
+const opt=(await call('/api/circuits-options')).json;
+ok(opt.sites.length&&opt.carriers.length,'options: sites + carriers present ('+opt.sites.length+' sites, '+opt.pops.length+' pops, '+opt.carriers.length+' carriers)');
+const s1=opt.sites[0], s2=opt.sites[1]||opt.sites[0], carrier=opt.carriers[0], pop=opt.pops[0];
+
+// site-to-site
+let r=await call('/api/circuits',{method:'POST',body:{label:'HQ to Warehouse',a_type:'site',a_ref_id:s1.id,z_type:'site',z_ref_id:s2.id,ctype:'Fiber',bandwidth:'1 Gbps',status:'Up',monthly_cost:'450'}});
+ok(r.json.id>0,'create site-to-site circuit');
+const cid=r.json.id;
+let c=(await call('/api/circuits/'+cid)).json;
+ok(c.a_name===s1.name&&c.z_name===s2.name&&c.a_href&&c.z_href,'endpoints resolved w/ hrefs');
+ok(c.monthly_cost===450,'monthly cost stored numeric');
+
+// carrier-to-site
+r=await call('/api/circuits',{method:'POST',body:{a_type:'carrier',a_ref_id:carrier.id,z_type:'site',z_ref_id:s1.id,provider_id:carrier.id,circuit_id:'COX-99887',bandwidth:'500M',status:'Up'}});
+ok(r.json.id>0,'create carrier-to-site circuit');
+const cid2=r.json.id;
+c=(await call('/api/circuits/'+cid2)).json;
+ok(c.a_type==='carrier'&&c.a_name===carrier.name&&!c.a_href,'carrier endpoint resolved, no href');
+ok(c.provider_name===carrier.name,'provider/carrier name resolved');
+
+// validation: carrier<->carrier rejected
+r=await call('/api/circuits',{method:'POST',body:{a_type:'carrier',a_ref_id:carrier.id,z_type:'carrier',z_ref_id:carrier.id}});
+ok(r.status===400,'carrier<->carrier rejected (400)');
+// bad ref rejected
+r=await call('/api/circuits',{method:'POST',body:{a_type:'site',a_ref_id:999999,z_type:'carrier',z_ref_id:carrier.id}});
+ok(r.status===400,'nonexistent endpoint rejected');
+
+// ref filter: circuits touching s1 => both (site-to-site has s1, carrier-to-site z=s1)
+let list=(await call('/api/circuits?ref=site:'+s1.id)).json;
+ok(list.length===2,'ref filter site:'+s1.id+' returns 2');
+// filter by carrier endpoint
+list=(await call('/api/circuits?ref=carrier:'+carrier.id)).json;
+ok(list.some(x=>x.id===cid2),'ref filter carrier returns the carrier circuit');
+// status filter
+list=(await call('/api/circuits?status=Down')).json; ok(list.length===0,'status=Down filter empty');
+// search
+list=(await call('/api/circuits?q=warehouse')).json; ok(list.length===1&&list[0].id===cid,'search matches label');
+list=(await call('/api/circuits?q=COX-99887')).json; ok(list.length===1&&list[0].id===cid2,'search matches circuit ID');
+
+// edit
+r=await call('/api/circuits/'+cid,{method:'PUT',body:{label:'HQ<->WH',a_type:'site',a_ref_id:s1.id,z_type:'site',z_ref_id:s2.id,status:'Standby',bandwidth:'10 Gbps'}});
+ok(r.json.ok,'edit ok');
+c=(await call('/api/circuits/'+cid)).json; ok(c.status==='Standby'&&c.bandwidth==='10 Gbps'&&c.label==='HQ<->WH','edit persisted');
+
+// POP endpoint circuit (if pop exists)
+if(pop){ r=await call('/api/circuits',{method:'POST',body:{a_type:'pop',a_ref_id:pop.id,z_type:'site',z_ref_id:s1.id,ctype:'Fiber'}}); const pc=r.json.id; const pl=(await call('/api/circuits?ref=pop:'+pop.id)).json; ok(pl.some(x=>x.id===pc),'POP-endpoint circuit + ref=pop filter'); } else ok(true,'no POP (skipped)');
+
+// delete
+await call('/api/circuits/'+cid2,{method:'DELETE'});
+ok((await call('/api/circuits/'+cid2)).status===404,'delete works');
+
+console.log('\nRESULT:',pass,'passed,',fail,'failed'); process.exit(fail?1:0);

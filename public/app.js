@@ -121,12 +121,12 @@ async function route() {
     if (p[0] === 'pop' && p[1] === 'new') { setNav('sites'); return await formPop({}); }
     if (p[0] === 'pop' && p[2] === 'edit') { setNav('sites'); return await formPop({ id: p[1] }); }
     if (p[0] === 'pop' && p[2] === 'notes') { setNav('sites'); return await renderPopNotes(p[1]); }
-    if (p[0] === 'pop' && p[2] === 'circuit' && p[3] === 'new') { setNav('sites'); return await formPopCircuit({ popId: p[1] }); }
-    if (p[0] === 'pop' && p[2] === 'circuit' && p[3]) { setNav('sites'); return await formPopCircuit({ popId: p[1], id: p[3] }); }
+    // legacy POP-circuit links → the consolidated circuit form, Z-end pre-set to this POP
+    if (p[0] === 'pop' && p[2] === 'circuit') { location.hash = '#/circuit/new?pop=' + p[1]; return; }
     if (p[0] === 'pop' && p[2] === 'patch') { setNav('sites'); return await renderPatch('pop', p[1]); }
     if (p[0] === 'pop') { setNav('sites'); return await renderPop(p[1]); }
     if (p[0] === 'circuits') { setNav('circuits'); return await renderCircuits(); }
-    if (p[0] === 'circuit' && p[1] === 'new') { setNav('circuits'); return await formCircuit({}); }
+    if (p[0] === 'circuit' && p[1] === 'new') { setNav('circuits'); return await formCircuit(q); }
     if (p[0] === 'circuit' && p[2] === 'edit') { setNav('circuits'); return await formCircuit({ id: p[1] }); }
     if (p[0] === 'circuit') { setNav('circuits'); return await renderCircuit(p[1]); }
     if (p[0] === 'accounts') { setNav('accounts'); return await renderCustomers(); }
@@ -267,6 +267,7 @@ async function renderSite(id) {
         <span style="display:flex;align-items:center;gap:6px">${statusPill(c.status)}${isPriv() ? `<button class="btn sm" onclick="delConn(${c.id}, ${s.id})" title="Delete this connection"><i class="ti ti-trash"></i> Delete</button>` : ''}</span></div>
       <div style="font-weight:500">${esc(c.served_label || '—')}</div>
       <div class="small sec-muted">${c.wan_port ? '<span class="wan"><i class="ti ti-plug"></i> ' + esc(c.wan_port) + '</span> &nbsp;' : ''}${ipline}</div>
+      ${c.circuit ? `<div class="small sec-muted" style="margin-top:3px"><i class="ti ti-topology-star-3" style="font-size:12px"></i> <a class="iplink" href="#/circuit/${c.circuit.id}">${esc(c.circuit.label)}</a>${c.circuit.bandwidth ? ' · ' + esc(c.circuit.bandwidth) : ''}</div>` : ''}
     </div>`;
   }).join('') || '<div class="metric muted">No connections</div>';
 
@@ -302,7 +303,7 @@ async function renderSite(id) {
       ${hw}
     </div>
 
-    <div class="card"><div class="hd"><h2><i class="ti ti-topology-star-3"></i> Circuits · ${circuits.length}</h2>${isPriv() ? `<a class="btn sm" href="#/circuit/new"><i class="ti ti-plus"></i> Add circuit</a>` : ''}</div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-topology-star-3"></i> Circuits · ${circuits.length}</h2>${isPriv() ? `<a class="btn sm" href="#/circuit/new?site=${s.id}"><i class="ti ti-plus"></i> Add circuit</a>` : ''}</div>
       ${circuits.length ? circuitMiniRows(circuits, 'site', s.id) : '<div class="row muted">No circuits reference this site. Add one from the Circuits menu or the button above.</div>'}</div>
 
     <div class="card"><div class="row rowlink" onclick="location.hash='#/site/${s.id}/patch'">
@@ -353,15 +354,9 @@ async function renderPop(id) {
       <div class="metric"><div class="l"><i class="ti ti-shield-lock"></i> Management IP</div><div class="mono" style="font-size:15px;font-weight:500">${p.current_mgmt_ip ? `<a class="iplink" href="https://${esc(p.current_mgmt_ip)}" target="_blank">${esc(p.current_mgmt_ip)} <i class="ti ti-external-link" style="font-size:11px"></i></a>` : '—'}</div></div>
       <div class="metric"><div class="l"><i class="ti ti-world"></i> Public IP</div><div class="mono" style="font-size:15px;font-weight:500">${esc(p.current_public_ip || '—')}</div></div>
     </div>
-    <div class="card"><div class="hd"><h2><i class="ti ti-route"></i> Upstream / bandwidth · ${p.circuits.length}</h2>${isPriv() ? `<a class="btn sm" href="#/pop/${p.id}/circuit/new"><i class="ti ti-plus"></i> Add circuit</a>` : ''}</div>
-      ${p.circuits.length ? p.circuits.map(c => `<div class="row${isPriv() ? ' rowlink' : ''}"${isPriv() ? ` onclick="location.hash='#/pop/${p.id}/circuit/${c.id}'"` : ''}>
-        <i class="ti ti-${c.source_type === 'pop' ? 'building-broadcast-tower' : 'building-bank'} sec-muted"></i>
-        <div style="flex:1;min-width:0"><div>${esc(c.source_label)}${c.bandwidth ? ' · <b>' + esc(c.bandwidth) + '</b>' : ''}</div>
-          <div class="small mono sec-muted">${c.circuit_id ? esc(c.circuit_id) : 'no circuit ID'}${c.notes ? ' · ' + esc(c.notes) : ''}</div></div>
-        ${statusPill(c.status)}${isPriv() ? '<i class="ti ti-chevron-right muted"></i>' : ''}</div>`).join('') : '<div class="row muted">No upstream circuits defined — Add circuit to record where this POP gets bandwidth.</div>'}</div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-topology-star-3"></i> Circuits &amp; upstream · ${circuits.length}</h2>${isPriv() ? `<a class="btn sm" href="#/circuit/new?pop=${p.id}"><i class="ti ti-plus"></i> Add circuit</a>` : ''}</div>
+      ${circuits.length ? circuitMiniRows(circuits, 'pop', p.id) : '<div class="row muted">No circuits yet — add one to record where this POP gets bandwidth, or a link to another POP/site.</div>'}</div>
     <div class="card"><div class="hd"><h2>Hardware · ${p.devices.length}</h2><a class="btn sm" href="#/device/new?pop=${p.id}"><i class="ti ti-plus"></i> Add hardware</a></div>${hw}</div>
-    <div class="card"><div class="hd"><h2><i class="ti ti-topology-star-3"></i> Circuits · ${circuits.length}</h2>${isPriv() ? `<a class="btn sm" href="#/circuit/new"><i class="ti ti-plus"></i> Add circuit</a>` : ''}</div>
-      ${circuits.length ? circuitMiniRows(circuits, 'pop', p.id) : '<div class="row muted">No circuits reference this POP. The Upstream/bandwidth card above tracks POP feeds; use Circuits for site-to-site or carrier links.</div>'}</div>
     <div class="card"><div class="row rowlink" onclick="location.hash='#/pop/${p.id}/patch'">
       <i class="ti ti-layout-grid sec-muted"></i>
       <div style="flex:1;min-width:0"><div>Patch panels</div><div class="small sec-muted">${p.patch_enabled ? 'Documented — ports labelled to devices &amp; circuits' : 'Not set up — click to enable'}</div></div>
@@ -437,55 +432,9 @@ async function savePop(id) {
   } catch (e) { toast(e.message); }
 }
 
-async function formPopCircuit(q) {
-  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
-  const pop = await api('/pops/' + q.popId);
-  let c = { source_type: 'pop', source_pop_id: '', source_account_id: '', circuit_id: '', bandwidth: '', status: 'Up', notes: '' };
-  if (q.id) { const found = (pop.circuits || []).find(x => String(x.id) === String(q.id)); if (found) c = found; }
-  const popOpts = (META.pops || []).filter(p => String(p.id) !== String(q.popId)).map(p => ({ v: p.id, l: p.name }));
-  const accOpts = (META.accounts || []).map(a => ({ v: a.id, l: a.name }));
-  view().innerHTML = `<div class="crumb" onclick="location.hash='#/pop/${q.popId}'"><i class="ti ti-chevron-left"></i> ${esc(pop.name)}</div>
-    <h1>${q.id ? 'Edit' : 'Add'} circuit</h1>
-    <div class="small sec-muted" style="margin-bottom:14px">Where ${esc(pop.name)} gets its bandwidth</div>
-    <div class="card" style="padding:16px;overflow:visible" id="f">
-      <div class="fld"><label class="fl">Bandwidth source</label>
-        <select name="source_type" onchange="toggleCircSource()">
-          <option value="pop" ${c.source_type === 'pop' ? 'selected' : ''}>Other POP site</option>
-          <option value="account" ${c.source_type === 'account' ? 'selected' : ''}>Account (carrier)</option>
-        </select></div>
-      <div class="fld" id="srcpopFld"><label class="fl">Source POP</label><div id="ss-srcpop"></div></div>
-      <div class="fld" id="srcacctFld"><label class="fl">Source account</label><div id="ss-srcacct"></div></div>
-      <div class="grid2">${field('Circuit / account ID', 'circuit_id', c.circuit_id, { mono: true, ph: 'e.g. COX-123456' })}
-      ${field('Bandwidth', 'bandwidth', c.bandwidth, { ph: 'e.g. 1 Gbps' })}</div>
-      ${field('Status', 'status', c.status, { type: 'select', options: ['Up', 'Standby', 'Down'] })}
-      ${field('Notes', 'notes', c.notes, { type: 'textarea' })}
-      <div style="display:flex;gap:10px;justify-content:${q.id ? 'space-between' : 'flex-end'};margin-top:8px">
-        ${q.id ? `<button class="btn" style="color:var(--danger)" onclick="delCircuit(${q.popId},${q.id})"><i class="ti ti-trash"></i> Delete</button>` : ''}
-        <div style="display:flex;gap:10px"><button class="btn" onclick="history.back()">Cancel</button>
-        <button class="btn primary" onclick="saveCircuit(${q.popId},${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div></div>`;
-  attachSearch($('#ss-srcpop'), popOpts, 'source_pop_id', c.source_pop_id || '', 'Search POP…');
-  attachSearch($('#ss-srcacct'), accOpts, 'source_account_id', c.source_account_id || '', 'Search account…');
-  toggleCircSource();
-}
-function toggleCircSource() {
-  const t = $('#f [name="source_type"]').value;
-  $('#srcpopFld').style.display = t === 'pop' ? 'block' : 'none';
-  $('#srcacctFld').style.display = t === 'account' ? 'block' : 'none';
-}
-async function saveCircuit(popId, id) {
-  const d = collect('#f');
-  if (d.source_type === 'pop' && !d.source_pop_id) { toast('Pick a source POP'); return; }
-  if (d.source_type === 'account' && !d.source_account_id) { toast('Pick a source account'); return; }
-  try {
-    if (id) await api('/pops/' + popId + '/circuits/' + id, { method: 'PUT', body: JSON.stringify(d) });
-    else await api('/pops/' + popId + '/circuits', { method: 'POST', body: JSON.stringify(d) });
-    toast('Saved'); location.hash = '#/pop/' + popId;
-  } catch (e) { toast(e.message); }
-}
-async function delCircuit(popId, id) {
-  if (!confirm('Delete this circuit?')) return;
-  try { await api('/pops/' + popId + '/circuits/' + id, { method: 'DELETE' }); toast('Deleted'); location.hash = '#/pop/' + popId; } catch (e) { toast(e.message); }
-}
+// POP upstream feeds were merged into the single Circuits inventory (#/circuits).
+// The old formPopCircuit/saveCircuit/delCircuit + /api/pops/:id/circuits endpoints are gone;
+// legacy #/pop/:id/circuit/* links now redirect to the circuit form pre-set to that POP.
 
 // ---------- Notes ----------
 async function renderNotes(id) {
@@ -2417,8 +2366,8 @@ async function renderCircuit(id) {
     </div>`;
 }
 function circRefOptions(type, sel) {
-  const o = window._circOpts || { sites: [], pops: [], carriers: [] };
-  const list = type === 'site' ? o.sites : type === 'pop' ? o.pops : o.carriers;
+  const o = window._circOpts || { sites: [], pops: [], carriers: [], accounts: [] };
+  const list = type === 'site' ? o.sites : type === 'pop' ? o.pops : type === 'account' ? (o.accounts || []) : o.carriers;
   return list.map(x => `<option value="${x.id}" ${String(sel) === String(x.id) ? 'selected' : ''}>${esc(x.name)}</option>`).join('');
 }
 function circEndpoint(side, sel) {
@@ -2430,7 +2379,10 @@ async function formCircuit(qy) {
   window._circOpts = await api('/circuits-options');
   let c = { a_type: 'site', z_type: 'carrier', status: 'Up' };
   if (qy.id) c = await api('/circuits/' + qy.id);
-  const typeSel = (side, cur) => `<select id="${side}_type" onchange="circEndpoint('${side}')" style="width:110px">${[['site', 'Site'], ['pop', 'POP'], ['carrier', 'Carrier']].map(t => `<option value="${t[0]}" ${cur === t[0] ? 'selected' : ''}>${t[1]}</option>`).join('')}</select>`;
+  // ?pop=<id> (from a POP page / legacy upstream link): pre-set Z-end to that POP, A-end to a carrier account
+  else if (qy.pop) { c = { a_type: 'account', z_type: 'pop', z_ref_id: Number(qy.pop), status: 'Up' }; }
+  else if (qy.site) { c = { a_type: 'account', z_type: 'site', z_ref_id: Number(qy.site), status: 'Up' }; }
+  const typeSel = (side, cur) => `<select id="${side}_type" onchange="circEndpoint('${side}')" style="width:110px">${[['site', 'Site'], ['pop', 'POP'], ['account', 'Account'], ['carrier', 'Carrier']].map(t => `<option value="${t[0]}" ${cur === t[0] ? 'selected' : ''}>${t[1]}</option>`).join('')}</select>`;
   view().innerHTML = `<div class="crumb" onclick="location.hash='${qy.id ? '#/circuit/' + qy.id : '#/circuits'}'"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${qy.id ? 'Edit' : 'Add'} circuit</h1>
     <div class="card" style="margin-top:14px;padding:16px" id="cf">
