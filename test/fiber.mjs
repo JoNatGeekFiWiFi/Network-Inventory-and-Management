@@ -443,6 +443,24 @@ import { looksLikeIqgeo, parseIqgeo, parsePins } from '../lib/iqgeo.js';
   ok(p.structures.length === 2 && p.structures.some(s => s.kind === 'splice_case'), 'span endpoints become structures (splice_case from ref prefix)');
   ok(/Account: ACME WIRELESS/.test(p.cables[0].notes) && /Termination:/.test(p.cables[0].notes), 'attributes preserved in cable notes');
 
+  // Endpoint tables seen in real Arizona exports. 'shelf' alone accounted for ~7.4k terminations
+  // and used to fall through the default and get filed as buried handholes.
+  {
+    const endpoint = (inRef, outRef) => parseIqgeo({ type: 'FeatureCollection', features: [{
+      ID: 'k1', geometry: { type: 'LineString', coordinates: [[-112, 33], [-112.1, 33.1]] },
+      properties: { name: 'S', user_count: 12, user_type: 'Span', in_feature: inRef, out_feature: outRef } }] })
+      .structures.reduce((m, s) => (m[s.ext_ref] = s.kind, m), {});
+    const k = endpoint('shelf/398717', 'card/463148');
+    ok(k['shelf/398717'] === 'cabinet', 'rack shelf → cabinet, not handhole');
+    ok(k['card/463148'] === 'cabinet', 'line card → cabinet');
+    const k2 = endpoint('mywcom_fiber_segment/9', 'splice_shelf/4');
+    ok(k2['mywcom_fiber_segment/9'] === 'splice_case', 'mid-cable landing → splice_case');
+    ok(k2['splice_shelf/4'] === 'splice_case', 'splice shelf → splice_case');
+    const k3 = endpoint('pole/1108027', 'manhole/55');
+    ok(k3['pole/1108027'] === 'pole' && k3['manhole/55'] === 'vault', 'outside-plant prefixes still map correctly');
+    ok(endpoint('wibble/1', 'pole/2')['wibble/1'] === 'handhole', 'unknown prefix falls back to handhole');
+  }
+
   const routes = { type: 'FeatureCollection', features: [
     { ID: '834882', myw_title: 'Aerial Route: EXAMPLE-1719', myw_short_description: 'Route (Overhead)',
       geometry: { type: 'LineString', coordinates: [[-112.1, 33.4], [-112.11, 33.41]] },

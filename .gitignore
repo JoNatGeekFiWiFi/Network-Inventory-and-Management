@@ -23,4 +23,5 @@ push-to-github.sh
 
 # IQGeo/myWorld exports — carrier + customer data, never commit these
 myw_report_*.json
+az_spans_*.json
 *.myw.json
