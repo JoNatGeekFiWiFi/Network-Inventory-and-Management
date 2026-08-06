@@ -55,11 +55,16 @@ git pull --ff-only
 NEW_SHA="$(git rev-parse HEAD)"
 if [ "$OLD_SHA" = "$NEW_SHA" ]; then echo ">> Already up to date ($NEW_SHA)."; fi
 
-# 3. Dependencies (lockfile-pinned, production only)
+# 3. Ownership FIRST — the pull above ran as root, so package.json/package-lock.json and any
+#    newly added files are root-owned. npm install runs as $RUN_USER and needs to rewrite the
+#    lockfile, so chowning after the install (as this used to) fails with EACCES.
+chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR" "$(dirname "$DB_PATH")"
+
+# 4. Dependencies (lockfile-pinned, production only)
 sudo -u "$RUN_USER" bash -c "cd '$APP_DIR' && npm install --omit=dev --no-audit --no-fund"
 
-# 4. Ownership (git pull as root leaves root-owned files behind)
-chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR" "$(dirname "$DB_PATH")"
+# 4b. Re-assert ownership in case npm created root-owned cache/artifacts
+chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR"
 
 # 5. Restart
 systemctl restart "$SERVICE"

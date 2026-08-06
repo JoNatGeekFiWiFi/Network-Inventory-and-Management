@@ -17,3 +17,6 @@ push-to-github.sh
 
 # Scratch test files (sandbox can't delete from the mounted folder)
 /_*.mjs
+
+# FUSE artifacts leaked by the sandbox mount
+.fuse_hidden*
