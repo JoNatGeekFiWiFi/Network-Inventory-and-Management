@@ -6,6 +6,7 @@
 //
 // Geometry is GeoJSON stored as text — SQLite has no spatial type and we don't need spatial
 // queries, just "draw it on a map and tell me what's connected to what".
+import express from 'express';
 import { r2 } from '../lib/core.js';
 import { extractKmlFromKmz, looksLikeZip, listZipEntries, readZipEntry } from '../lib/unzip.js';
 import { shapefileToFeatures } from '../lib/shapefile.js';
@@ -441,11 +442,21 @@ export default function registerFiber(app, ctx) {
 
   // ---- import: GeoJSON, KML, or KMZ (Google Earth) ----
   // Text formats arrive in `data`; KMZ is binary so the browser sends it base64 in `data_b64`.
-  app.post('/api/fiber/import', requireNoc, (req, res) => {
-    const b = req.body || {};
+  // Accepts either JSON ({data} text / {data_b64} binary) or — preferred for big files — the raw
+  // bytes with any non-JSON content type plus ?commit=&status=&structure_kind= in the query.
+  // Raw avoids base64's ~33% inflation, which matters for multi-MB KMZ/shapefile exports.
+  const rawIfNotJson = express.raw({ type: req => !/application\/json/i.test(req.headers['content-type'] || ''), limit: '64mb' });
+  app.post('/api/fiber/import', requireNoc, rawIfNotJson, (req, res) => {
+    const isRaw = Buffer.isBuffer(req.body);
+    const b = isRaw
+      ? { commit: req.query.commit === '1' || req.query.commit === 'true', status: req.query.status, structure_kind: req.query.structure_kind }
+      : (req.body || {});
     let raw = '', format = null, parsed = null;
-    if (b.data_b64) {
-      let buf; try { buf = Buffer.from(String(b.data_b64), 'base64'); } catch { return res.status(400).json({ error: 'Could not decode the uploaded file' }); }
+    if (isRaw || b.data_b64) {
+      let buf;
+      if (isRaw) buf = req.body;
+      else { try { buf = Buffer.from(String(b.data_b64), 'base64'); } catch { return res.status(400).json({ error: 'Could not decode the uploaded file' }); } }
+      if (!buf.length) return res.status(400).json({ error: 'No file content received' });
       if (looksLikeZip(buf)) {
         // A zip is either a KMZ or a zipped shapefile set — look inside to decide.
         let entries; try { entries = listZipEntries(buf).filter(e => !e.name.endsWith('/')); }

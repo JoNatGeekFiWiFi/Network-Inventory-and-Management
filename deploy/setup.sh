@@ -88,6 +88,9 @@ if command -v nginx >/dev/null 2>&1; then
 server {
     listen 80;
     server_name $DOMAIN;
+    # nginx defaults to 1 MB, which silently 413s fiber imports (KMZ/shapefile), note
+    # attachments and .npk package uploads long before they reach the app.
+    client_max_body_size 64m;
     location / {
         proxy_pass http://127.0.0.1:$PORT;
         proxy_set_header Host \$host;

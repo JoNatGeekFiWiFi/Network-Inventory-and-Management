@@ -2696,26 +2696,19 @@ async function runFiberImport(commit) {
   if (!f) { toast('Choose a file first'); return; }
   const out = $('#fiOut');
   const fail = msg => { out.innerHTML = `<div class="card" style="padding:16px;margin-top:14px;color:var(--danger)"><b>Import failed</b><div style="margin-top:6px">${esc(msg)}</div></div>`; toast(msg); };
-  // base64 inflates by ~33%, and the server body cap is 60 MB
-  if (f.size > 40 * 1024 * 1024) return fail(`${f.name} is ${(f.size / 1048576).toFixed(1)} MB — too large to upload (limit ~40 MB). Split the export into smaller files.`);
-  out.innerHTML = '<div class="card" style="padding:16px"><div class="loading">Reading ' + esc(f.name) + '…</div></div>';
-  // NOTE: reading the file must live inside the try — it used to sit outside, so a failure here
+  if (f.size > 60 * 1024 * 1024) return fail(`${f.name} is ${(f.size / 1048576).toFixed(1)} MB — over the 60 MB upload limit. Split the export into smaller files.`);
+  out.innerHTML = '<div class="card" style="padding:16px"><div class="loading">' + (commit ? 'Importing ' : 'Analysing ') + esc(f.name) + '…</div></div>';
+  // NOTE: reading + posting must live inside the try — this used to sit outside, so a failure
   // left the spinner up forever with no error shown.
   try {
     const opts = collect('#fiForm');
-    const payload = { commit, status: opts.status, structure_kind: opts.structure_kind };
-    if (/\.(kmz|zip|shp|dbf)$/i.test(f.name)) {
-      // Binary: FileReader gives us base64 directly and handles multi-MB files, unlike the
-      // byte-at-a-time String.fromCharCode loop this used to do (slow enough to look like a hang).
-      const dataUrl = await fileToDataUrl(f);
-      const comma = dataUrl.indexOf(',');
-      if (comma < 0) throw new Error('Could not read that file');
-      payload.data_b64 = dataUrl.slice(comma + 1);
-    } else {
-      payload.data = await f.text();
-    }
-    out.innerHTML = '<div class="card" style="padding:16px"><div class="loading">' + (commit ? 'Importing…' : 'Analysing…') + '</div></div>';
-    const r = await api('/fiber/import', { method: 'POST', body: JSON.stringify(payload) });
+    // Send the file as raw bytes rather than base64-inside-JSON: base64 inflates ~33%, which
+    // pushed real KMZ exports past the proxy's body limit for no reason.
+    const qs = `?commit=${commit ? 1 : 0}&status=${encodeURIComponent(opts.status || '')}&structure_kind=${encodeURIComponent(opts.structure_kind || '')}`;
+    const resp = await fetch('/api/fiber/import' + qs, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: f });
+    const text = await resp.text();
+    let r; try { r = JSON.parse(text); } catch { throw new Error(resp.status === 413 ? 'The server rejected the upload as too large — raise client_max_body_size in nginx.' : `Server returned ${resp.status}`); }
+    if (!resp.ok) throw new Error(r.error || `Server returned ${resp.status}`);
     const samp = r.samples ? `<div class="box" style="margin-top:10px"><b class="small">Sample</b>
       ${(r.samples.routes || []).map(x => `<div class="small sec-muted">${esc(x.name)} — ${x.points} points, ${(x.length_m / 1000).toFixed(2)} km</div>`).join('')}
       ${(r.samples.structures || []).map(x => `<div class="small sec-muted">📍 ${esc(x.name)}</div>`).join('')}</div>` : '';

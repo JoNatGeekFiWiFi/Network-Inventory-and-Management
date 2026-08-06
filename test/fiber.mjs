@@ -385,4 +385,32 @@ ok((await call('/api/fiber/import', { method: 'POST', body: { data: 'just some p
   ok(rr.json.format === 'kmz' && rr.json.routes_created === 2 && rr.json.structures_created === 1, 'realistic KMZ imports 2 routes + 1 structure');
 }
 
+
+// ---- raw binary upload path (what the browser now uses; avoids base64 inflation) ----
+{
+  cookie = ''; await call('/api/login', { body: { email: 'admin@geekitek.test', password: 'admin123' } });
+  const kmlText = `<kml><Placemark><name>RAW Route</name><LineString><coordinates>-113.5,34.5 -113.6,34.6</coordinates></LineString></Placemark></kml>`;
+  const kmz = makeZip([{ name: 'doc.kml', data: Buffer.from(kmlText) }]);
+  const post = async (body, qs, ct) => {
+    const r = await fetch(B + '/api/fiber/import' + qs, { method: 'POST', headers: { cookie, 'Content-Type': ct || 'application/octet-stream' }, body });
+    const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch {}
+    return { status: r.status, json: j };
+  };
+  let rr = await post(kmz, '?commit=0');
+  ok(rr.status === 200 && rr.json.format === 'kmz' && rr.json.routes_found === 1, 'raw KMZ upload previewed (no base64)');
+  rr = await post(kmz, '?commit=1&status=planned');
+  ok(rr.json.routes_created === 1, 'raw KMZ upload committed');
+  // status from the query string is honoured
+  const made = (await call('/api/fiber/routes')).json.find(x => x.name === 'RAW Route');
+  ok(made && made.status === 'planned', 'status query param applied on raw upload');
+  // raw text formats work on the same endpoint
+  rr = await post(Buffer.from('<gpx><wpt lat="34.1" lon="-113.1"><name>RAW WPT</name></wpt></gpx>'), '?commit=1');
+  ok(rr.json.format === 'gpx' && rr.json.structures_created === 1, 'raw GPX upload works on the same endpoint');
+  // empty body rejected cleanly
+  ok((await post(Buffer.alloc(0), '?commit=0')).status === 400, 'empty raw upload rejected');
+  // JSON path still supported (back-compat)
+  rr = await call('/api/fiber/import', { method: 'POST', body: { data: kmlText, commit: false } });
+  ok(rr.json.format === 'kml' && rr.json.routes_found === 1, 'JSON {data} path still works');
+}
+
 console.log('\nRESULT:', pass, 'passed,', fail, 'failed'); process.exit(fail ? 1 : 0);
