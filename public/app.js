@@ -2575,7 +2575,7 @@ async function renderCable(id) {
       <span title="${esc(s.color)}" style="width:14px;height:14px;border-radius:3px;background:${sw};border:1px solid rgba(128,128,128,.5);flex:none"></span>
       <span class="small sec-muted" style="width:96px">${esc(s.color)}<span class="muted"> · T${s.tube}</span></span>
       <span style="width:90px;color:${STRAND_STATUS_COL[s.status]};font-size:12px">${esc(s.status)}</span>
-      <div style="flex:1;min-width:0;font-size:13px">${s.label ? esc(s.label) : '<span class="muted">—</span>'}${sp ? ` <span class="small sec-muted">· spliced${sp.structure_name ? ' at ' + esc(sp.structure_name) : ''}</span>` : ''}</div>
+      <div style="flex:1;min-width:0;font-size:13px">${s.assigned_type === 'circuit' && s.assigned_id ? `<a class="iplink" href="#/circuit/${s.assigned_id}">${esc(s.label || 'circuit')}</a>` : (s.label ? esc(s.label) : '<span class="muted">—</span>')}${sp ? ` <span class="small sec-muted">· spliced${sp.structure_name ? ' at ' + esc(sp.structure_name) : ''}</span>` : ''}</div>
       <button class="btn sm" onclick="traceStrand(${s.id})">Trace</button>
       ${isPriv() ? `<button class="btn sm" onclick="editStrand(${s.id})"><i class="ti ti-edit"></i> Edit</button>` : ''}</div>`;
   }).join('');
@@ -2771,8 +2771,14 @@ async function renderCircuit(id) {
       ${row('Bandwidth', c.bandwidth ? esc(c.bandwidth) : '')}
       ${row('Monthly cost', c.monthly_cost != null ? '$' + Number(c.monthly_cost).toLocaleString(undefined, { minimumFractionDigits: 2 }) : '')}
       ${row('Install date', c.install_date ? esc(c.install_date) : '')}
-      ${row('Notes', c.notes ? esc(c.notes) : '')}
-    </div>`;
+      ${row('Notes', c.notes ? `<span style="white-space:pre-wrap">${esc(c.notes)}</span>` : '')}
+    </div>
+    ${(c.strands || []).length ? `<div class="card"><div class="hd"><h2><i class="ti ti-line"></i> Fibre strands carrying this circuit · ${c.strands.length}</h2></div>
+      ${c.strands.map(s => `<div class="row rowlink" onclick="location.hash='#/fiber/cable/${s.cable_id}'">
+        <span style="width:14px;height:14px;border-radius:3px;background:${TIA_HEX[s.color] || '#888'};border:1px solid rgba(128,128,128,.5);flex:none"></span>
+        <div style="flex:1;min-width:0"><div>${esc(s.cable_name)} · strand ${s.position}</div>
+          <div class="small sec-muted">${esc(s.color)} · tube ${s.tube} · ${esc(s.status)}</div></div>
+        <i class="ti ti-chevron-right muted"></i></div>`).join('')}</div>` : ''}`;
 }
 function circRefOptions(type, sel) {
   const o = window._circOpts || { sites: [], pops: [], carriers: [], accounts: [] };

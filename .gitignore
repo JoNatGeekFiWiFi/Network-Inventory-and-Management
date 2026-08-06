@@ -20,3 +20,7 @@ push-to-github.sh
 
 # FUSE artifacts leaked by the sandbox mount
 .fuse_hidden*
+
+# IQGeo/myWorld exports — carrier + customer data, never commit these
+myw_report_*.json
+*.myw.json

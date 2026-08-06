@@ -181,6 +181,8 @@ export function migrate() {
     created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
   db.exec('CREATE INDEX IF NOT EXISTS idx_circuits_a ON circuits(a_type, a_ref_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_circuits_z ON circuits(z_type, z_ref_id)');
+  ensure('circuits', 'ext_ref', 'TEXT');   // e.g. IQGeo CID, so re-import updates in place
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_circuits_ext ON circuits(ext_ref) WHERE ext_ref IS NOT NULL');
   // Multiple sub-accounts per account (each with its own PIN, status, monthly bill, notes)
   db.exec(`CREATE TABLE IF NOT EXISTS account_subaccounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL,
@@ -233,6 +235,13 @@ export function migrate() {
     created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
   db.exec('CREATE INDEX IF NOT EXISTS idx_fiber_splices_a ON fiber_splices(a_strand_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_fiber_splices_z ON fiber_splices(z_strand_id)');
+  // External system reference (e.g. IQGeo/myWorld feature id) so re-importing updates in place
+  ensure('fiber_routes', 'ext_ref', 'TEXT');
+  ensure('fiber_structures', 'ext_ref', 'TEXT');
+  ensure('fiber_cables', 'ext_ref', 'TEXT');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_fiber_routes_ext ON fiber_routes(ext_ref) WHERE ext_ref IS NOT NULL');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_fiber_struct_ext ON fiber_structures(ext_ref) WHERE ext_ref IS NOT NULL');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_fiber_cables_ext ON fiber_cables(ext_ref) WHERE ext_ref IS NOT NULL');
   // Consolidation: POP upstream feeds (pop_circuits) fold into the single `circuits` inventory.
   // A-end = the upstream source (pop|account), Z-end = the POP being fed. Runs once.
   ensure('connections', 'circuit_ref_id', 'INTEGER'); // optional link from a site WAN uplink to a circuit record

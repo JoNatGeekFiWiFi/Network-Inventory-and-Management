@@ -953,7 +953,7 @@ app.get('/api/pops/:id', (req, res) => {
 // ---- circuits (standalone A<->Z inventory; endpoints are site | pop | carrier) ----
 // 'carrier' = upstream_providers lookup (brokered transit). 'account' = a real carrier/distributor
 // account you hold (Cox etc, with account numbers + sub-accounts) — POP upstream feeds use these.
-const CIRCUIT_ENDPOINT_TYPES = ['site', 'pop', 'carrier', 'account'];
+const CIRCUIT_ENDPOINT_TYPES = ['site', 'pop', 'carrier', 'account', 'structure'];
 const CIRCUIT_STATUS = ['Up', 'Standby', 'Down', 'Planned', 'Decommissioned'];
 function endpointName(type, refId) {
   if (!refId) return null;
@@ -961,10 +961,11 @@ function endpointName(type, refId) {
   if (type === 'pop') { const r = db.prepare('SELECT name FROM pops WHERE id=?').get(refId); return r ? r.name : null; }
   if (type === 'carrier') { const r = db.prepare('SELECT name FROM upstream_providers WHERE id=?').get(refId); return r ? r.name : null; }
   if (type === 'account') { const r = db.prepare('SELECT name FROM accounts WHERE id=?').get(refId); return r ? r.name : null; }
+  if (type === 'structure') { const r = db.prepare('SELECT name FROM fiber_structures WHERE id=?').get(refId); return r ? r.name : null; }
   return null;
 }
-const endpointHref = (type, refId) => (type === 'site' ? '#/site/' + refId : type === 'pop' ? '#/pop/' + refId : type === 'account' ? '#/account/' + refId : null);
-const INTERNAL_ENDPOINTS = ['site', 'pop']; // at least one end must be ours
+const endpointHref = (type, refId) => (type === 'site' ? '#/site/' + refId : type === 'pop' ? '#/pop/' + refId : type === 'account' ? '#/account/' + refId : type === 'structure' ? '#/fiber/structure/' + refId : null);
+const INTERNAL_ENDPOINTS = ['site', 'pop', 'structure']; // at least one end must be our own plant
 function decorateCircuit(c) {
   return {
     ...c,
@@ -999,7 +1000,13 @@ app.get('/api/circuits', (req, res) => {
 app.get('/api/circuits/:id', (req, res) => {
   const c = db.prepare('SELECT * FROM circuits WHERE id=?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'not found' });
-  res.json(decorateCircuit(c));
+  const out = decorateCircuit(c);
+  // fibre strands carrying this circuit (set by the IQGeo importer or by hand)
+  out.strands = db.prepare(`SELECT s.id, s.position, s.color, s.tube, s.status, s.label,
+      cb.id AS cable_id, cb.name AS cable_name, cb.strand_count
+    FROM fiber_strands s JOIN fiber_cables cb ON cb.id=s.cable_id
+    WHERE s.assigned_type='circuit' AND s.assigned_id=? ORDER BY cb.name, s.position`).all(c.id);
+  res.json(out);
 });
 function circuitFromBody(b) {
   const a = validEndpoint(b.a_type, Number(b.a_ref_id) || null); if (a.error) return { error: 'A-end: ' + a.error };

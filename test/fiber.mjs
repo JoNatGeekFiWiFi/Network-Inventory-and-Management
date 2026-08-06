@@ -413,4 +413,117 @@ ok((await call('/api/fiber/import', { method: 'POST', body: { data: 'just some p
   ok(rr.json.format === 'kml' && rr.json.routes_found === 1, 'JSON {data} path still works');
 }
 
+
+// ---- IQGeo / myWorld export mapping ----
+// Synthetic fixture mirroring the real myw_report shape (never commit real carrier exports).
+import { looksLikeIqgeo, parseIqgeo, parsePins } from '../lib/iqgeo.js';
+{
+  ok(parsePins('fiber_splice_tray::in:1:24').from === 1 && parsePins('fiber_splice_tray::in:1:24').to === 24, 'pin parse: termination_info → 1-24');
+  ok(parsePins('out:49:72').from === 49, 'pin parse: a_location_pins → 49-72');
+  ok(parsePins('nonsense') === null && parsePins(null) === null, 'pin parse: refuses to guess on junk');
+
+  const span = { type: 'FeatureCollection', features: [{
+    ID: '143544', myw_title: 'Fiber Span: F21T-0119142', myw_short_description: 'Span',
+    geometry: { type: 'LineString', coordinates: [[-80.97, 41.24], [-80.98, 41.25], [-80.99, 41.26]] },
+    properties: {
+      name: 'F21T-0119142', user_count: 24, user_status: 'Active', user_type: 'Span',
+      a_location_pins: 'out:49:72', termination_info: 'fiber_splice_tray::in:1:24',
+      in_feature: 'card/463148', out_feature: 'fiber_splice_tray/102176',
+      user_a_location: 'OH-LRD / 1ST FLOOR', user_z_location: 'Terminal Enclosure: 292639 VZW / 1-24',
+      user_cid: 'FBDK/1441205//ZFS', user_account: 'ACME WIRELESS', user_group: 'Lordstown_OH_F21L_L001',
+      user_product_group: 'FTT - Dark Fiber', user_actual_fiber_dist_km_sfdc: 14.808, user_pni_id: 604812291
+    } }] };
+  ok(looksLikeIqgeo(span), 'IQGeo export detected by user_*/myw_ fields');
+  ok(!looksLikeIqgeo({ type: 'FeatureCollection', features: [{ properties: { name: 'x' }, geometry: { type: 'Point', coordinates: [0, 0] } }] }), 'plain GeoJSON not mistaken for IQGeo');
+  const p = parseIqgeo(span);
+  ok(p.cables.length === 1 && p.cables[0].strand_count === 24, 'span → cable with user_count as strand count');
+  ok(p.cables[0].assign.from === 1 && p.cables[0].assign.to === 24, 'termination_info drives the assigned strand range');
+  ok(p.cables[0].assign_label === 'FBDK/1441205//ZFS', 'circuit ID becomes the strand label');
+  ok(p.routes.length === 1 && p.routes[0].length_m === 14808, "IQGeo's own fibre distance used, not computed geometry");
+  ok(p.structures.length === 2 && p.structures.some(s => s.kind === 'splice_case'), 'span endpoints become structures (splice_case from ref prefix)');
+  ok(/Account: ACME WIRELESS/.test(p.cables[0].notes) && /Termination:/.test(p.cables[0].notes), 'attributes preserved in cable notes');
+
+  const routes = { type: 'FeatureCollection', features: [
+    { ID: '834882', myw_title: 'Aerial Route: EXAMPLE-1719', myw_short_description: 'Route (Overhead)',
+      geometry: { type: 'LineString', coordinates: [[-112.1, 33.4], [-112.11, 33.41]] },
+      properties: { in_structure: 'pole/1108027', out_structure: 'pole/1204272', user_calc_length: 297.8,
+        user_class: 'Metro', user_construction_status: 'In Service', user_name: 'EXAMPLE-1719', user_owner: 'ZAYO', user_opgw: 'No' } },
+    { ID: '834883', myw_title: 'Underground Route: UG-1', myw_short_description: 'Route (Underground)',
+      geometry: { type: 'LineString', coordinates: [[-112.2, 33.5], [-112.21, 33.51]] },
+      properties: { in_structure: 'manhole/55', out_structure: 'handhole/56', user_calc_length: 120,
+        user_route_type: 'Bore', user_construction_status: 'Abandoned', user_owner: 'ZAYO' } },
+    { ID: '834884', myw_title: 'Planned', myw_short_description: 'Route',
+      geometry: { type: 'LineString', coordinates: [[-112.3, 33.6], [-112.31, 33.61]] },
+      properties: { in_structure: 'building/9', out_structure: 'cabinet/10', user_construction_status: 'Proposed' } } ] };
+  const q = parseIqgeo(routes);
+  ok(q.routes.length === 3 && q.cables.length === 0, 'route features → routes, no cables');
+  ok(q.routes[0].placement === 'aerial' && q.routes[1].placement === 'buried', 'placement from short description / route type');
+  ok(q.routes[0].status === 'as_built' && q.routes[1].status === 'retired' && q.routes[2].status === 'planned', 'construction status mapped to lifecycle');
+  ok(q.routes[0].length_m === 298 && q.routes[0].owner === 'ZAYO', "myWorld calc_length + owner carried over");
+  const kinds = q.structures.map(s => s.kind).sort().join(',');
+  ok(q.structures.length === 6 && kinds === 'building,cabinet,handhole,pole,pole,vault', 'structures synthesised from endpoints with kind from ref prefix (' + kinds + ')');
+
+  // end to end through the API, including idempotent re-import
+  cookie = ''; await call('/api/login', { body: { email: 'admin@geekitek.test', password: 'admin123' } });
+  let rr = await call('/api/fiber/import', { method: 'POST', body: { data: JSON.stringify(span), commit: false } });
+  ok(rr.json.format === 'iqgeo' && rr.json.cables_found === 1, 'API detects iqgeo format on preview');
+  rr = await call('/api/fiber/import', { method: 'POST', body: { data: JSON.stringify(span), commit: true } });
+  ok(rr.json.cables_created === 1 && rr.json.strands_created === 24 && rr.json.strands_assigned === 24, 'commit creates cable + 24 strands, 24 assigned');
+  rr = await call('/api/fiber/import', { method: 'POST', body: { data: JSON.stringify(span), commit: true } });
+  ok(rr.json.cables_created === 0 && rr.json.skipped > 0, 'ext_ref makes IQGeo re-import idempotent');
+  const cab = (await call('/api/fiber/cables')).json.find(c => c.name === 'F21T-0119142');
+  ok(cab && cab.strands_used === 24 && cab.strand_count === 24, 'imported cable shows 24/24 strands used');
+}
+
+
+// ---- IQGeo spans → real Circuit records, linked to the strands carrying them ----
+{
+  cookie = ''; await call('/api/login', { body: { email: 'admin@geekitek.test', password: 'admin123' } });
+  const span2 = { type: 'FeatureCollection', features: [{
+    ID: '900001', myw_title: 'Fiber Span: TEST-CKT-1', myw_short_description: 'Span',
+    geometry: { type: 'LineString', coordinates: [[-83.1, 40.1], [-83.2, 40.2]] },
+    properties: {
+      name: 'TEST-CKT-1', user_count: 12, user_status: 'Active', user_type: 'Span',
+      termination_info: 'fiber_splice_tray::in:1:12',
+      in_feature: 'manhole/9001', out_feature: 'terminal_enclosure/9002',
+      user_cid: 'TEST/999//ZFS', user_account: 'EXAMPLE TELECOM', user_group: 'Ring_Test_001',
+      user_product_group: 'FTT - Dark Fiber', user_insert_date: '2025-06-15',
+      user_service_component_sfdc: 'SC-1', user_so_order: '777'
+    } }] };
+  let rr = await call('/api/fiber/import', { method: 'POST', body: { data: JSON.stringify(span2), commit: false } });
+  ok(rr.json.circuits_found === 1, 'span with a CID is reported as a circuit on preview');
+  rr = await call('/api/fiber/import', { method: 'POST', body: { data: JSON.stringify(span2), commit: true } });
+  ok(rr.json.circuits_created === 1 && rr.json.cables_created === 1, 'import creates the circuit and the cable');
+
+  const ck = (await call('/api/circuits')).json.find(x => x.circuit_id === 'TEST/999//ZFS');
+  ok(!!ck, 'circuit created with the IQGeo CID as its circuit_id');
+  ok(ck.label === 'Ring_Test_001' && ck.ctype === 'FTT - Dark Fiber' && ck.status === 'Up', 'ring name → label, product group → type, Active → Up');
+  ok(ck.a_type === 'structure' && ck.z_type === 'structure' && ck.a_name && ck.z_name, 'circuit endpoints are the span structures');
+  ok(ck.a_href === '#/fiber/structure/' + ck.a_ref_id, 'structure endpoints link to the fiber structure page');
+
+  const full = (await call('/api/circuits/' + ck.id)).json;
+  ok(full.strands.length === 12, 'circuit detail lists the 12 strands carrying it');
+  ok(full.strands[0].cable_name === 'TEST-CKT-1' && full.strands[0].color === 'Blue', 'strand list shows cable + TIA colour');
+  ok(/EXAMPLE TELECOM/.test(full.notes) && /Service order: 777/.test(full.notes), 'account + service order carried into circuit notes');
+  ok(full.install_date === '2025-06-15', 'install date from user_insert_date');
+
+  // reverse direction: the strand knows its circuit
+  const cab = (await call('/api/fiber/cables')).json.find(c => c.name === 'TEST-CKT-1');
+  const cf = (await call('/api/fiber/cables/' + cab.id)).json;
+  ok(cf.strands[0].assigned_type === 'circuit' && cf.strands[0].assigned_id === ck.id, 'strand points back at the circuit');
+  ok(cf.strands.every(s => s.status === 'assigned'), 'all 12 strands marked assigned');
+
+  // idempotent
+  rr = await call('/api/fiber/import', { method: 'POST', body: { data: JSON.stringify(span2), commit: true } });
+  ok(rr.json.circuits_created === 0, 're-import does not duplicate the circuit');
+  ok((await call('/api/circuits')).json.filter(x => x.circuit_id === 'TEST/999//ZFS').length === 1, 'still exactly one circuit for that CID');
+
+  // a span with no CID yields no circuit, but still a cable
+  const noCid = JSON.parse(JSON.stringify(span2));
+  noCid.features[0].ID = '900002'; noCid.features[0].properties.name = 'NO-CID-SPAN';
+  delete noCid.features[0].properties.user_cid;
+  rr = await call('/api/fiber/import', { method: 'POST', body: { data: JSON.stringify(noCid), commit: true } });
+  ok(rr.json.cables_created === 1 && rr.json.circuits_created === 0, 'span without a CID makes a cable but no circuit');
+}
+
 console.log('\nRESULT:', pass, 'passed,', fail, 'failed'); process.exit(fail ? 1 : 0);

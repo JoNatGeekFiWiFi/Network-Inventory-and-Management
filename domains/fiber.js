@@ -10,6 +10,7 @@ import express from 'express';
 import { r2 } from '../lib/core.js';
 import { extractKmlFromKmz, looksLikeZip, listZipEntries, readZipEntry } from '../lib/unzip.js';
 import { shapefileToFeatures } from '../lib/shapefile.js';
+import { looksLikeIqgeo, parseIqgeo } from '../lib/iqgeo.js';
 
 // TIA-598-C fibre colour sequence. Repeats every 12; beyond the first 12 units the standard
 // adds a black stripe (black itself gets a yellow stripe).
@@ -160,6 +161,7 @@ export function parseCsv(text) {
 }
 
 const ROUTE_STATUS = ['planned', 'permitted', 'under_construction', 'as_built', 'retired'];
+const CIRCUIT_STATUSES = ['Up', 'Standby', 'Down', 'Planned', 'Decommissioned'];
 const STRAND_STATUS = ['free', 'reserved', 'assigned', 'dark', 'damaged', 'abandoned'];
 const STRUCTURE_KINDS = ['handhole', 'vault', 'pole', 'cabinet', 'pedestal', 'building', 'splice_case'];
 const SPLICE_TYPES = ['fusion', 'mechanical', 'splitter', 'termination'];
@@ -489,33 +491,93 @@ export default function registerFiber(app, ctx) {
       else if (/<kml|<Placemark/i.test(head)) { format = 'kml'; parsed = parseKml(raw); }
       else if (/^\s*[{[]/.test(head)) {
         let j; try { j = JSON.parse(raw); } catch (e) { return res.status(400).json({ error: 'Not valid GeoJSON: ' + e.message }); }
-        format = 'geojson'; parsed = parseGeoJson(j);
+        // A myWorld/IQGeo export is GeoJSON, but its user_* attributes carry cable counts,
+        // strand ranges and endpoint structures that a generic reader would discard.
+        if (looksLikeIqgeo(j)) { format = 'iqgeo'; parsed = parseIqgeo(j); }
+        else { format = 'geojson'; parsed = parseGeoJson(j); }
       } else if (/[,;]/.test(head.split(/\r?\n/)[0] || '')) { format = 'csv'; parsed = parseCsv(raw); }
       else return res.status(400).json({ error: 'Unrecognised file. Supported: GeoJSON, KML, KMZ, GPX, CSV, Shapefile (.shp or zipped).' });
     }
     if (!parsed.routes.length && !parsed.structures.length) return res.status(400).json({ error: `No routes or points found in that ${format} file` });
     const status = ROUTE_STATUS.includes(b.status) ? b.status : 'as_built';
-    const result = { format, routes_found: parsed.routes.length, structures_found: parsed.structures.length, routes_created: 0, structures_created: 0, skipped: 0, total_length_m: 0 };
+    const cablesIn = parsed.cables || [];
+    const result = { format, routes_found: parsed.routes.length, structures_found: parsed.structures.length, cables_found: cablesIn.length, circuits_found: (parsed.circuits || []).length, routes_created: 0, structures_created: 0, cables_created: 0, circuits_created: 0, circuits_skipped: 0, strands_created: 0, strands_assigned: 0, skipped: 0, total_length_m: 0 };
     if (!b.commit) { // dry run so the operator can look before importing
       result.total_length_m = parsed.routes.reduce((n, r) => n + lineLengthM(r.coordinates), 0);
-      result.samples = { routes: parsed.routes.slice(0, 5).map(r => ({ name: r.name, points: r.coordinates.length, length_m: lineLengthM(r.coordinates) })), structures: parsed.structures.slice(0, 5).map(s => ({ name: s.name })) };
+      result.samples = {
+        routes: parsed.routes.slice(0, 5).map(r => ({ name: r.name, points: r.coordinates.length, length_m: r.length_m != null ? r.length_m : lineLengthM(r.coordinates) })),
+        structures: parsed.structures.slice(0, 5).map(s => ({ name: s.name, kind: s.kind })),
+        cables: cablesIn.slice(0, 5).map(c => ({ name: c.name, strand_count: c.strand_count, assign: c.assign ? `${c.assign.from}-${c.assign.to}` : null, label: c.assign_label }))
+      };
+      result.strands_created = cablesIn.reduce((n, c) => n + (c.strand_count || 0), 0);
       return res.json({ ok: true, committed: false, ...result });
     }
-    const insR = db.prepare('INSERT INTO fiber_routes (name,status,placement,geom_json,length_m,notes) VALUES (?,?,?,?,?,?)');
+    // ext_ref (source system id) makes re-import idempotent; fall back to name for formats
+    // that carry no stable identifier.
+    const routeIdByRef = new Map(), structIdByRef = new Map();
+    const insR = db.prepare('INSERT INTO fiber_routes (name,status,placement,owner,geom_json,length_m,notes,ext_ref) VALUES (?,?,?,?,?,?,?,?)');
     for (const r of parsed.routes) {
-      if (db.prepare('SELECT id FROM fiber_routes WHERE name=?').get(r.name)) { result.skipped++; continue; }
-      const len = lineLengthM(r.coordinates);
-      insR.run(r.name.slice(0, 160), status, N(b.placement) || null, JSON.stringify({ type: 'LineString', coordinates: r.coordinates }), len, r.notes);
+      const existing = r.ext_ref
+        ? db.prepare('SELECT id FROM fiber_routes WHERE ext_ref=?').get(r.ext_ref)
+        : db.prepare('SELECT id FROM fiber_routes WHERE name=?').get(r.name);
+      if (existing) { if (r.ext_ref) routeIdByRef.set(r.ext_ref, existing.id); result.skipped++; continue; }
+      const len = r.length_m != null ? r.length_m : lineLengthM(r.coordinates);
+      const info = insR.run(String(r.name).slice(0, 160), ROUTE_STATUS.includes(r.status) ? r.status : status,
+        r.placement || N(b.placement) || null, r.owner || null,
+        JSON.stringify({ type: 'LineString', coordinates: r.coordinates }), len, r.notes, r.ext_ref || null);
+      if (r.ext_ref) routeIdByRef.set(r.ext_ref, info.lastInsertRowid);
       result.routes_created++; result.total_length_m += len;
     }
-    const insS = db.prepare('INSERT INTO fiber_structures (name,kind,lat,lng,status,notes) VALUES (?,?,?,?,?,?)');
+    const insS = db.prepare('INSERT INTO fiber_structures (name,kind,lat,lng,status,notes,ext_ref) VALUES (?,?,?,?,?,?,?)');
     for (const s of parsed.structures) {
-      if (db.prepare('SELECT id FROM fiber_structures WHERE name=? AND lat=? AND lng=?').get(s.name, s.lat, s.lng)) { result.skipped++; continue; }
+      const existing = s.ext_ref
+        ? db.prepare('SELECT id FROM fiber_structures WHERE ext_ref=?').get(s.ext_ref)
+        : db.prepare('SELECT id FROM fiber_structures WHERE name=? AND lat=? AND lng=?').get(s.name, s.lat, s.lng);
+      if (existing) { if (s.ext_ref) structIdByRef.set(s.ext_ref, existing.id); result.skipped++; continue; }
       const kind = STRUCTURE_KINDS.includes(s.kind) ? s.kind : (STRUCTURE_KINDS.includes(b.structure_kind) ? b.structure_kind : 'handhole');
-      insS.run(s.name.slice(0, 160), kind, s.lat, s.lng, status, s.notes);
+      const info = insS.run(String(s.name).slice(0, 160), kind, s.lat, s.lng, status, s.notes, s.ext_ref || null);
+      if (s.ext_ref) structIdByRef.set(s.ext_ref, info.lastInsertRowid);
       result.structures_created++;
     }
-    audit(req, 'import', 'fiber', `${result.routes_created} route(s), ${result.structures_created} structure(s) from ${result.format}`);
+    // Circuits: an IQGeo span carrying a CID is a real circuit. Create it first so the strands
+    // below can point at it (assigned_type='circuit'), which is what makes "who is on this fibre"
+    // answerable from either direction.
+    const circuitIdByRef = new Map();
+    const insCk = db.prepare(`INSERT INTO circuits (label,a_type,a_ref_id,z_type,z_ref_id,circuit_id,ctype,status,notes,install_date,ext_ref)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+    for (const ck of (parsed.circuits || [])) {
+      const found = db.prepare('SELECT id FROM circuits WHERE ext_ref=? OR (circuit_id IS NOT NULL AND circuit_id=?)').get(ck.ext_ref, ck.circuit_id);
+      if (found) { circuitIdByRef.set(ck.ext_ref, found.id); result.skipped++; continue; }
+      const aId = structIdByRef.get(ck.a_structure_ref) || null;
+      const zId = structIdByRef.get(ck.z_structure_ref) || null;
+      // circuits need two endpoints; skip rather than invent one if the structures didn't import
+      if (!aId || !zId) { result.circuits_skipped++; continue; }
+      const info = insCk.run(String(ck.label || ck.circuit_id).slice(0, 160), 'structure', aId, 'structure', zId,
+        ck.circuit_id, ck.ctype || null, CIRCUIT_STATUSES.includes(ck.status) ? ck.status : 'Up',
+        ck.notes || null, ck.install_date || null, ck.ext_ref);
+      circuitIdByRef.set(ck.ext_ref, info.lastInsertRowid);
+      result.circuits_created++;
+    }
+    // Cables (IQGeo spans): create with the real strand count, then mark the lit range assigned.
+    const insC = db.prepare('INSERT INTO fiber_cables (name,route_id,strand_count,cable_type,a_structure_id,z_structure_id,status,notes,ext_ref) VALUES (?,?,?,?,?,?,?,?,?)');
+    for (const c of cablesIn) {
+      if (c.ext_ref && db.prepare('SELECT id FROM fiber_cables WHERE ext_ref=?').get(c.ext_ref)) { result.skipped++; continue; }
+      const count = Math.min(Math.max(parseInt(c.strand_count, 10) || 12, 1), 864);
+      const info = insC.run(String(c.name).slice(0, 160),
+        c.route_ext_ref ? (routeIdByRef.get(c.route_ext_ref) || null) : null, count, c.cable_type || null,
+        structIdByRef.get(c.a_structure_ref) || null, structIdByRef.get(c.z_structure_ref) || null,
+        ROUTE_STATUS.includes(c.status) ? c.status : status, c.notes || null, c.ext_ref || null);
+      const cableId = info.lastInsertRowid;
+      generateStrands(cableId, count);
+      result.cables_created++; result.strands_created += count;
+      if (c.assign && c.assign.from >= 1 && c.assign.to <= count) {
+        const ckId = c.circuit_ext_ref ? (circuitIdByRef.get(c.circuit_ext_ref) || null) : null;
+        const n = db.prepare("UPDATE fiber_strands SET status='assigned', label=?, assigned_type=?, assigned_id=? WHERE cable_id=? AND position BETWEEN ? AND ?")
+          .run(c.assign_label || null, ckId ? 'circuit' : null, ckId, cableId, c.assign.from, c.assign.to).changes;
+        result.strands_assigned += n;
+      }
+    }
+    audit(req, 'import', 'fiber', `${result.routes_created} route(s), ${result.structures_created} structure(s), ${result.cables_created} cable(s), ${result.circuits_created} circuit(s) from ${result.format}`);
     res.json({ ok: true, committed: true, ...result });
   });
 
