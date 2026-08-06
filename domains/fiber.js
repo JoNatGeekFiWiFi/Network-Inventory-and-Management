@@ -11,6 +11,7 @@ import { r2 } from '../lib/core.js';
 import { extractKmlFromKmz, looksLikeZip, listZipEntries, readZipEntry } from '../lib/unzip.js';
 import { shapefileToFeatures } from '../lib/shapefile.js';
 import { looksLikeIqgeo, parseIqgeo } from '../lib/iqgeo.js';
+import { bboxOf, simplifyPath, clipPathToBox, robustExtent } from '../lib/geo.js';
 
 // TIA-598-C fibre colour sequence. Repeats every 12; beyond the first 12 units the standard
 // adds a black stripe (black itself gets a yellow stripe).
@@ -199,9 +200,11 @@ export default function registerFiber(app, ctx) {
     const cs = lineCoords(b.geometry);
     if (!cs) return res.status(400).json({ error: 'Draw a route line with at least two points' });
     const geom = JSON.stringify({ type: 'LineString', coordinates: cs });
-    const info = db.prepare('INSERT INTO fiber_routes (name,status,placement,owner,length_m,geom_json,notes) VALUES (?,?,?,?,?,?,?)')
+    const bb = bboxOf(cs);
+    const info = db.prepare('INSERT INTO fiber_routes (name,status,placement,owner,length_m,geom_json,notes,min_lat,min_lng,max_lat,max_lng) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
       .run(String(b.name).slice(0, 160), ROUTE_STATUS.includes(b.status) ? b.status : 'as_built', N(b.placement) || null,
-        N(b.owner) || null, lineLengthM(cs), geom, N(b.notes) || null);
+        N(b.owner) || null, lineLengthM(cs), geom, N(b.notes) || null,
+        bb && bb.minLat, bb && bb.minLng, bb && bb.maxLat, bb && bb.maxLng);
     audit(req, 'create', 'fiber_route#' + info.lastInsertRowid, b.name);
     res.json({ id: info.lastInsertRowid, length_m: lineLengthM(cs) });
   });
@@ -210,14 +213,17 @@ export default function registerFiber(app, ctx) {
     if (!ex) return res.status(404).json({ error: 'not found' });
     const b = req.body || {};
     let geom = ex.geom_json, len = ex.length_m;
+    let bb = { minLat: ex.min_lat, minLng: ex.min_lng, maxLat: ex.max_lat, maxLng: ex.max_lng };
     if (b.geometry !== undefined) {
       const cs = lineCoords(b.geometry);
       if (!cs) return res.status(400).json({ error: 'Route needs at least two points' });
       geom = JSON.stringify({ type: 'LineString', coordinates: cs }); len = lineLengthM(cs);
+      bb = bboxOf(cs) || { minLat: null, minLng: null, maxLat: null, maxLng: null };
     }
-    db.prepare('UPDATE fiber_routes SET name=?, status=?, placement=?, owner=?, length_m=?, geom_json=?, notes=? WHERE id=?')
+    db.prepare('UPDATE fiber_routes SET name=?, status=?, placement=?, owner=?, length_m=?, geom_json=?, notes=?, min_lat=?, min_lng=?, max_lat=?, max_lng=? WHERE id=?')
       .run(N(b.name, ex.name), ROUTE_STATUS.includes(b.status) ? b.status : ex.status, N(b.placement, ex.placement),
-        N(b.owner, ex.owner), len, geom, N(b.notes, ex.notes), ex.id);
+        N(b.owner, ex.owner), len, geom, N(b.notes, ex.notes),
+        bb.minLat, bb.minLng, bb.maxLat, bb.maxLng, ex.id);
     audit(req, 'edit', 'fiber_route#' + ex.id, b.name || ex.name);
     res.json({ ok: true, length_m: len });
   });
@@ -429,17 +435,87 @@ export default function registerFiber(app, ctx) {
   });
 
   // ---- map feed: everything as one GeoJSON FeatureCollection ----
+  /**
+   * Plant as GeoJSON for the map.
+   *
+   * Unfiltered this returns everything, which after a statewide import is ~95 MB and 17 s — enough
+   * to hang the browser. So the map sends its viewport and zoom, and we return only what's visible,
+   * simplified to that zoom and capped. Called without params the behaviour is unchanged, which
+   * keeps small deployments and the existing tests working.
+   *   ?bbox=minLng,minLat,maxLng,maxLat   only plant intersecting this box
+   *   ?zoom=13                            geometry detail to match (higher = more detail)
+   *   ?limit=4000                         hard cap; `truncated` says whether it bit
+   */
+  /**
+   * Extent of the plant, so the map can frame it without downloading any geometry.
+   * Trimmed to the bulk of the data: a handful of imported spans have corrupt paths that jump
+   * continents, and framing on the true min/max would open the map on half the globe.
+   */
+  app.get('/api/fiber/extent', (req, res) => {
+    const boxes = db.prepare('SELECT min_lat AS minLat, min_lng AS minLng, max_lat AS maxLat, max_lng AS maxLng FROM fiber_routes WHERE min_lat IS NOT NULL').all();
+    for (const s of db.prepare('SELECT lat, lng FROM fiber_structures WHERE lat IS NOT NULL AND lng IS NOT NULL').all())
+      boxes.push({ minLat: s.lat, minLng: s.lng, maxLat: s.lat, maxLng: s.lng });
+    const e = robustExtent(boxes);
+    if (!e) return res.json({ empty: true });
+    res.json({ empty: false, bbox: [e.minLat, e.minLng, e.maxLat, e.maxLng], outliers: e.outliers, total: e.total });
+  });
+
   app.get('/api/fiber/geojson', (req, res) => {
+    const bbox = String(req.query.bbox || '').split(',').map(Number);
+    const hasBox = bbox.length === 4 && bbox.every(Number.isFinite);
+    const zoom = Number(req.query.zoom);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 4000, 1), 20000);
+    // One screen pixel in degrees at this zoom — simplifying below that is invisible.
+    const tol = Number.isFinite(zoom) ? 360 / (256 * Math.pow(2, Math.min(zoom, 22))) : 0;
+
     const features = [];
-    for (const r of db.prepare('SELECT * FROM fiber_routes').all()) {
+    let truncated = false;
+
+    // Strand totals in one pass instead of a query per route (7,964 of them after the AZ import).
+    const cableAgg = new Map();
+    for (const c of db.prepare('SELECT route_id, COUNT(*) n, COALESCE(SUM(strand_count),0) s FROM fiber_cables WHERE route_id IS NOT NULL GROUP BY route_id').all())
+      cableAgg.set(c.route_id, c);
+
+    const routeSql = hasBox
+      ? `SELECT id,name,status,placement,length_m,geom_json FROM fiber_routes
+         WHERE min_lat IS NOT NULL AND min_lat <= ? AND max_lat >= ? AND min_lng <= ? AND max_lng >= ? LIMIT ?`
+      : 'SELECT id,name,status,placement,length_m,geom_json FROM fiber_routes LIMIT ?';
+    const routes = hasBox
+      ? db.prepare(routeSql).all(bbox[3], bbox[1], bbox[2], bbox[0], limit + 1)
+      : db.prepare(routeSql).all(limit + 1);
+    if (routes.length > limit) { routes.length = limit; truncated = true; }
+
+    // Pad the clip box by a screen-ish margin so lines still run off the edge when panning.
+    const padLng = hasBox ? (bbox[2] - bbox[0]) * 0.15 : 0, padLat = hasBox ? (bbox[3] - bbox[1]) * 0.15 : 0;
+    const clipBox = hasBox ? { minLng: bbox[0] - padLng, minLat: bbox[1] - padLat, maxLng: bbox[2] + padLng, maxLat: bbox[3] + padLat } : null;
+
+    for (const r of routes) {
       const g = safeJson(r.geom_json); if (!g) continue;
-      const cables = db.prepare('SELECT id,name,strand_count FROM fiber_cables WHERE route_id=?').all(r.id);
-      features.push({ type: 'Feature', geometry: g, properties: { kind: 'route', id: r.id, name: r.name, status: r.status, placement: r.placement, length_m: r.length_m, cables: cables.length, strand_total: cables.reduce((n, c) => n + c.strand_count, 0) } });
+      let geom = g;
+      if (g.type === 'LineString') {
+        // Clip first (drops the out-of-view bulk), then simplify what's left.
+        let parts = clipBox ? clipPathToBox(g.coordinates, clipBox) : [g.coordinates];
+        if (!parts.length) continue;
+        if (tol > 0) parts = parts.map(p => simplifyPath(p, tol));
+        geom = parts.length === 1
+          ? { type: 'LineString', coordinates: parts[0] }
+          : { type: 'MultiLineString', coordinates: parts };
+      }
+      const agg = cableAgg.get(r.id);
+      features.push({ type: 'Feature', geometry: geom, properties: { kind: 'route', id: r.id, name: r.name, status: r.status, placement: r.placement, length_m: r.length_m, cables: agg ? agg.n : 0, strand_total: agg ? agg.s : 0 } });
     }
-    for (const s of db.prepare('SELECT * FROM fiber_structures WHERE lat IS NOT NULL AND lng IS NOT NULL').all()) {
+
+    const structSql = hasBox
+      ? 'SELECT id,name,kind,lat,lng,status FROM fiber_structures WHERE lat BETWEEN ? AND ? AND lng BETWEEN ? AND ? LIMIT ?'
+      : 'SELECT id,name,kind,lat,lng,status FROM fiber_structures WHERE lat IS NOT NULL AND lng IS NOT NULL LIMIT ?';
+    const structs = hasBox
+      ? db.prepare(structSql).all(bbox[1], bbox[3], bbox[0], bbox[2], limit + 1)
+      : db.prepare(structSql).all(limit + 1);
+    if (structs.length > limit) { structs.length = limit; truncated = true; }
+    for (const s of structs)
       features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [s.lng, s.lat] }, properties: { kind: 'structure', id: s.id, name: s.name, structure_kind: s.kind, status: s.status } });
-    }
-    res.json({ type: 'FeatureCollection', features });
+
+    res.json({ type: 'FeatureCollection', features, truncated });
   });
 
   // ---- import: GeoJSON, KML, or KMZ (Google Earth) ----
@@ -515,16 +591,18 @@ export default function registerFiber(app, ctx) {
     // ext_ref (source system id) makes re-import idempotent; fall back to name for formats
     // that carry no stable identifier.
     const routeIdByRef = new Map(), structIdByRef = new Map();
-    const insR = db.prepare('INSERT INTO fiber_routes (name,status,placement,owner,geom_json,length_m,notes,ext_ref) VALUES (?,?,?,?,?,?,?,?)');
+    const insR = db.prepare('INSERT INTO fiber_routes (name,status,placement,owner,geom_json,length_m,notes,ext_ref,min_lat,min_lng,max_lat,max_lng) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
     for (const r of parsed.routes) {
       const existing = r.ext_ref
         ? db.prepare('SELECT id FROM fiber_routes WHERE ext_ref=?').get(r.ext_ref)
         : db.prepare('SELECT id FROM fiber_routes WHERE name=?').get(r.name);
       if (existing) { if (r.ext_ref) routeIdByRef.set(r.ext_ref, existing.id); result.skipped++; continue; }
       const len = r.length_m != null ? r.length_m : lineLengthM(r.coordinates);
+      const rbb = bboxOf(r.coordinates);
       const info = insR.run(String(r.name).slice(0, 160), ROUTE_STATUS.includes(r.status) ? r.status : status,
         r.placement || N(b.placement) || null, r.owner || null,
-        JSON.stringify({ type: 'LineString', coordinates: r.coordinates }), len, r.notes, r.ext_ref || null);
+        JSON.stringify({ type: 'LineString', coordinates: r.coordinates }), len, r.notes, r.ext_ref || null,
+        rbb && rbb.minLat, rbb && rbb.minLng, rbb && rbb.maxLat, rbb && rbb.maxLng);
       if (r.ext_ref) routeIdByRef.set(r.ext_ref, info.lastInsertRowid);
       result.routes_created++; result.total_length_m += len;
     }

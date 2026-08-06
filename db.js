@@ -5,6 +5,7 @@ import { readFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { hashPassword } from './hash.js';
+import { bboxOf as bbox } from './lib/geo.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.DB_PATH || join(__dirname, 'data.db');
@@ -242,6 +243,29 @@ export function migrate() {
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_fiber_routes_ext ON fiber_routes(ext_ref) WHERE ext_ref IS NOT NULL');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_fiber_struct_ext ON fiber_structures(ext_ref) WHERE ext_ref IS NOT NULL');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_fiber_cables_ext ON fiber_cables(ext_ref) WHERE ext_ref IS NOT NULL');
+  // Cached bounding box per route. "What plant is near this address?" would otherwise have to
+  // JSON.parse every geometry in the table on every query — ~11 MB of it after the Arizona import.
+  // These let SQL discard almost everything first, so only a handful of geometries get parsed.
+  ensure('fiber_routes', 'min_lat', 'REAL');
+  ensure('fiber_routes', 'min_lng', 'REAL');
+  ensure('fiber_routes', 'max_lat', 'REAL');
+  ensure('fiber_routes', 'max_lng', 'REAL');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_fiber_routes_bbox ON fiber_routes(min_lat, max_lat)');
+  // Backfill any route written before this column existed (or by an older build).
+  {
+    const stale = db.prepare('SELECT id, geom_json FROM fiber_routes WHERE min_lat IS NULL AND geom_json IS NOT NULL').all();
+    if (stale.length) {
+      const upd = db.prepare('UPDATE fiber_routes SET min_lat=?, min_lng=?, max_lat=?, max_lng=? WHERE id=?');
+      let done = 0;
+      for (const r of stale) {
+        let coords = null;
+        try { const g = JSON.parse(r.geom_json); coords = g && g.type === 'LineString' ? g.coordinates : null; } catch {}
+        const b = bbox(coords);
+        if (b) { upd.run(b.minLat, b.minLng, b.maxLat, b.maxLng, r.id); done++; }
+      }
+      if (done) console.log(`Backfilled bounding boxes for ${done} fiber route(s)`);
+    }
+  }
   // Consolidation: POP upstream feeds (pop_circuits) fold into the single `circuits` inventory.
   // A-end = the upstream source (pop|account), Z-end = the POP being fed. Runs once.
   ensure('connections', 'circuit_ref_id', 'INTEGER'); // optional link from a site WAN uplink to a circuit record

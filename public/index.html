@@ -14,6 +14,14 @@
 <body>
   <header class="topbar">
     <div class="brand"><i class="ti ti-network"></i> <span>Network Inventory</span> <span class="env">testing</span></div>
+    <div class="gsearch" id="gsearch">
+      <i class="ti ti-search gsearch-ico"></i>
+      <input id="gq" type="search" autocomplete="off" spellcheck="false"
+             placeholder="Search assets, CID, address or coordinates…"
+             aria-label="Search" aria-expanded="false" aria-controls="gres" role="combobox" />
+      <kbd class="gsearch-kbd" id="gkbd">/</kbd>
+      <div class="gres" id="gres" role="listbox" hidden></div>
+    </div>
     <div class="spacer"></div>
     <div class="themeseg" id="themeSeg" title="Color theme">
       <button data-t="light" onclick="setTheme('light')" title="Always light">Light</button>

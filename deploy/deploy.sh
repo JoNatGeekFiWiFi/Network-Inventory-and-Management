@@ -69,12 +69,15 @@ chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR"
 # 5. Restart
 systemctl restart "$SERVICE"
 
-# 6. Health check: the app is up if / answers 200 (login page) within ~15s
-echo ">> Health check…"
+# 6. Health check. Allow a generous window: a release that adds a column to a large table has to
+#    backfill it before the app listens. Backfilling bounding boxes for a statewide fiber import
+#    (~8k routes) takes ~11s, and a 15s budget was close enough to that to fail a healthy deploy.
+echo ">> Health check (up to 90s — a schema migration can delay first response)…"
 ok=""
-for i in $(seq 1 15); do
+for i in $(seq 1 90); do
   code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/" || true)"
   if [ "$code" = "200" ]; then ok=1; break; fi
+  if [ "$i" = "15" ]; then echo "   still starting (migration in progress?) — continuing to wait…"; fi
   sleep 1
 done
 

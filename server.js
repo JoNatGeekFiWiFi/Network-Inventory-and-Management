@@ -18,6 +18,7 @@ import registerBilling from './domains/billing.js';
 import registerSupport from './domains/support.js';
 import registerNetwork from './domains/network.js';
 import registerFiber from './domains/fiber.js';
+import registerSearch from './domains/search.js';
 
 // HTTP(S) JSON request with a timeout; https tolerates self-signed certs (RouterOS). Returns {status, body}.
 function reqJson(mod, urlStr, opts = {}) {
@@ -596,34 +597,37 @@ function geoFmt(a, display) {
   const parts = [line1, city, region].filter(Boolean);
   return parts.length ? parts.join(', ') : (display || '');
 }
-app.get('/api/geocode', async (req, res) => {
-  const q = String(req.query.q || '').trim();
-  if (q.length < 3) return res.json([]);
+// Address → candidate points. Shared by /api/geocode and the map's /api/locate so both hit the
+// same cache; Nominatim asks for no more than 1 req/s, and duplicating it would double that.
+// Throws on transport failure so callers can distinguish "no match" from "geocoder down".
+async function geocode(q) {
+  q = String(q || '').trim();
+  if (q.length < 3) return [];
   const key = q.toLowerCase();
   const hit = _geoCache.get(key);
-  if (hit && Date.now() - hit.t < GEO_TTL) return res.json(hit.results);
-  try {
-    const cc = (db.prepare("SELECT value FROM settings WHERE key='geocode_countrycodes'").get() || {}).value;
-    let url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=6&q=' + encodeURIComponent(q);
-    if (cc !== '') url += '&countrycodes=' + encodeURIComponent(cc || 'us');
-    const r = await reqJson(https, url, {
-      headers: { 'User-Agent': 'NetInv/1.0 (network inventory; +https://management.geekitek.com)', 'Accept-Language': 'en' },
-      timeoutMs: 8000
-    });
-    if (r.status !== 200) return res.status(502).json({ error: 'geocoder ' + r.status });
-    let arr = [];
-    try { arr = JSON.parse(r.body); } catch { arr = []; }
-    const results = (Array.isArray(arr) ? arr : []).map(x => ({
-      label: geoFmt(x.address, x.display_name),
-      display: x.display_name,
-      lat: x.lat, lon: x.lon
-    })).filter(x => x.label);
-    _geoCache.set(key, { t: Date.now(), results });
-    if (_geoCache.size > 400) _geoCache.delete(_geoCache.keys().next().value);
-    res.json(results);
-  } catch (e) {
-    res.status(502).json({ error: e.message });
-  }
+  if (hit && Date.now() - hit.t < GEO_TTL) return hit.results;
+  const cc = (db.prepare("SELECT value FROM settings WHERE key='geocode_countrycodes'").get() || {}).value;
+  let url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=6&q=' + encodeURIComponent(q);
+  if (cc !== '') url += '&countrycodes=' + encodeURIComponent(cc || 'us');
+  const r = await reqJson(https, url, {
+    headers: { 'User-Agent': 'NetInv/1.0 (network inventory; +https://management.geekitek.com)', 'Accept-Language': 'en' },
+    timeoutMs: 8000
+  });
+  if (r.status !== 200) throw new Error('geocoder ' + r.status);
+  let arr = [];
+  try { arr = JSON.parse(r.body); } catch { arr = []; }
+  const results = (Array.isArray(arr) ? arr : []).map(x => ({
+    label: geoFmt(x.address, x.display_name),
+    display: x.display_name,
+    lat: x.lat, lon: x.lon
+  })).filter(x => x.label);
+  _geoCache.set(key, { t: Date.now(), results });
+  if (_geoCache.size > 400) _geoCache.delete(_geoCache.keys().next().value);
+  return results;
+}
+app.get('/api/geocode', async (req, res) => {
+  try { res.json(await geocode(req.query.q)); }
+  catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 // ---- accounts ----
@@ -1333,10 +1337,12 @@ const ctx = {
   UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR,
   harvestThreats, pushBlocklistToDevice, activeBlockIps, blocklistMinHits,
   attachmentsFor, deleteAttachmentsFor,
+  geocode,
   jobs: {}
 };
 registerNetwork(app, ctx);
 registerFiber(app, ctx);
+registerSearch(app, ctx);
 registerSupport(app, ctx);   // messaging helpers first: billing has no dependency, but portal/pubBase are shared
 registerBilling(app, ctx);
 

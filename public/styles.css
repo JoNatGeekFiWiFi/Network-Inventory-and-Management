@@ -102,3 +102,35 @@ label.fl{display:block;font-size:13px;color:var(--text2);margin-bottom:5px}
 .ss-opt:hover{background:var(--surface2)}
 .chev{transition:transform .15s;color:var(--text3);flex:none}
 .chev.open{transform:rotate(180deg)}
+
+/* ---- global search (header) + map search ---- */
+.gsearch{position:relative;flex:0 1 420px;min-width:180px;display:flex;align-items:center}
+.gsearch-ico{position:absolute;left:10px;color:var(--text3);font-size:15px;pointer-events:none}
+.gsearch input{padding:7px 34px 7px 30px;font-size:13px;background:var(--surface2);border-color:var(--border)}
+.gsearch input::-webkit-search-cancel-button{display:none}
+.gsearch-kbd{position:absolute;right:8px;font-size:11px;color:var(--text3);border:.5px solid var(--border2);border-radius:4px;padding:1px 5px;pointer-events:none;font-family:var(--sans)}
+.gsearch input:focus+.gsearch-kbd{display:none}
+.gres{position:absolute;top:calc(100% + 6px);left:0;right:0;max-height:min(68vh,540px);overflow:auto;background:var(--surface);
+  border:.5px solid var(--border2);border-radius:var(--radius-lg);box-shadow:0 10px 34px rgba(0,0,0,.22);z-index:40}
+.gres[hidden]{display:none}
+.gres-grp{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);padding:8px 12px 4px;position:sticky;top:0;background:var(--surface)}
+.gres-item{display:flex;align-items:center;gap:10px;padding:7px 12px;cursor:pointer;border:0;background:transparent;width:100%;text-align:left;color:var(--text)}
+.gres-item:hover,.gres-item.sel{background:var(--surface2)}
+.gres-item .ti{color:var(--text3);font-size:16px;flex:none;width:18px;text-align:center}
+.gres-txt{flex:1;min-width:0}
+.gres-t{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gres-s{font-size:11px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gres-b{font-size:11px;color:var(--text2);flex:none;padding:1px 7px;border:.5px solid var(--border);border-radius:20px}
+.gres-d{font-size:11px;color:var(--text2);flex:none;font-variant-numeric:tabular-nums}
+.gres-empty{padding:14px 12px;font-size:13px;color:var(--text2)}
+.gres-more{padding:6px 12px 10px;font-size:11px;color:var(--text3)}
+.mapsearch{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.mapsearch .msbox{position:relative;flex:1;min-width:220px;display:flex;align-items:center}
+.mapsearch .msbox .ti{position:absolute;left:10px;color:var(--text3);pointer-events:none}
+.mapsearch .msbox input{padding-left:30px}
+.nearby-hd{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.nearby-list{max-height:260px;overflow:auto;margin-top:6px}
+.nearby-row{display:flex;align-items:center;gap:10px;padding:6px 0;border-top:.5px solid var(--border);font-size:13px}
+.nearby-row:first-child{border-top:0}
+.nearby-row .d{flex:none;width:70px;text-align:right;color:var(--text2);font-variant-numeric:tabular-nums}
+.nearby-row .n{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

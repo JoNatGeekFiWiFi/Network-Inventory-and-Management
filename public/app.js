@@ -32,6 +32,7 @@ async function api(path, opts = {}) {
 function renderLogin(msg) {
   $('#sidebar').style.display = 'none';
   $('#userMenu').innerHTML = '';
+  $('#gsearch').style.display = 'none';   // nothing to search until they're signed in
   view().innerHTML = `<div class="login-wrap"><div class="login-card">
     <h1>Sign in</h1><div class="sec-muted small" style="margin-bottom:16px">Network Inventory &amp; Management</div>
     <div class="fld"><label class="fl">Email</label><input id="li-email" type="email" autocomplete="username"/></div>
@@ -67,6 +68,8 @@ function setupHeader() {
   $('#navTickets').style.display = isPriv() ? '' : 'none';
   $('#navPackages').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
+  $('#gsearch').style.display = '';
+  setupSearch();
 }
 function toast(msg) {
   let t = $('#toast'); if (!t) { t = document.createElement('div'); t.id = 'toast'; t.className = 'toast'; document.body.appendChild(t); }
@@ -2408,9 +2411,25 @@ async function renderFiber() {
       <button class="btn sm" id="drawCancel" style="display:none" onclick="fiberCancelDraw()">Cancel</button>
       <button class="btn sm primary" id="drawFinish" style="display:none" onclick="fiberFinishRoute()"><i class="ti ti-check"></i> Finish route</button>
     </div>` : ''}
+    <div class="mapsearch">
+      <div class="msbox"><i class="ti ti-search"></i>
+        <input id="mapq" type="search" autocomplete="off" spellcheck="false"
+               placeholder="Find an asset, address, or paste coordinates (33.4484, -112.0740)"
+               onkeydown="if(event.key==='Enter')mapLocate()" /></div>
+      <select id="mapradius" style="width:auto" onchange="mapLocate(true)" title="How far around the point to look">
+        <option value="150">within 150 m</option>
+        <option value="500" selected>within 500 m</option>
+        <option value="1000">within 1 km</option>
+        <option value="5000">within 5 km</option>
+      </select>
+      <button class="btn sm primary" onclick="mapLocate()"><i class="ti ti-crosshair"></i> Locate</button>
+      <button class="btn sm" id="mapClearBtn" style="display:none" onclick="mapClearPin()"><i class="ti ti-x"></i> Clear pin</button>
+    </div>
+    <div id="mapfound"></div>
     <div class="card" style="padding:0;overflow:hidden"><div id="fibermap" style="height:520px;width:100%"></div></div>
     <div class="small sec-muted" style="margin:8px 0 14px">
       ${FIBER_ROUTE_STATUS.map(s => `<span style="margin-right:12px"><span style="display:inline-block;width:14px;height:3px;background:${ROUTE_STATUS_COL[s]};vertical-align:middle"></span> ${s.replace('_', ' ')}</span>`).join('')}
+      <span id="fibertrunc" style="margin-left:6px"></span>
     </div>
     <div class="card"><div class="hd"><h2>Cables</h2>${isPriv() ? `<button class="btn sm" onclick="formCable()"><i class="ti ti-plus"></i> Add cable</button>` : ''}</div>
       <div id="cablelist"><div class="loading">Loading…</div></div></div>`;
@@ -2420,14 +2439,50 @@ async function renderFiber() {
 function fiberMapInit() {
   const el = $('#fibermap'); if (!el || typeof L === 'undefined') return;
   if (_fiberMap) { _fiberMap.remove(); _fiberMap = null; }
+  _mapPin = _mapRing = null;   // the old map (and its layers) is gone; don't hold stale references
   _fiberMap = L.map(el).setView([33.45, -112.07], 11); // Phoenix default; fits bounds below once data loads
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(_fiberMap);
   _fiberMap.on('click', e => { if (_fiberDraw) fiberMapClick(e); });
+  // Redraw as the user pans/zooms, since we only ever fetch the current viewport.
+  _fiberMap.on('moveend zoomend', fiberMapReload);
+  // Drop the pin before the plant layer loads — with a large import that fetch can take seconds,
+  // and someone who searched an address shouldn't stare at Phoenix while it downloads.
+  fiberApplyPendingLocate();
+  fiberMapFrame();
+}
+let _fiberLoadSeq = 0;
+const fiberMapReload = debounce(() => fiberMapLoad(), 250);
+
+/**
+ * Frame the whole plant on first open, then load just that viewport. The extent comes from a
+ * cheap aggregate rather than from the geometry itself, so framing costs one small query.
+ */
+async function fiberMapFrame() {
+  if (!_fiberMap) return;
+  if (!PENDING_LOCATE && !_mapPin) {
+    try {
+      const e = await api('/fiber/extent');
+      if (!_fiberMap) return;
+      if (!e.empty) _fiberMap.fitBounds([[e.bbox[0], e.bbox[1]], [e.bbox[2], e.bbox[3]]], { padding: [30, 30] });
+    } catch {}
+  }
   fiberMapLoad();
 }
+
 async function fiberMapLoad() {
   if (!_fiberMap) return;
-  const gj = await api('/fiber/geojson');
+  // Ask only for what's on screen, at a detail level matching the zoom. Loading the whole plant
+  // is ~95 MB once a state-sized import lands, which locks the browser up for the better part of
+  // a minute.
+  const b = _fiberMap.getBounds();
+  const q = `?bbox=${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}&zoom=${_fiberMap.getZoom()}`;
+  const seq = ++_fiberLoadSeq;
+  let gj;
+  try { gj = await api('/fiber/geojson' + q); } catch { return; }
+  if (seq !== _fiberLoadSeq || !_fiberMap) return;   // panned again while this was in flight
+  const note = $('#fibertrunc');
+  if (note) note.innerHTML = gj.truncated
+    ? `<span class="muted small"><i class="ti ti-alert-triangle"></i> Showing part of the plant in this view — zoom in to see all of it.</span>` : '';
   if (window._fiberLayer) _fiberMap.removeLayer(window._fiberLayer);
   window._fiberLayer = L.geoJSON(gj, {
     style: f => ({ color: ROUTE_STATUS_COL[f.properties.status] || '#378ADD', weight: 4, opacity: .9, dashArray: f.properties.status === 'planned' ? '6,6' : null }),
@@ -2441,7 +2496,106 @@ async function fiberMapLoad() {
       }
     }
   }).addTo(_fiberMap);
-  try { const b = window._fiberLayer.getBounds(); if (b.isValid()) _fiberMap.fitBounds(b, { padding: [30, 30] }); } catch {}
+  fiberApplyPendingLocate();
+}
+
+// ---- map search / locate ----
+let _mapPin = null, _mapRing = null, _mapLocSeq = 0;
+// Target handed over by the header search, consumed once the fiber map exists.
+let PENDING_LOCATE = null;
+
+/** Consume a target handed over by the header search once the map exists. */
+function fiberApplyPendingLocate() {
+  if (!PENDING_LOCATE || !_fiberMap) return;
+  const p = PENDING_LOCATE; PENDING_LOCATE = null;
+  const box = $('#mapq');
+  if (p.q != null) { if (box) box.value = p.q; mapLocate(); }
+  else { if (box) box.value = p.lat.toFixed(6) + ', ' + p.lng.toFixed(6); mapLocate(); }
+}
+
+function mapRadius() { const s = $('#mapradius'); return s ? +s.value : 500; }
+
+async function mapLocate(quiet) {
+  const box = $('#mapq'); if (!box) return;
+  const q = box.value.trim();
+  // Radius changed but nothing searched yet — nothing to redo.
+  if (!q) { if (!quiet) toast('Type an asset name, an address, or coordinates'); return; }
+  const out = $('#mapfound');
+  const seq = ++_mapLocSeq;
+  out.innerHTML = '<div class="box"><div class="loading">Locating…</div></div>';
+  let r;
+  try { r = await api('/locate?radius=' + mapRadius() + '&q=' + encodeURIComponent(q)); }
+  catch (e) { if (seq === _mapLocSeq) out.innerHTML = `<div class="box" style="color:var(--danger)">${esc(e.message)}</div>`; return; }
+  if (seq !== _mapLocSeq) return;
+
+  if (r.kind === 'none') {
+    // Fall back to asset search so "no address match" isn't the end of the road.
+    let s = null; try { s = await api('/search?q=' + encodeURIComponent(q)); } catch {}
+    const first = s && s.groups && s.groups[0] && s.groups[0].items[0];
+    if (first) {
+      out.innerHTML = `<div class="box">No place matched “${esc(q)}”. Closest asset match:
+        <a href="${esc(first.href)}">${esc(first.title)}</a> <span class="muted small">(${esc(s.groups[0].label)})</span></div>`;
+      if (first.lat != null) mapDropPin(first.lat, first.lng, first.title, null);
+      else if (first.bbox) { _fiberMap.fitBounds([[first.bbox[0], first.bbox[1]], [first.bbox[2], first.bbox[3]]], { padding: [40, 40] }); }
+    } else {
+      out.innerHTML = `<div class="box">Nothing found for “${esc(q)}”.</div>`;
+    }
+    return;
+  }
+  mapDropPin(r.lat, r.lng, r.label, r);
+}
+
+function mapDropPin(lat, lng, label, r) {
+  mapClearPin(true);
+  _mapPin = L.marker([lat, lng], { title: label }).addTo(_fiberMap)
+    .bindPopup(`<b>${esc(label)}</b><br><span class="mono">${lat.toFixed(6)}, ${lng.toFixed(6)}</span>`);
+  if (r) _mapRing = L.circle([lat, lng], { radius: r.nearby ? mapRadius() : 0, color: '#378ADD', weight: 1, fillOpacity: .06 }).addTo(_fiberMap);
+  _fiberMap.setView([lat, lng], Math.max(_fiberMap.getZoom(), 16));
+  _mapPin.openPopup();
+  const btn = $('#mapClearBtn'); if (btn) btn.style.display = '';
+  if (r) renderNearby(r);
+}
+
+function mapClearPin(keepPanel) {
+  if (_mapPin) { _fiberMap.removeLayer(_mapPin); _mapPin = null; }
+  if (_mapRing) { _fiberMap.removeLayer(_mapRing); _mapRing = null; }
+  if (!keepPanel) {
+    const o = $('#mapfound'); if (o) o.innerHTML = '';
+    const b = $('#mapClearBtn'); if (b) b.style.display = 'none';
+    const q = $('#mapq'); if (q) q.value = '';
+  }
+}
+
+function renderNearby(r) {
+  const items = r.nearby || [], counts = r.nearby_counts || {};
+  const alt = (r.alternatives || []).length
+    ? `<div class="small sec-muted" style="margin-top:6px">Did you mean:
+        ${r.alternatives.map(a => `<a href="#" onclick="mapPickAlt(${a.lat},${a.lng},this.textContent);return false">${esc(a.label)}</a>`).join(' · ')}</div>`
+    : '';
+  const shown = Object.entries(counts).map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`).join(' · ');
+  const rows = items.length
+    ? items.map(i => `<div class="nearby-row">
+        <span class="d">${fmtDist(i.distance_m)}</span>
+        <i class="ti ${typeIcon(i.type)}" title="${esc(i.type)}"></i>
+        <span class="n"><a href="${esc(i.href)}">${esc(i.title)}</a>
+          ${i.colocated ? `<span class="muted small"> +${i.colocated - 1} more here</span>` : ''}
+          ${i.subtitle ? `<span class="muted small"> · ${esc(i.subtitle)}</span>` : ''}</span>
+      </div>`).join('')
+    : `<div class="small sec-muted" style="padding:8px 0">No plant within ${fmtDist(mapRadius())}. Try a wider radius.</div>`;
+  $('#mapfound').innerHTML = `<div class="box">
+    <div class="nearby-hd">
+      <b>${esc(r.label)}</b>
+      <span class="mono small sec-muted">${r.lat.toFixed(6)}, ${r.lng.toFixed(6)}</span>
+      <a class="small" href="https://maps.google.com/?q=${r.lat},${r.lng}" target="_blank">Open in Google Maps <i class="ti ti-external-link" style="font-size:11px"></i></a>
+      ${shown ? `<span class="small sec-muted" style="margin-left:auto">Nearby: ${esc(shown)}</span>` : ''}
+    </div>${alt}
+    <div class="nearby-list">${rows}</div>
+  </div>`;
+}
+
+async function mapPickAlt(lat, lng, label) {
+  const r = await api(`/nearby?lat=${lat}&lng=${lng}&radius=${mapRadius()}`);
+  mapDropPin(lat, lng, label, { lat, lng, label, nearby: r.items, nearby_counts: r.counts, nearby_total: r.total });
 }
 function fiberDrawRoute() {
   _fiberDraw = { mode: 'route', pts: [], line: null };
@@ -3373,3 +3527,128 @@ async function restoreBilling(input) {
     toast(`Restored: ${r.counts.invoices} invoices, ${r.counts.payments} payments`);
   } catch (e) { toast('Restore failed: ' + (e.message || 'bad file')); }
 }
+
+// ---------- Search: global palette + map locate ----------
+// One endpoint answers "asset, coordinate or address?", so both entry points share this code.
+
+const TYPE_ICON = {
+  circuit: 'ti-topology-star-3', cable: 'ti-cable', route: 'ti-line', structure: 'ti-map-pin',
+  site: 'ti-building-store', pop: 'ti-server-2', device: 'ti-router',
+  customer: 'ti-users', account: 'ti-building-bank', coords: 'ti-crosshair', address: 'ti-map-search'
+};
+const typeIcon = t => TYPE_ICON[t] || 'ti-point';
+
+function fmtDist(m) {
+  if (!Number.isFinite(m)) return '';
+  return m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(m < 10000 ? 2 : 1) + ' km';
+}
+
+// Shared debounce so a fast typist fires one request, not one per keystroke.
+function debounce(fn, ms) {
+  let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+
+let _gsFlat = [], _gsSel = -1, _gsSeq = 0;
+
+function setupSearch() {
+  const box = $('#gq'), panel = $('#gres');
+  if (!box || box.dataset.wired) return;
+  box.dataset.wired = '1';
+
+  const run = debounce(async () => {
+    const q = box.value.trim();
+    if (q.length < 2) return gsClose();
+    const seq = ++_gsSeq;
+    try {
+      const r = await api('/search?q=' + encodeURIComponent(q));
+      if (seq !== _gsSeq) return;          // a newer keystroke already won
+      gsRender(r);
+    } catch { /* 401 handled by api() */ }
+  }, 180);
+
+  box.addEventListener('input', run);
+  box.addEventListener('focus', () => { if (box.value.trim().length >= 2 && _gsFlat.length) panel.hidden = false; });
+  box.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { box.blur(); return gsClose(); }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (panel.hidden || !_gsFlat.length) return;
+      e.preventDefault();
+      _gsSel = (_gsSel + (e.key === 'ArrowDown' ? 1 : -1) + _gsFlat.length) % _gsFlat.length;
+      gsHighlight();
+    } else if (e.key === 'Enter') {
+      if (_gsSel >= 0 && _gsFlat[_gsSel]) { e.preventDefault(); gsGo(_gsSel); }
+    }
+  });
+  document.addEventListener('click', e => { if (!$('#gsearch').contains(e.target)) gsClose(); });
+
+  // "/" focuses search the way it does in most tools; Cmd/Ctrl-K too. Never steal the key while
+  // the user is typing somewhere else.
+  document.addEventListener('keydown', e => {
+    const tag = (e.target.tagName || '').toLowerCase();
+    const typing = tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable;
+    if (((e.key === 'k' || e.key === 'K') && (e.metaKey || e.ctrlKey)) || (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey)) {
+      e.preventDefault(); box.focus(); box.select();
+    }
+  });
+}
+
+function gsClose() { const p = $('#gres'); if (p) { p.hidden = true; } _gsFlat = []; _gsSel = -1; const b = $('#gq'); if (b) b.setAttribute('aria-expanded', 'false'); }
+
+function gsRender(r) {
+  const panel = $('#gres');
+  _gsFlat = []; _gsSel = -1;
+  let html = '';
+
+  if (r.coords) {
+    _gsFlat.push({ kind: 'coords', lat: r.coords.lat, lng: r.coords.lng });
+    html += `<div class="gres-grp">Coordinates</div>
+      <button class="gres-item" data-i="0"><i class="ti ti-crosshair"></i><div class="gres-txt">
+        <div class="gres-t">${r.coords.lat.toFixed(6)}, ${r.coords.lng.toFixed(6)}</div>
+        <div class="gres-s">Show on the fiber map${r.coords.format !== 'decimal' ? ' · read as ' + esc(r.coords.format.toUpperCase()) : ''}</div>
+      </div></button>`;
+  }
+  for (const g of (r.groups || [])) {
+    html += `<div class="gres-grp">${esc(g.label)}</div>`;
+    for (const it of g.items) {
+      const i = _gsFlat.length;
+      _gsFlat.push({ kind: 'item', href: it.href });
+      html += `<button class="gres-item" data-i="${i}"><i class="ti ${typeIcon(g.type)}"></i><div class="gres-txt">
+        <div class="gres-t">${esc(it.title)}</div>
+        ${it.subtitle ? `<div class="gres-s">${esc(it.subtitle)}</div>` : ''}
+      </div>${it.badge ? `<span class="gres-b">${esc(it.badge)}</span>` : ''}</button>`;
+    }
+  }
+  // Not a coordinate and nothing matched — offer the address geocoder rather than a dead end.
+  if (!html) {
+    const i = _gsFlat.length;
+    _gsFlat.push({ kind: 'address', q: r.q });
+    html = `<div class="gres-grp">No assets matched</div>
+      <button class="gres-item" data-i="${i}"><i class="ti ti-map-search"></i><div class="gres-txt">
+        <div class="gres-t">Look up “${esc(r.q)}” as an address</div>
+        <div class="gres-s">Opens the fiber map and shows what plant is nearby</div>
+      </div></button>`;
+  }
+  panel.innerHTML = html;
+  panel.hidden = false;
+  $('#gq').setAttribute('aria-expanded', 'true');
+  panel.querySelectorAll('.gres-item').forEach(el =>
+    el.addEventListener('click', () => gsGo(+el.dataset.i)));
+}
+
+function gsHighlight() {
+  const panel = $('#gres');
+  panel.querySelectorAll('.gres-item').forEach((el, i) => el.classList.toggle('sel', i === _gsSel));
+  const el = panel.querySelector('.gres-item.sel');
+  if (el) el.scrollIntoView({ block: 'nearest' });
+}
+
+function gsGo(i) {
+  const it = _gsFlat[i]; if (!it) return;
+  $('#gq').value = ''; gsClose(); $('#gq').blur();
+  if (it.kind === 'item') { location.hash = it.href.replace(/^#/, ''); return; }
+  // Geographic results are handed to the fiber map, which owns the pin and the nearby panel.
+  PENDING_LOCATE = it.kind === 'coords' ? { lat: it.lat, lng: it.lng } : { q: it.q };
+  if (location.hash.replace(/^#/, '') === '/fiber') fiberApplyPendingLocate();
+  else location.hash = '/fiber';
+}
+
