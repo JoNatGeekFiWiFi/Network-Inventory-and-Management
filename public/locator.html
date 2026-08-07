@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Fiber Fault Locator</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <style>
+    /* Self-contained on purpose: this page is served to anyone, so it loads none of the
+       inventory app's markup, scripts or data. */
+    :root { --bg:#0f1216; --card:#171c22; --line:#2a323c; --text:#e6eaf0; --muted:#9aa6b2;
+            --accent:#378ADD; --ok:#1D9E75; --danger:#dc3545; --warn:#d98e36; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); line-height:1.5;
+           font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+    .wrap { max-width:900px; margin:0 auto; padding:24px 18px 60px; }
+    h1 { font-size:22px; margin:6px 0 4px; }
+    h2 { font-size:15px; margin:0 0 10px; }
+    .sub { color:var(--muted); margin:0 0 20px; font-size:14px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px; margin-bottom:16px; }
+    label { display:block; font-size:13px; color:var(--muted); margin:0 0 5px; }
+    input, select { width:100%; padding:10px 12px; border-radius:9px; border:1px solid var(--line);
+                    background:#0e1318; color:var(--text); font-size:15px; font-family:inherit; }
+    input:focus, select:focus { outline:none; border-color:var(--accent); }
+    button { font-family:inherit; font-size:14px; padding:9px 14px; border-radius:9px;
+             border:1px solid var(--line); background:#0e1318; color:var(--text); cursor:pointer; }
+    button:hover { border-color:var(--accent); }
+    button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+    button:disabled { opacity:.45; cursor:default; }
+    .drop { border:2px dashed var(--line); border-radius:12px; padding:26px; text-align:center; cursor:pointer; }
+    .drop.over { border-color:var(--accent); background:#0e1318; }
+    .drop b { display:block; margin-bottom:4px; }
+    .muted { color:var(--muted); font-size:13px; }
+    .small { font-size:12px; }
+    .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .row { display:flex; gap:10px; align-items:center; margin-bottom:8px; }
+    .row .n { flex:none; width:28px; height:28px; border-radius:50%; background:#0e1318;
+              border:1px solid var(--line); display:flex; align-items:center; justify-content:center; font-size:13px; }
+    .grid2 { display:flex; gap:12px; flex-wrap:wrap; } .grid2 > div { flex:1; min-width:180px; }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:14px; }
+    .stat { display:flex; gap:22px; flex-wrap:wrap; margin-top:10px; }
+    .stat div span { display:block; color:var(--muted); font-size:12px; }
+    .stat div b { font-size:17px; }
+    .fault { display:flex; gap:12px; align-items:center; padding:10px 0; border-top:1px solid var(--line); }
+    .fault:first-child { border-top:0; }
+    .badge { flex:none; width:28px; height:28px; border-radius:50%; background:var(--danger); color:#fff;
+             display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:600; }
+    .warn { border-color:var(--warn); }
+    .err { color:var(--danger); }
+    #map { height:420px; border-radius:12px; overflow:hidden; }
+    a { color:var(--accent); }
+    .foot { color:var(--muted); font-size:12px; margin-top:24px; text-align:center; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Fiber Fault Locator</h1>
+  <p class="sub">Load a KML or KMZ, enter what the OTDR read, and get coordinates to dig at.
+    Your file is measured and then discarded — its contents are not kept. A record of the upload
+    (file name, size, checksum and network address) is retained for administration.</p>
+
+  <div class="card">
+    <h2>1 · Route file</h2>
+    <div class="drop" id="drop">
+      <b>Drop a KML or KMZ here</b>
+      <span class="muted">or click to choose · also reads GeoJSON, GPX and CSV · up to 8 MB</span>
+    </div>
+    <input type="file" id="file" style="display:none" accept=".kml,.kmz,.geojson,.json,.gpx,.csv" />
+    <div id="fileinfo"></div>
+  </div>
+
+  <div class="card">
+    <h2>2 · Fault distances</h2>
+    <div id="faults"></div>
+    <button id="addFault">+ Add fault</button>
+    <div class="muted small" style="margin-top:8px">One row per event on the trace. You can paste
+      several numbers into a box — “1.2, 4.5, 7.8” — and they'll split into rows.</div>
+
+    <div class="grid2" style="margin-top:16px">
+      <div><label for="from">Measure from</label>
+        <select id="from"><option value="a">A end — start of route</option>
+                          <option value="z">Z end — end of route</option></select></div>
+      <div><label for="slack">Slack allowance</label>
+        <select id="slack"><option value="13" selected>13% reduction</option>
+                           <option value="10">10% reduction</option>
+                           <option value="0">None (0%)</option>
+                           <option value="custom">Custom…</option></select></div>
+      <div id="slackCustomWrap" style="display:none"><label for="slackCustom">Custom %</label>
+        <input type="number" id="slackCustom" min="0" max="99" step="0.1" value="13" /></div>
+    </div>
+    <div class="muted small" style="margin-top:8px">Fibre runs longer than the route because of slack
+      loops and coils, so the entered distance is reduced before it's measured along the ground.</div>
+
+    <div class="actions">
+      <button class="primary" id="calc">Calculate</button>
+      <button id="copyAll" style="display:none">Copy all</button>
+    </div>
+    <div id="err" class="err small" style="margin-top:10px"></div>
+  </div>
+
+  <div id="out"></div>
+  <div class="card" style="padding:0;overflow:hidden"><div id="map"></div></div>
+  <p class="foot">GeekiTek · fibre distances are estimates — always confirm on site before excavating.</p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => (s == null ? '' : String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])));
+const fmtDist = m => !isFinite(m) ? '' : (m < 1000 ? Math.round(m) + ' m' : (m/1000).toFixed(m < 10000 ? 2 : 1) + ' km');
+
+let file = null, faults = [{ km: '' }], map = null, layer = null, markers = [], last = null;
+
+// ---- fault rows ----
+function renderFaults() {
+  $('#faults').innerHTML = faults.map((f, i) => `<div class="row">
+      <div class="n">${i + 1}</div>
+      <input type="text" inputmode="decimal" value="${esc(f.km)}" placeholder="km of fibre, e.g. 4.200" data-km="${i}" />
+      <button data-rm="${i}" ${faults.length === 1 ? 'disabled' : ''}>Remove</button>
+    </div>`).join('');
+  $('#faults').querySelectorAll('[data-km]').forEach(el => {
+    el.oninput = () => setKm(+el.dataset.km, el.value);
+    el.onkeydown = e => { if (e.key === 'Enter') calc(); };
+  });
+  $('#faults').querySelectorAll('[data-rm]').forEach(el => {
+    el.onclick = () => { if (faults.length > 1) { faults.splice(+el.dataset.rm, 1); renderFaults(); } };
+  });
+}
+function setKm(i, v) {
+  // Pasting a whole trace into one box should just work.
+  if (/[,\s]/.test(v)) {
+    const parts = v.split(/[,\s]+/).filter(Boolean);
+    if (parts.length > 1) { faults.splice(i, 1, ...parts.map(km => ({ km }))); renderFaults(); return; }
+  }
+  faults[i].km = v;
+}
+$('#addFault').onclick = () => { faults.push({ km: '' }); renderFaults(); };
+renderFaults();
+
+// ---- file ----
+const drop = $('#drop');
+drop.onclick = () => $('#file').click();
+['dragenter','dragover'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', ev => { const f = ev.dataTransfer.files[0]; if (f) useFile(f); });
+$('#file').onchange = function () { const f = this.files[0]; this.value = ''; if (f) useFile(f); };
+
+const MAX_BYTES = 8 * 1024 * 1024;
+function useFile(f) {
+  if (f.size > MAX_BYTES) {
+    $('#err').textContent = `${f.name} is ${(f.size/1048576).toFixed(1)} MB — this page accepts up to 8 MB.`;
+    return;
+  }
+  file = f; $('#err').textContent = '';
+  $('#fileinfo').innerHTML = `<div class="muted" style="margin-top:10px"><b>${esc(f.name)}</b> · ${(f.size/1048576).toFixed(2)} MB</div>`;
+  calc(true);   // draw the route even before any distances are entered
+}
+
+// ---- slack ----
+$('#slack').onchange = () => {
+  $('#slackCustomWrap').style.display = $('#slack').value === 'custom' ? '' : 'none';
+  if (file) calc(true);
+};
+const slackPct = () => $('#slack').value === 'custom' ? (Number($('#slackCustom').value) || 0) : Number($('#slack').value);
+
+// ---- calculate ----
+$('#calc').onclick = () => calc();
+async function calc(quiet) {
+  if (!file) { if (!quiet) $('#err').textContent = 'Choose a KML or KMZ first.'; return; }
+  const kms = faults.map(f => String(f.km).trim()).filter(Boolean);
+  if (kms.some(k => !isFinite(Number(k)))) { $('#err').textContent = 'Fault distances must be numbers.'; return; }
+  $('#err').textContent = '';
+  $('#calc').disabled = true; $('#calc').textContent = 'Calculating…';
+  try {
+    const qs = `?km=${encodeURIComponent(kms.join(','))}&from=${$('#from').value}&slack=${slackPct()}&filename=${encodeURIComponent(file.name)}`;
+    const resp = await fetch('/locator/calc' + qs, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file
+    });
+    const r = await resp.json();
+    if (!resp.ok) throw new Error(r.error || ('Error ' + resp.status));
+    render(r);
+  } catch (e) {
+    $('#err').textContent = e.message;
+    $('#out').innerHTML = '';
+  } finally {
+    $('#calc').disabled = false; $('#calc').textContent = 'Calculate';
+  }
+}
+
+function render(r) {
+  const warn = [];
+  if (r.gaps && r.gaps.length) {
+    const worst = Math.max(...r.gaps.map(g => g.m));
+    warn.push(`<div class="card warn"><b>${r.gaps.length} gap${r.gaps.length > 1 ? 's' : ''} bridged</b>
+      <div class="muted small">The segments in this file don't quite meet — the largest gap is ${worst} m.
+      Distances cross those gaps in a straight line, so they're only as good as the join.</div></div>`);
+  }
+  if (r.unused_segments)
+    warn.push(`<div class="card warn"><b>${r.unused_segments} segment(s) left out</b>
+      <div class="muted small">They don't connect to the main run and aren't counted in the distances below.</div></div>`);
+
+  const ordered = [...r.points].sort((a, b) => a.ground_m - b.ground_m);
+  const tight = ordered.filter(f => f.gap_from_previous_m != null && f.gap_from_previous_m < 100).length;
+
+  const list = ordered.map(f => {
+    const b = f.between || {};
+    const near = [b.before && b.before.name, b.after && b.after.name].filter(Boolean).join(' → ');
+    return `<div class="fault">
+      <div class="badge">${f.index}</div>
+      <div style="flex:1;min-width:0">
+        <div class="mono"><b>${f.lat}, ${f.lng}</b>
+          <a href="https://maps.google.com/?q=${f.lat},${f.lng}" target="_blank" rel="noopener">Maps</a>
+          ${f.beyond_end ? '<span class="small" style="color:var(--warn)"> · past the end of this route</span>' : ''}</div>
+        <div class="muted small">${f.requested_fibre_km} km fibre · ${f.ground_km} km ground${near ? ' · between ' + esc(near) : ''}</div>
+      </div>
+      ${f.gap_from_previous_m != null ? `<span class="muted small">+${fmtDist(f.gap_from_previous_m)}</span>` : ''}
+    </div>`;
+  }).join('');
+
+  $('#out').innerHTML = warn.join('') + `<div class="card">
+      <h2>${esc(r.source.name)} <span class="muted small">${esc(r.source.format.toUpperCase())} · ${r.source.segments_in_file} segment(s)</span></h2>
+      <div class="stat">
+        <div><span>Route length</span><b>${(r.total_m / 1000).toFixed(3)} km</b></div>
+        <div><span>Fibre length @ ${r.slack_pct}%</span><b>${r.total_fibre_km} km</b></div>
+        <div><span>Named points</span><b>${r.labels.length}</b></div>
+        <div><span>Faults</span><b>${r.count}</b></div>
+      </div>
+      ${r.count ? `<div style="margin-top:14px">${list}</div>` : '<div class="muted small" style="margin-top:12px">Enter a fault distance above to place a point on this route.</div>'}
+      ${tight ? `<div class="muted small" style="margin-top:10px">${tight} reading(s) fall within 100 m of the one before — likely one damaged section rather than separate faults.</div>` : ''}
+    </div>`;
+
+  $('#copyAll').style.display = r.count ? '' : 'none';
+  last = ordered;
+  draw(r, ordered);
+}
+
+$('#copyAll').onclick = () => {
+  if (!last || !last.length) return;
+  const txt = last.map(f => `${f.index}\t${f.requested_fibre_km} km\t${f.lat}, ${f.lng}`).join('\n');
+  if (navigator.clipboard && navigator.clipboard.writeText)
+    navigator.clipboard.writeText(txt).then(() => { $('#copyAll').textContent = 'Copied'; setTimeout(() => $('#copyAll').textContent = 'Copy all', 1500); });
+};
+
+function draw(r, points) {
+  if (!map) {
+    // Always construct with a view — a map with no centre or zoom renders as a blank grey box.
+    map = L.map('map').setView([33.45, -112.07], 11);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+  }
+  if (layer) map.removeLayer(layer);
+  markers.forEach(m => map.removeLayer(m)); markers = [];
+  layer = L.geoJSON({ type: 'Feature', geometry: r.geometry, properties: {} },
+    { style: { color: '#378ADD', weight: 5, opacity: .9 } }).addTo(map);
+  for (const s of r.labels)
+    markers.push(L.circleMarker([s.lat, s.lng], { radius: 5, color: '#fff', weight: 2, fillColor: '#1D9E75', fillOpacity: 1 })
+      .bindTooltip(`${s.name} · ${(s.along_m / 1000).toFixed(3)} km`).addTo(map));
+  for (const f of points)
+    markers.push(L.marker([f.lat, f.lng], { icon: L.divIcon({ className: '', iconSize: [26, 26], iconAnchor: [13, 13],
+      html: `<div style="background:#dc3545;color:#fff;border:2px solid #fff;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600">${f.index}</div>` }) })
+      .bindPopup(`<b>Fault ${f.index}</b><br>${f.requested_fibre_km} km fibre<br>${f.lat}, ${f.lng}`).addTo(map));
+  // The results panel above the map changes height, so re-measure before fitting.
+  map.invalidateSize();
+  try {
+    const b = points.length ? L.latLngBounds(points.map(f => [f.lat, f.lng])).pad(0.4) : layer.getBounds();
+    if (b.isValid()) map.fitBounds(b, { padding: [30, 30] });
+  } catch (e) {}
+  requestAnimationFrame(() => map.invalidateSize());
+}
+</script>
+</body>
+</html>

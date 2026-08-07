@@ -68,6 +68,7 @@ function setupHeader() {
   $('#navTickets').style.display = isPriv() ? '' : 'none';
   $('#navPackages').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
+  $('#navFiles').style.display = isAdmin() ? '' : 'none';
   $('#gsearch').style.display = '';
   setupSearch();
 }
@@ -131,6 +132,7 @@ async function route() {
     if (p[0] === 'circuits') { setNav('circuits'); return await renderCircuits(); }
     if (p[0] === 'fiber' && p[1] === 'import') { setNav('fiber'); return await renderFiberImport(); }
     if (p[0] === 'fiber' && p[1] === 'locate') { setNav('fiber'); return await renderLocate(q); }
+    if (p[0] === 'files') { setNav('files'); return await renderFiles(q); }
     if (p[0] === 'fiber' && p[1] === 'cable' && p[2]) { setNav('fiber'); return await renderCable(p[2]); }
     if (p[0] === 'fiber' && p[1] === 'route' && p[2]) { setNav('fiber'); return await renderFiberRoute(p[2]); }
     if (p[0] === 'fiber' && p[1] === 'structure' && p[2]) { setNav('fiber'); return await renderStructure(p[2]); }
@@ -3964,7 +3966,7 @@ async function locForward(quiet) {
 
   if (_locSource === 'file') {
     if (!_locFile) { if (!quiet) toast('Choose a KML or KMZ first'); return; }
-    const qs = `?km=${encodeURIComponent(kms.join(','))}&from=${from}${locSlackParam()}`;
+    const qs = `?km=${encodeURIComponent(kms.join(','))}&from=${from}${locSlackParam()}&filename=${encodeURIComponent(_locFile.name)}`;
     let r;
     try {
       const resp = await fetch('/api/fiber/locate/file' + qs, {
@@ -4169,4 +4171,78 @@ async function locSaveStructure() {
     toast('Saved as structure');
     location.hash = '#/fiber/structure/' + r.id;
   } catch (e) { toast(e.message); }
+}
+
+// ---------- Files (admin only) ----------
+// The two places files arrive from outside the inventory: the fault locator and visitor ID
+// capture. Grouped here so an admin can see what has been collected without hunting for it.
+
+async function renderFiles(q) {
+  const tab = (q && q.tab) === 'ids' ? 'ids' : 'locator';
+  view().innerHTML = `<div class="hd"><h1>Files</h1></div>
+    <p class="help">Everything uploaded to the fault locator and the visitor ID system. Admin only.</p>
+    <div class="seg" style="margin-bottom:14px">
+      <button class="segbtn ${tab === 'locator' ? 'on' : ''}" onclick="location.hash='#/files?tab=locator'">
+        <i class="ti ti-map-2"></i> Locator uploads</button>
+      <button class="segbtn ${tab === 'ids' ? 'on' : ''}" onclick="location.hash='#/files?tab=ids'">
+        <i class="ti ti-id"></i> Visitor IDs</button>
+    </div>
+    <div id="fileslist"><div class="loading">Loading…</div></div>`;
+  if (tab === 'ids') await filesIds(); else await filesLocator();
+}
+
+const fileSize = n => n == null ? '—' : n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+
+async function filesLocator() {
+  let d;
+  try { d = await api('/files/locator'); } catch (e) { $('#fileslist').innerHTML = `<div class="card" style="padding:16px;color:var(--danger)">${esc(e.message)}</div>`; return; }
+  if (!d.rows.length) { $('#fileslist').innerHTML = '<div class="card"><div class="row muted">No files have been put through the locator yet.</div></div>'; return; }
+  $('#fileslist').innerHTML = `
+    <div class="grid3" style="margin-bottom:14px">
+      <div class="metric"><div class="l">Uploads</div><div class="v">${d.total}</div></div>
+      <div class="metric"><div class="l">Kept on disk</div><div class="v">${fileSize(d.stored_bytes)}</div></div>
+      <div class="metric"><div class="l">From the public page</div><div class="v">${d.public_n}</div></div>
+    </div>
+    <div class="help" style="margin-bottom:10px">Files staff upload while signed in are kept and can be
+      downloaded. Public uploads are recorded but their contents are not retained.</div>
+    <div class="card">${d.rows.map(r => `<div class="row">
+      <i class="ti ${r.source === 'public' ? 'ti-world' : 'ti-user'} sec-muted" title="${r.source === 'public' ? 'Public page' : 'Signed in'}"></i>
+      <div style="flex:1;min-width:0">
+        <div><b>${esc(r.filename || '(no filename)')}</b>
+          ${r.format ? `<span class="muted small">${esc(r.format.toUpperCase())}</span>` : '<span class="small" style="color:var(--danger)">rejected</span>'}</div>
+        <div class="small sec-muted">${fileSize(r.size)}${r.segments ? ` · ${r.segments} segment(s)` : ''}${r.total_m ? ` · ${(r.total_m / 1000).toFixed(2)} km` : ''}${r.faults ? ` · ${r.faults} fault(s)` : ''}
+          · ${esc(r.actor || r.ip || 'unknown')} · ${esc(r.created_at)}</div>
+        <div class="small sec-muted mono" title="SHA-256">${esc(String(r.sha256 || '').slice(0, 16))}…</div>
+      </div>
+      ${r.retained
+        ? `<a class="btn sm" href="/api/files/locator/${r.id}/download"><i class="ti ti-download"></i> Download</a>`
+        : `<span class="pill" style="background:var(--surface2)" title="Public uploads keep metadata only">not retained</span>`}
+      <button class="btn sm" onclick="filesDelete(${r.id}, '${esc(r.filename || 'this entry').replace(/'/g, "\\'")}')"><i class="ti ti-trash"></i> Delete</button>
+    </div>`).join('')}</div>`;
+}
+
+async function filesDelete(id, name) {
+  if (!confirm(`Delete the record for "${name}"?\n\nAny retained file is removed from disk too.`)) return;
+  try { await api('/files/locator/' + id, { method: 'DELETE' }); toast('Deleted'); filesLocator(); }
+  catch (e) { toast(e.message); }
+}
+
+async function filesIds() {
+  let rows;
+  try { rows = await api('/files/ids'); } catch (e) { $('#fileslist').innerHTML = `<div class="card" style="padding:16px;color:var(--danger)">${esc(e.message)}</div>`; return; }
+  if (!rows.length) { $('#fileslist').innerHTML = '<div class="card"><div class="row muted">No visitor ID documents on file.</div></div>'; return; }
+  $('#fileslist').innerHTML = `
+    <div class="box" style="border-color:var(--warning)"><b>These are identity documents belonging to visitors.</b>
+      <div class="small sec-muted">Opening one is recorded in the activity log against your account. Delete the
+        access request itself to remove a document.</div></div>
+    <div class="card">${rows.map(r => `<div class="row">
+      <i class="ti ti-id sec-muted"></i>
+      <div style="flex:1;min-width:0">
+        <div><a href="#/access"><b>${esc(r.name)}</b></a> ${statusPill(r.status)}</div>
+        <div class="small sec-muted">${esc([r.email, r.phone].filter(Boolean).join(' · ') || 'no contact details')}
+          · submitted ${esc(r.created_at)}${r.reviewed_by ? ` · reviewed by ${esc(r.reviewed_by)}` : ''}</div>
+      </div>
+      <span class="small sec-muted">${r.missing ? 'file missing' : `${esc(r.ext)} · ${fileSize(r.size)}`}</span>
+      ${r.missing ? '' : `<a class="btn sm" href="/api/access/${r.id}/photo" target="_blank" rel="noopener"><i class="ti ti-eye"></i> View ID</a>`}
+    </div>`).join('')}</div>`;
 }

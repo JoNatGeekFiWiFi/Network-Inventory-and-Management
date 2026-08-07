@@ -12,11 +12,16 @@ import { mergeSegments, cumulative, pathLengthM, pointAtDistance, distanceAlong,
 import { haversineM } from '../lib/geo.js';
 import express from 'express';
 import { parseUpload, lineLengthM } from './fiber.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const PATH_TYPES = ['circuit', 'cable', 'route'];
 const esc = s => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
 export default function registerLocate(app, ctx) {
+  // Handed to the public locator, which lives outside /api and therefore outside the auth gate.
+  if (ctx.jobs) ctx.jobs.locateFromBuffer = (buf, q, limits) => locateFromBuffer(buf, q, limits);
   const { db, N, requireNoc, audit } = ctx;
 
   const safeJson = s => { try { return JSON.parse(s); } catch { return null; } };
@@ -342,40 +347,37 @@ export default function registerLocate(app, ctx) {
   });
 
   /**
-   * Locate faults against an UPLOADED file, without importing anything.
-   *
-   * For plant that isn't in the inventory — a KMZ a carrier just sent over, a one-off as-built.
-   * Nothing is written to the database: the file is parsed, its segments merged, the readings
-   * located, and the result handed straight back. Named Point placemarks in the file become
-   * labels along the path, which is how KML normally carries splice points.
-   *
-   * Uploaded plant has no measured fibre length, so the slack percentage the caller chooses is
-   * used throughout — there is nothing better to go on.
+   * Shared file→faults calculation. Used by both the signed-in endpoint and the public one, so
+   * there is exactly one implementation and the public route can't quietly diverge.
+   * `limits` is what makes the public route safe to expose.
    */
-  const rawUpload = express.raw({ type: () => true, limit: '64mb' });
-  app.post('/api/fiber/locate/file', rawUpload, (req, res) => {
-    if (!Buffer.isBuffer(req.body) || !req.body.length)
-      return res.status(400).json({ error: 'No file content received' });
-    const up = parseUpload(req.body);
-    if (up.error) return res.status(400).json({ error: up.error });
+  function locateFromBuffer(buf, q, limits = {}) {
+    const maxSegments = limits.maxSegments || Infinity;
+    const maxVertices = limits.maxVertices || Infinity;
 
-    const segs = (up.parsed.routes || [])
-      .filter(r => Array.isArray(r.coordinates) && r.coordinates.length >= 2)
-      .map((r, i) => ({ id: i, coords: r.coordinates, meta: r }));
-    if (!segs.length)
-      return res.status(400).json({ error: `That ${up.format} file has no line geometry to measure along.` });
+    const up = parseUpload(buf);
+    if (up.error) return { status: 400, body: { error: up.error } };
 
-    let snap = Number(req.query.snap);
+    const lines = (up.parsed.routes || []).filter(r => Array.isArray(r.coordinates) && r.coordinates.length >= 2);
+    if (!lines.length)
+      return { status: 400, body: { error: `That ${up.format} file has no line geometry to measure along.` } };
+    if (lines.length > maxSegments)
+      return { status: 413, body: { error: `That file has ${lines.length} line segments; this page handles up to ${maxSegments}. Sign in to work with files this large.` } };
+    const vertices = lines.reduce((n, r) => n + r.coordinates.length, 0);
+    if (vertices > maxVertices)
+      return { status: 413, body: { error: `That file has ${vertices.toLocaleString()} points; this page handles up to ${maxVertices.toLocaleString()}.` } };
+
+    const segs = lines.map((r, i) => ({ id: i, coords: r.coordinates, meta: r }));
+    let snap = Number(q.snap);
     if (!Number.isFinite(snap) || snap < 0) snap = 50;
     snap = Math.min(snap, 5000);
     const merged = mergeSegments(segs, snap);
-    if (merged.coords.length < 2) return res.status(400).json({ error: 'Could not build a continuous path from that file.' });
+    if (merged.coords.length < 2) return { status: 400, body: { error: 'Could not build a continuous path from that file.' } };
 
     const coords = merged.coords;
     const cum = cumulative(coords);
     const total = cum[cum.length - 1];
-    const sl = slackOf(req);
-    // One flat slack across the whole uploaded path.
+    const sl = slackOf({ query: q });
     const spans = [{ endGround_m: total, slackPct: sl.pct }];
     const totalFibre = groundToFibre(total, spans, sl.pct);
 
@@ -388,28 +390,26 @@ export default function registerLocate(app, ctx) {
       return { name: seg.meta.name, reversed: o.reversed, ground_m: Math.round(g), ends_at_m: Math.round(acc), slack_pct: sl.pct, slack_source: 'chosen' };
     });
 
-    // Named points in the file (splice labels, in KML terms), referenced by distance.
     const labels = (up.parsed.structures || [])
       .filter(x => Number.isFinite(+x.lat) && Number.isFinite(+x.lng))
       .map(x => {
         const d = distanceAlong(coords, +x.lat, +x.lng, cum);
         return d && { name: x.name, lat: +x.lat, lng: +x.lng, along_m: Math.round(d.along_m), offset_m: Math.round(d.offset_m) };
       })
-      .filter(Boolean)
-      .sort((a, b) => a.along_m - b.along_m);
+      .filter(Boolean).sort((a, b) => a.along_m - b.along_m);
 
-    const kms = String(req.query.km ?? '').split(/[,\s]+/).map(x => x.trim()).filter(Boolean).map(Number);
+    const kms = String(q.km ?? '').split(/[,\s]+/).map(x => x.trim()).filter(Boolean).map(Number);
     if (kms.some(k => !Number.isFinite(k)))
-      return res.status(400).json({ error: 'Distances must be numbers, separated by commas' });
-    if (kms.length > 50) return res.status(400).json({ error: 'Up to 50 distances at a time' });
+      return { status: 400, body: { error: 'Distances must be numbers, separated by commas' } };
+    if (kms.length > 50) return { status: 400, body: { error: 'Up to 50 distances at a time' } };
 
-    const fromZ = String(req.query.from || 'a').toLowerCase() === 'z';
+    const fromZ = String(q.from || 'a').toLowerCase() === 'z';
     const pseudo = { coords, cum, total_m: total, segments };
     const points = kms.map((km, i) => ({ index: i + 1, ...locateOne(pseudo, spans, sl, labels, km, fromZ, totalFibre) }));
     const ordered = [...points].sort((a, b) => a.ground_m - b.ground_m);
     ordered.forEach((x, i) => { x.order = i + 1; x.gap_from_previous_m = i === 0 ? null : Math.round(x.ground_m - ordered[i - 1].ground_m); });
 
-    res.json({
+    return { status: 200, body: {
       source: { format: up.format, segments_in_file: segs.length, name: (segs[0] && segs[0].meta.name) || 'Uploaded path' },
       geometry: { type: 'LineString', coordinates: coords },
       total_m: Math.round(total), total_fibre_km: +(totalFibre / 1000).toFixed(3),
@@ -418,7 +418,66 @@ export default function registerLocate(app, ctx) {
       labels,
       count: points.length, points,
       span_m: points.length > 1 ? Math.round(ordered[ordered.length - 1].ground_m - ordered[0].ground_m) : 0
+    } };
+  }
+
+  /**
+   * Locate faults against an UPLOADED file, without importing anything.
+   *
+   * For plant that isn't in the inventory — a KMZ a carrier just sent over, a one-off as-built.
+   * Nothing is written to the database: the file is parsed, its segments merged, the readings
+   * located, and the result handed straight back. Named Point placemarks in the file become
+   * labels along the path, which is how KML normally carries splice points.
+   *
+   * Uploaded plant has no measured fibre length, so the slack percentage the caller chooses is
+   * used throughout — there is nothing better to go on.
+   */
+  /**
+   * Record a locator upload.
+   *
+   * Staff uploads keep the file so an investigation can be reopened. Public uploads record
+   * metadata only — filename, size, hash, source address — because retaining arbitrary files
+   * from anyone with the URL means hosting content of unknown provenance. The hash still lets
+   * an admin recognise the same file arriving twice.
+   */
+  function recordUpload(buf, result, who) {
+    try {
+      const sha = createHash('sha256').update(buf).digest('hex');
+      const body = result.status === 200 ? result.body : null;
+      let stored = null;
+      if (who.source === 'staff') {
+        stored = 'locator-' + randomUUID() + '.' + ((who.filename || '').split('.').pop() || 'dat').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8);
+        writeFileSync(join(ctx.UPLOADS_DIR, stored), buf);
+      }
+      db.prepare(`INSERT INTO locator_uploads
+        (filename, format, size, sha256, segments, vertices, total_m, faults, source, actor, ip, stored_name)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        who.filename || null,
+        body ? body.source.format : null,
+        buf.length, sha,
+        body ? body.source.segments_in_file : null,
+        body ? body.geometry.coordinates.length : null,
+        body ? body.total_m : null,
+        body ? body.count : null,
+        who.source, who.actor || null, who.ip || null, stored);
+    } catch (e) {
+      // Never let bookkeeping break the calculation the user actually asked for.
+      console.error('locator upload ledger:', e.message);
+    }
+  }
+  if (ctx.jobs) ctx.jobs.recordLocatorUpload = recordUpload;
+
+  const rawUpload = express.raw({ type: () => true, limit: '64mb' });
+  app.post('/api/fiber/locate/file', rawUpload, (req, res) => {
+    if (!Buffer.isBuffer(req.body) || !req.body.length)
+      return res.status(400).json({ error: 'No file content received' });
+    const r = locateFromBuffer(req.body, req.query);   // signed in: no complexity ceiling
+    recordUpload(req.body, r, {
+      source: 'staff',
+      actor: req.user && req.user.email,
+      filename: String(req.query.filename || '').slice(0, 200) || null
     });
+    res.status(r.status).json(r.body);
   });
 
   // ---- save a located point as a structure ----

@@ -1348,6 +1348,62 @@ registerLocate(app, ctx);
 registerSupport(app, ctx);   // messaging helpers first: billing has no dependency, but portal/pubBase are shared
 registerBilling(app, ctx);
 
+// ---- Files (admin only) ----
+//
+// One place to see what has been uploaded to the two systems that accept files from outside the
+// inventory: the fault locator, and visitor ID capture. Admin-only, and every ID photo read is
+// audited — these are government identity documents belonging to visitors, not company assets.
+app.get('/api/files/locator', requireAdmin, (req, res) => {
+  const rows = db.prepare(`SELECT id, filename, format, size, sha256, segments, vertices, total_m,
+      faults, source, actor, ip, (stored_name IS NOT NULL) AS retained, created_at
+    FROM locator_uploads ORDER BY datetime(created_at) DESC LIMIT 500`).all();
+  const agg = db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(size),0) bytes,
+      COALESCE(SUM(CASE WHEN stored_name IS NOT NULL THEN size ELSE 0 END),0) stored_bytes,
+      SUM(source='public') public_n FROM locator_uploads`).get();
+  res.json({ rows, total: agg.n, bytes: agg.bytes, stored_bytes: agg.stored_bytes, public_n: agg.public_n || 0 });
+});
+
+app.get('/api/files/locator/:id/download', requireAdmin, (req, res) => {
+  const r = db.prepare('SELECT * FROM locator_uploads WHERE id=?').get(req.params.id);
+  if (!r) return res.status(404).json({ error: 'not found' });
+  if (!r.stored_name) return res.status(410).json({ error: 'This upload was not retained — public uploads keep metadata only.' });
+  const fp = join(UPLOADS_DIR, r.stored_name);
+  if (!existsSync(fp)) return res.status(404).json({ error: 'file missing from disk' });
+  audit(req, 'file_read', 'locator_upload#' + r.id, r.filename || '');
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Disposition', `attachment; filename="${String(r.filename || 'upload').replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80)}"`);
+  createReadStream(fp).pipe(res);
+});
+
+app.delete('/api/files/locator/:id', requireAdmin, (req, res) => {
+  const r = db.prepare('SELECT * FROM locator_uploads WHERE id=?').get(req.params.id);
+  if (!r) return res.status(404).json({ error: 'not found' });
+  if (r.stored_name) { try { unlinkSync(join(UPLOADS_DIR, r.stored_name)); } catch {} }
+  db.prepare('DELETE FROM locator_uploads WHERE id=?').run(r.id);
+  audit(req, 'delete', 'locator_upload#' + r.id, r.filename || '');
+  res.json({ ok: true });
+});
+
+/** Visitor ID documents, listed for review. The images themselves stay behind /api/access/:id/photo. */
+app.get('/api/files/ids', requireAdmin, (req, res) => {
+  const rows = db.prepare(`SELECT id, first_name, last_name, email, phone, status, reviewed_by,
+      reviewed_at, created_at, id_photo FROM access_requests
+    WHERE id_photo IS NOT NULL ORDER BY datetime(created_at) DESC LIMIT 500`).all();
+  res.json(rows.map(r => {
+    const fp = join(UPLOADS_DIR, r.id_photo);
+    let size = null, missing = true;
+    try { if (existsSync(fp)) { size = statSync(fp).size; missing = false; } } catch {}
+    return {
+      id: r.id, name: [r.first_name, r.last_name].filter(Boolean).join(' ') || '(no name)',
+      email: r.email, phone: r.phone, status: r.status,
+      reviewed_by: r.reviewed_by, reviewed_at: r.reviewed_at, created_at: r.created_at,
+      // The stored filename is deliberately not exposed — the photo is served by request id only.
+      ext: (r.id_photo.split('.').pop() || '').toLowerCase(), size, missing
+    };
+  }));
+});
+
 // ---- audit ----
 app.get('/api/audit', (req, res) => {
   res.json(db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 200').all());
@@ -1355,6 +1411,52 @@ app.get('/api/audit', (req, res) => {
 
 // ---- public site-access check-in (no login) ----
 app.get('/access', (req, res) => res.sendFile(join(__dirname, 'public', 'access.html')));
+
+// ---- public fibre fault locator (no login) ----
+//
+// Deliberately outside /api, so it never passes through the auth gate and can't reach an
+// authenticated handler by accident. It reads nothing from the database and writes nothing: a
+// file is parsed in memory, measured, and the result returned.
+//
+// The limits below are the whole reason this is safe to expose. Merging is near-linear now, but
+// an anonymous endpoint that accepts arbitrary files still needs a ceiling on how much work one
+// request can ask for, and Node is single-threaded — one slow request stalls every other.
+const LOCATOR_MAX_BYTES = 8 * 1024 * 1024;
+const LOCATOR_LIMITS = { maxSegments: 1500, maxVertices: 250000 };
+const LOCATOR_RATE = { max: 20, windowMs: 60 * 1000 };
+const _locatorHits = new Map();
+
+function locatorThrottled(req) {
+  // Behind nginx the socket address is always the proxy, so prefer the forwarded client.
+  const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  const ip = fwd || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const hits = (_locatorHits.get(ip) || []).filter(t => now - t < LOCATOR_RATE.windowMs);
+  hits.push(now);
+  _locatorHits.set(ip, hits);
+  if (_locatorHits.size > 5000) {                       // don't let the map itself grow unbounded
+    for (const [k, v] of _locatorHits) if (!v.length || now - v[v.length - 1] > LOCATOR_RATE.windowMs) _locatorHits.delete(k);
+  }
+  return hits.length > LOCATOR_RATE.max;
+}
+
+app.get('/locator', (req, res) => res.sendFile(join(__dirname, 'public', 'locator.html')));
+
+app.post('/locator/calc', express.raw({ type: () => true, limit: LOCATOR_MAX_BYTES }), (req, res) => {
+  if (locatorThrottled(req))
+    return res.status(429).json({ error: 'Too many calculations from this address — wait a minute and try again.' });
+  if (!Buffer.isBuffer(req.body) || !req.body.length)
+    return res.status(400).json({ error: 'No file content received' });
+  if (!ctx.jobs.locateFromBuffer) return res.status(503).json({ error: 'Locator unavailable' });
+  const r = ctx.jobs.locateFromBuffer(req.body, req.query, LOCATOR_LIMITS);
+  // Metadata only for anonymous uploads — see the note on locator_uploads in db.js.
+  if (ctx.jobs.recordLocatorUpload) ctx.jobs.recordLocatorUpload(req.body, r, {
+    source: 'public',
+    ip: (String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '').slice(0, 60),
+    filename: String(req.query.filename || '').slice(0, 200) || null
+  });
+  res.status(r.status).json(r.body);
+});
 // public site autocomplete (minimal: id + name only)
 app.get('/access/sites', (req, res) => {
   const q = '%' + String(req.query.q || '').trim() + '%';

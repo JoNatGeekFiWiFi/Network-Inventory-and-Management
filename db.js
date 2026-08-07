@@ -259,6 +259,23 @@ export function migrate() {
   // length computed from the geometry this gives a REAL slack ratio per route, which beats a flat
   // assumption. NULL means the source had nothing to say and the default applies.
   ensure('fiber_routes', 'fibre_m', 'REAL');
+  // Ledger of every file put through the fault locator.
+  //
+  // Signed-in uploads keep the file (stored_name set) so an investigation can be revisited.
+  // Public anonymous uploads record metadata ONLY — filename, size, hash, source address — and
+  // the bytes are discarded. Retaining arbitrary files from anyone with the URL would mean
+  // hosting third-party content of unknown provenance on the data volume, which is not a
+  // trade worth making for a convenience feature.
+  db.exec(`CREATE TABLE IF NOT EXISTS locator_uploads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT, format TEXT, size INTEGER, sha256 TEXT,
+    segments INTEGER, vertices INTEGER, total_m REAL, faults INTEGER,
+    source TEXT NOT NULL DEFAULT 'public',   -- 'public' | 'staff'
+    actor TEXT,                              -- email, for staff uploads
+    ip TEXT,                                 -- for public uploads
+    stored_name TEXT,                        -- NULL when the file was not retained
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_locup ON locator_uploads(created_at)');
   // Earlier builds stored IQGeo's fibre distance in length_m, conflating it with ground length.
   // Move it to its proper column and recompute length_m from the geometry. Implausible ratios are
   // rejected later at read time, so a value that was really a ground length does no harm here.
