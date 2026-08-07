@@ -439,7 +439,10 @@ import { looksLikeIqgeo, parseIqgeo, parsePins } from '../lib/iqgeo.js';
   ok(p.cables.length === 1 && p.cables[0].strand_count === 24, 'span → cable with user_count as strand count');
   ok(p.cables[0].assign.from === 1 && p.cables[0].assign.to === 24, 'termination_info drives the assigned strand range');
   ok(p.cables[0].assign_label === 'FBDK/1441205//ZFS', 'circuit ID becomes the strand label');
-  ok(p.routes.length === 1 && p.routes[0].length_m === 14808, "IQGeo's own fibre distance used, not computed geometry");
+  // IQGeo's figure is a FIBRE distance, so it must not land in length_m (which is ground length)
+  // — conflating the two makes every slack calculation wrong.
+  ok(p.routes.length === 1 && p.routes[0].fibre_m === 14808, "IQGeo's fibre distance is kept as fibre_m");
+  ok(p.routes[0].length_m === null, 'length_m is left for the importer to compute from the geometry');
   ok(p.structures.length === 2 && p.structures.some(s => s.kind === 'splice_case'), 'span endpoints become structures (splice_case from ref prefix)');
   ok(/Account: ACME WIRELESS/.test(p.cables[0].notes) && /Termination:/.test(p.cables[0].notes), 'attributes preserved in cable notes');
 

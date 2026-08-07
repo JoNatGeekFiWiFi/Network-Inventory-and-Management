@@ -251,6 +251,40 @@ export function migrate() {
   ensure('fiber_routes', 'max_lat', 'REAL');
   ensure('fiber_routes', 'max_lng', 'REAL');
   db.exec('CREATE INDEX IF NOT EXISTS idx_fiber_routes_bbox ON fiber_routes(min_lat, max_lat)');
+  // Slack allowance for this route, as a percentage. NULL means "use the system default" (13%).
+  // An OTDR measures fibre, which is longer than the ground route because of slack loops and
+  // coils; a coil-heavy aerial run and a straight bore are not the same, so it's per route.
+  ensure('fiber_routes', 'slack_pct', 'REAL');
+  // Measured fibre length from the source system, where it supplied one. Together with the ground
+  // length computed from the geometry this gives a REAL slack ratio per route, which beats a flat
+  // assumption. NULL means the source had nothing to say and the default applies.
+  ensure('fiber_routes', 'fibre_m', 'REAL');
+  // Earlier builds stored IQGeo's fibre distance in length_m, conflating it with ground length.
+  // Move it to its proper column and recompute length_m from the geometry. Implausible ratios are
+  // rejected later at read time, so a value that was really a ground length does no harm here.
+  {
+    const mixed = db.prepare("SELECT id, length_m, geom_json FROM fiber_routes WHERE ext_ref LIKE 'span-route/%' AND length_m IS NOT NULL AND fibre_m IS NULL").all();
+    if (mixed.length) {
+      const upd = db.prepare('UPDATE fiber_routes SET fibre_m=?, length_m=? WHERE id=?');
+      let moved = 0;
+      for (const r of mixed) {
+        let coords = null;
+        try { const g = JSON.parse(r.geom_json); coords = g && g.type === 'LineString' ? g.coordinates : null; } catch {}
+        if (!coords || coords.length < 2) continue;
+        let ground = 0;
+        for (let i = 1; i < coords.length; i++) {
+          const [o1, a1] = coords[i - 1], [o2, a2] = coords[i];
+          const rad = d => d * Math.PI / 180;
+          const dLat = rad(a2 - a1), dLon = rad(o2 - o1);
+          const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a1)) * Math.cos(rad(a2)) * Math.sin(dLon / 2) ** 2;
+          ground += 2 * 6371008.8 * Math.asin(Math.min(1, Math.sqrt(h)));
+        }
+        upd.run(r.length_m, Math.round(ground), r.id);
+        moved++;
+      }
+      if (moved) console.log(`Separated measured fibre length from ground length on ${moved} route(s)`);
+    }
+  }
   // Backfill any route written before this column existed (or by an older build).
   {
     const stale = db.prepare('SELECT id, geom_json FROM fiber_routes WHERE min_lat IS NULL AND geom_json IS NOT NULL').all();

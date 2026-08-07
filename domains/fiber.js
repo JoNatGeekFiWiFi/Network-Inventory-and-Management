@@ -220,10 +220,24 @@ export default function registerFiber(app, ctx) {
       geom = JSON.stringify({ type: 'LineString', coordinates: cs }); len = lineLengthM(cs);
       bb = bboxOf(cs) || { minLat: null, minLng: null, maxLat: null, maxLng: null };
     }
-    db.prepare('UPDATE fiber_routes SET name=?, status=?, placement=?, owner=?, length_m=?, geom_json=?, notes=?, min_lat=?, min_lng=?, max_lat=?, max_lng=? WHERE id=?')
+    // Slack: blank/absent means "inherit the system default", which is different from 0%.
+    let slack = ex.slack_pct;
+    if (b.slack_pct !== undefined) {
+      const v = Number(b.slack_pct);
+      slack = (b.slack_pct === '' || b.slack_pct === null || !Number.isFinite(v)) ? null
+        : Math.max(0, Math.min(99, v));
+    }
+    // Measured fibre length. Normally written by the importer from the source system, but editable
+    // so a known-bad figure can be corrected or cleared rather than silently skewing distances.
+    let fibre = ex.fibre_m;
+    if (b.fibre_m !== undefined) {
+      const v = Number(b.fibre_m);
+      fibre = (b.fibre_m === '' || b.fibre_m === null || !Number.isFinite(v) || v <= 0) ? null : v;
+    }
+    db.prepare('UPDATE fiber_routes SET name=?, status=?, placement=?, owner=?, length_m=?, geom_json=?, notes=?, min_lat=?, min_lng=?, max_lat=?, max_lng=?, slack_pct=?, fibre_m=? WHERE id=?')
       .run(N(b.name, ex.name), ROUTE_STATUS.includes(b.status) ? b.status : ex.status, N(b.placement, ex.placement),
         N(b.owner, ex.owner), len, geom, N(b.notes, ex.notes),
-        bb.minLat, bb.minLng, bb.maxLat, bb.maxLng, ex.id);
+        bb.minLat, bb.minLng, bb.maxLat, bb.maxLng, slack, fibre, ex.id);
     audit(req, 'edit', 'fiber_route#' + ex.id, b.name || ex.name);
     res.json({ ok: true, length_m: len });
   });
@@ -591,7 +605,7 @@ export default function registerFiber(app, ctx) {
     // ext_ref (source system id) makes re-import idempotent; fall back to name for formats
     // that carry no stable identifier.
     const routeIdByRef = new Map(), structIdByRef = new Map();
-    const insR = db.prepare('INSERT INTO fiber_routes (name,status,placement,owner,geom_json,length_m,notes,ext_ref,min_lat,min_lng,max_lat,max_lng) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
+    const insR = db.prepare('INSERT INTO fiber_routes (name,status,placement,owner,geom_json,length_m,notes,ext_ref,min_lat,min_lng,max_lat,max_lng,fibre_m) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
     for (const r of parsed.routes) {
       const existing = r.ext_ref
         ? db.prepare('SELECT id FROM fiber_routes WHERE ext_ref=?').get(r.ext_ref)
@@ -602,7 +616,10 @@ export default function registerFiber(app, ctx) {
       const info = insR.run(String(r.name).slice(0, 160), ROUTE_STATUS.includes(r.status) ? r.status : status,
         r.placement || N(b.placement) || null, r.owner || null,
         JSON.stringify({ type: 'LineString', coordinates: r.coordinates }), len, r.notes, r.ext_ref || null,
-        rbb && rbb.minLat, rbb && rbb.minLng, rbb && rbb.maxLat, rbb && rbb.maxLng);
+        rbb && rbb.minLat, rbb && rbb.minLng, rbb && rbb.maxLat, rbb && rbb.maxLng,
+        // Measured fibre length, where the source gave one. Only IQGeo does today; a KML or
+        // shapefile has no such field, so those routes fall back to the chosen slack percentage.
+        r.fibre_m != null ? r.fibre_m : null);
       if (r.ext_ref) routeIdByRef.set(r.ext_ref, info.lastInsertRowid);
       result.routes_created++; result.total_length_m += len;
     }
