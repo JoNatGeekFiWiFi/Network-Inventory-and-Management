@@ -4031,7 +4031,9 @@ function locShowFaults(r) {
 function locMapInit(p) {
   const el = $('#locmap'); if (!el || typeof L === 'undefined' || !p) return;
   if (_locMap) { _locMap.remove(); _locMap = null; _locPin = null; window._locFaultLayer = []; }
-  _locMap = L.map(el);
+  // A view MUST be set at construction. Without one, a map whose fitBounds later fails has no
+  // centre or zoom at all and renders as an empty grey box — no tiles, no error.
+  _locMap = L.map(el).setView([33.45, -112.07], 11);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(_locMap);
   _locLayer = L.geoJSON({ type: 'Feature', geometry: p.geometry, properties: {} },
     { style: { color: '#378ADD', weight: 5, opacity: .9 } }).addTo(_locMap);
@@ -4039,11 +4041,17 @@ function locMapInit(p) {
     L.circleMarker([s.lat, s.lng], { radius: 5, color: '#fff', weight: 2, fillColor: '#1D9E75', fillOpacity: 1 })
       .bindTooltip(`${s.name} · ${(s.along_m / 1000).toFixed(3)} km`).addTo(_locMap);
   locZoomPath();
+  // The card is revealed in the same tick the map is built, so the first measurement can be taken
+  // before layout settles. Re-measure on the next frame.
+  requestAnimationFrame(() => { if (_locMap) locZoomPath(); });
   _locMap.on('click', e => locReverse(e.latlng.lat, e.latlng.lng));
 }
 
 function locZoomPath() {
   if (!_locMap || !_locLayer) return;
+  // The result panel sits above the map and changes height as faults are calculated, so the
+  // container has usually moved or resized since Leaflet last measured it.
+  _locMap.invalidateSize();
   try { const b = _locLayer.getBounds(); if (b.isValid()) _locMap.fitBounds(b, { padding: [30, 30] }); } catch {}
 }
 
@@ -4055,6 +4063,7 @@ function locDropFaults(points) {
     icon: L.divIcon({ className: '', iconSize: [26, 26], iconAnchor: [13, 13],
       html: `<div style="background:#d93636;color:#fff;border:2px solid #fff;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.4)">${f.index}</div>` })
   }).bindPopup(`<b>Fault ${f.index}</b><br>${f.requested_fibre_km} km fibre<br><span class="mono">${f.lat}, ${f.lng}</span>`).addTo(_locMap));
+  _locMap.invalidateSize();
   try { _locMap.fitBounds(L.latLngBounds(points.map(f => [f.lat, f.lng])).pad(0.35)); } catch {}
   window._locAll = points;
   if (points.length === 1) window._locLast = { lat: points[0].lat, lng: points[0].lng, label: 'Fault 1' };
@@ -4133,6 +4142,7 @@ function locDropPin(lat, lng, label) {
   window._locFaultLayer = []; window._locAll = null;
   _locPin = L.marker([lat, lng]).addTo(_locMap)
     .bindPopup(`<b>${esc(label)}</b><br><span class="mono">${lat}, ${lng}</span>`);
+  _locMap.invalidateSize();
   _locMap.setView([lat, lng], Math.max(_locMap.getZoom(), 16));
   _locPin.openPopup();
   window._locLast = { lat, lng, label };
