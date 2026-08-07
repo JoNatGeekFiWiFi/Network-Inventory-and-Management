@@ -3675,76 +3675,147 @@ function gsGo(i) {
 
 
 // ---------- Fibre distance ↔ GPS locator ----------
-// "The OTDR says 4.2 km — where do we dig?" and the reverse. The path comes from a circuit, cable
-// or route already in the inventory, so there's nothing to export and re-upload first.
+// "The OTDR says 4.2 km — where do we dig?" and the reverse.
+//
+// The path can come from the inventory (a circuit picked by CID, nothing to export first) or from
+// a KML/KMZ dropped straight in, for plant that isn't in the database yet. Both feed the same
+// maths; only where the geometry comes from differs.
 
 let _locMap = null, _locPath = null, _locLayer = null, _locPin = null, _locSubject = null;
+let _locFile = null;                 // the uploaded file, when working from one
+let _locSource = 'db';               // 'db' | 'file'
+let _locFaults = [{ km: '' }];       // fault rows, so several readings are visible at once
 const SLACK_PRESETS = [10, 13];
 
 async function renderLocate(q) {
+  _locSource = (q && q.file) ? 'file' : 'db';
+  _locFile = null; _locFaults = [{ km: '' }];
   view().innerHTML = `<div class="hd"><h1>Locate along a path</h1>
       <a class="btn sm" href="#/fiber"><i class="ti ti-arrow-left"></i> Back to fiber</a></div>
-    <p class="help">Pick a circuit, cable or route, then convert an OTDR distance to a position on the
-      ground — or click the map to get the distance to a point. Fibre is longer than the route it
-      follows, so a slack allowance is applied.</p>
+    <p class="help">Turn an OTDR reading into a position on the ground, or click the map to get the
+      distance to a point. Fibre is longer than the route it follows, so a slack allowance applies.</p>
 
     <div class="card"><div class="hd"><h2>Path</h2></div><div style="padding:12px 14px">
-      <div class="mapsearch">
-        <div class="msbox"><i class="ti ti-search"></i>
-          <input id="locq" type="search" autocomplete="off" placeholder="Search a circuit ID, cable or route…"
-                 oninput="locSearch()" onkeydown="if(event.key==='Enter')locSearch()" /></div>
-        <button class="btn sm" onclick="locSearch()"><i class="ti ti-search"></i> Find</button>
+      <div class="seg" style="margin-bottom:12px">
+        <button class="segbtn" id="srcDb" onclick="locSetSource('db')"><i class="ti ti-database"></i> From inventory</button>
+        <button class="segbtn" id="srcFile" onclick="locSetSource('file')"><i class="ti ti-file-upload"></i> Upload KML / KMZ</button>
       </div>
-      <div id="locpick"></div>
+
+      <div id="locsrcdb">
+        <div class="mapsearch">
+          <div class="msbox"><i class="ti ti-search"></i>
+            <input id="locq" type="search" autocomplete="off" placeholder="Search a circuit ID, cable or route…"
+                   oninput="locSearch()" onkeydown="if(event.key==='Enter')locSearch()" /></div>
+          <button class="btn sm" onclick="locSearch()"><i class="ti ti-search"></i> Find</button>
+        </div>
+        <div id="locpick"></div>
+      </div>
+
+      <div id="locsrcfile" style="display:none">
+        <div id="locdrop" class="box" style="text-align:center;padding:22px;border-style:dashed;cursor:pointer"
+             onclick="$('#locfile').click()">
+          <i class="ti ti-cloud-upload" style="font-size:26px;color:var(--text3)"></i>
+          <div style="margin-top:6px"><b>Drop a KML or KMZ here</b></div>
+          <div class="small sec-muted">or click to choose · also reads GeoJSON, GPX, CSV and shapefiles</div>
+          <div class="small sec-muted" style="margin-top:6px">Nothing is saved — the file is measured and discarded.</div>
+        </div>
+        <input id="locfile" type="file" style="display:none"
+               accept=".kml,.kmz,.geojson,.json,.gpx,.csv,.shp,.zip" onchange="locFileChosen(this)" />
+        <div id="locfileinfo"></div>
+      </div>
+
       <div id="locinfo"></div>
     </div></div>
 
     <div id="loctools" style="display:none">
-      <div class="card"><div class="hd"><h2>Distance to position</h2></div><div style="padding:12px 14px">
-        <div class="grid3">
-          <div><label class="fl">OTDR distance — km of fibre</label>
-            <input id="lockm" type="text" inputmode="decimal" placeholder="4.200  or  1.2, 4.5, 7.8"
-                   onkeydown="if(event.key==='Enter')locForward()" />
-            <div class="help" style="margin-top:4px">One reading, or several separated by commas — a trace usually shows more than one event.</div></div>
-          <div><label class="fl">Measure from</label>
-            <select id="locfrom" onchange="locForward()">
-              <option value="a">A end (start of path)</option>
-              <option value="z">Z end (end of path)</option>
-            </select></div>
-          <div><label class="fl">Slack allowance</label>
-            <select id="locslack" onchange="locSlackChange()">
-              <option value="route" selected>Automatic — measured where known</option>
-              ${SLACK_PRESETS.map(v => `<option value="${v}">Force ${v}% everywhere</option>`).join('')}
-              <option value="custom">Force a custom %…</option>
-            </select>
-            <input id="locslackc" type="number" step="0.1" min="0" max="99" value="13"
-                   style="display:none;margin-top:6px" placeholder="13" onchange="locForward()" /></div>
-        </div>
-        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn sm primary" onclick="locForward()"><i class="ti ti-crosshair"></i> Calculate point</button>
-          <button class="btn sm" onclick="locZoomPath()"><i class="ti ti-zoom-scan"></i> Zoom to path</button>
-          <button class="btn sm" id="loccopy" style="display:none" onclick="locCopy()"><i class="ti ti-copy"></i> Copy lat/long</button>
-          <button class="btn sm" id="locsave" style="display:none" onclick="locSaveStructure()"><i class="ti ti-map-pin-plus"></i> Save as structure</button>
-        </div>
-        <div id="locresult" style="margin-top:12px"></div>
-      </div></div>
+      <div class="card"><div class="hd"><h2>Fault locations</h2>
+        <button class="btn sm" onclick="locAddFault()"><i class="ti ti-plus"></i> Add fault</button></div>
+        <div style="padding:12px 14px">
+          <div id="locfaults"></div>
+          <div class="grid2" style="margin-top:12px">
+            <div><label class="fl">Measure from</label>
+              <select id="locfrom" onchange="locForward()">
+                <option value="a">A end — start of path</option>
+                <option value="z">Z end — end of path</option>
+              </select></div>
+            <div><label class="fl">Slack allowance</label>
+              <select id="locslack" onchange="locSlackChange()">
+                <option value="route" selected>Automatic — measured where known</option>
+                ${SLACK_PRESETS.map(v => `<option value="${v}">Force ${v}% everywhere</option>`).join('')}
+                <option value="custom">Force a custom %…</option>
+              </select>
+              <input id="locslackc" type="number" step="0.1" min="0" max="99" value="13"
+                     style="display:none;margin-top:6px" onchange="locForward()" /></div>
+          </div>
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn sm primary" onclick="locForward()"><i class="ti ti-crosshair"></i> Calculate</button>
+            <button class="btn sm" onclick="locZoomPath()"><i class="ti ti-zoom-scan"></i> Zoom to path</button>
+            <button class="btn sm" id="loccopy" style="display:none" onclick="locCopyAll()"><i class="ti ti-copy"></i> Copy all</button>
+            <button class="btn sm" id="locsave" style="display:none" onclick="locSaveStructure()"><i class="ti ti-map-pin-plus"></i> Save as structure</button>
+            <a class="btn sm" id="lockml" href="#" download><i class="ti ti-download"></i> Export KML</a>
+          </div>
+        </div></div>
+
+      <div id="locresult"></div>
 
       <div class="card" style="padding:0;overflow:hidden"><div id="locmap" style="height:460px;width:100%"></div></div>
       <div class="small sec-muted" style="margin:8px 0 14px">Click anywhere on the map to work backwards — position to fibre distance.</div>
 
-      <div class="card"><div class="hd"><h2>Splices &amp; structures along the path</h2>
-        <a class="btn sm" id="lockml" href="#" download><i class="ti ti-download"></i> Export KML</a></div>
+      <div class="card"><div class="hd"><h2 id="locptshd">Splices &amp; structures along the path</h2></div>
         <div id="locpoints"></div></div>
     </div>`;
+  locSetSource(_locSource);
+  locRenderFaults();
+  locWireDrop();
   if (q && q.type && q.id) await locLoadPath(q.type, +q.id);
 }
 
+function locSetSource(src) {
+  _locSource = src;
+  $('#srcDb').classList.toggle('on', src === 'db');
+  $('#srcFile').classList.toggle('on', src === 'file');
+  $('#locsrcdb').style.display = src === 'db' ? '' : 'none';
+  $('#locsrcfile').style.display = src === 'file' ? '' : 'none';
+}
+
+// ---- fault rows ----
+function locRenderFaults() {
+  const el = $('#locfaults'); if (!el) return;
+  el.innerHTML = _locFaults.map((f, i) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+      <span class="pill" style="background:var(--surface2);min-width:28px;justify-content:center">${i + 1}</span>
+      <input type="number" step="0.001" min="0" value="${f.km ?? ''}" placeholder="km of fibre, e.g. 4.200"
+             style="flex:1" oninput="locFaultSet(${i},this.value)" onkeydown="if(event.key==='Enter')locForward()" />
+      <input type="text" value="${esc(f.label || '')}" placeholder="label (optional)"
+             style="flex:1" oninput="locFaultLabel(${i},this.value)" />
+      <button class="btn sm" onclick="locRemoveFault(${i})" ${_locFaults.length === 1 ? 'disabled' : ''}>
+        <i class="ti ti-trash"></i> Remove</button>
+    </div>`).join('') +
+    `<div class="small sec-muted">One row per event on the trace. You can also paste several
+      numbers into the first box — “1.2, 4.5, 7.8” — and they'll split into rows.</div>`;
+}
+function locFaultSet(i, v) {
+  // Pasting a whole trace into one box should just work.
+  if (/[,\s]/.test(v)) {
+    const parts = v.split(/[,\s]+/).filter(Boolean);
+    if (parts.length > 1) {
+      _locFaults.splice(i, 1, ...parts.map(km => ({ km })));
+      locRenderFaults();
+      return;
+    }
+  }
+  _locFaults[i].km = v;
+}
+function locFaultLabel(i, v) { _locFaults[i].label = v; }
+function locAddFault() { _locFaults.push({ km: '' }); locRenderFaults(); }
+function locRemoveFault(i) { if (_locFaults.length > 1) { _locFaults.splice(i, 1); locRenderFaults(); } }
+const locFaultKms = () => _locFaults.map(f => String(f.km).trim()).filter(Boolean);
+
+// ---- picking a path from the inventory ----
 async function locSearch() {
   const el = $('#locq'); if (!el) return;
   const s = el.value.trim();
   if (s.length < 2) { $('#locpick').innerHTML = ''; return; }
   let r; try { r = await api('/search?q=' + encodeURIComponent(s)); } catch { return; }
-  // Only the three things that have a path worth walking.
   const groups = (r.groups || []).filter(g => ['circuit', 'cable', 'route'].includes(g.type));
   if (!groups.length) { $('#locpick').innerHTML = `<div class="help">No circuits, cables or routes match “${esc(s)}”.</div>`; return; }
   $('#locpick').innerHTML = groups.map(g => `<div style="margin-top:8px">
@@ -3758,68 +3829,105 @@ async function locLoadPath(type, id) {
   $('#locpick').innerHTML = '';
   $('#locinfo').innerHTML = '<div class="loading">Building path…</div>';
   let p;
-  try { p = await api(`/path?type=${type}&id=${id}`.replace('/path', '/fiber/path')); }
+  try { p = await api(`/fiber/path?type=${type}&id=${id}`); }
   catch (e) {
     $('#locinfo').innerHTML = `<div class="box" style="color:var(--danger)">${esc(e.message)}</div>`;
     $('#loctools').style.display = 'none';
     return;
   }
-  _locPath = p; _locSubject = { type, id };
-  $('#loctools').style.display = '';
+  _locPath = p; _locSubject = { type, id }; _locFile = null;
+  // Coming back from file mode, the export button was hidden and old results were on screen.
+  $('#lockml').style.display = '';
   $('#lockml').href = `/api/fiber/path.kml?type=${type}&id=${id}`;
+  $('#locresult').innerHTML = '';
+  $('#loccopy').style.display = 'none'; $('#locsave').style.display = 'none';
+  window._locAll = null; window._locLast = null;
+  locShowPathInfo(p, locSlackNote(p));
+}
 
-  // Gaps and orphaned segments are the difference between a right answer and a confident wrong
-  // one, so they're stated up front rather than buried.
+// ---- picking a path from a file ----
+function locWireDrop() {
+  const d = $('#locdrop'); if (!d) return;
+  ['dragenter', 'dragover'].forEach(e => d.addEventListener(e, ev => { ev.preventDefault(); d.style.borderColor = 'var(--info)'; }));
+  ['dragleave', 'drop'].forEach(e => d.addEventListener(e, ev => { ev.preventDefault(); d.style.borderColor = ''; }));
+  d.addEventListener('drop', ev => {
+    const f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+    if (f) locUseFile(f);
+  });
+}
+function locFileChosen(input) { const f = input.files && input.files[0]; input.value = ''; if (f) locUseFile(f); }
+
+async function locUseFile(file) {
+  _locFile = file; _locSubject = null;
+  $('#locfileinfo').innerHTML = `<div class="box"><b>${esc(file.name)}</b>
+    <span class="muted small">${(file.size / 1048576).toFixed(2)} MB</span></div>`;
+  $('#locresult').innerHTML = '';
+  $('#loccopy').style.display = 'none'; $('#locsave').style.display = 'none';
+  window._locAll = null; window._locLast = null;
+  await locForward(true);   // build the path even before any distances are entered
+}
+
+/**
+ * Draw whatever path we just resolved, from either source.
+ * `note` explains the slack, which differs: the inventory can measure it, a file cannot.
+ */
+function locShowPathInfo(p, note) {
+  $('#loctools').style.display = '';
   const warn = [];
   if (p.gaps && p.gaps.length) {
     const worst = Math.max(...p.gaps.map(g => g.m));
     warn.push(`<div class="box" style="border-color:var(--warning)"><b>${p.gaps.length} gap${p.gaps.length > 1 ? 's' : ''} bridged</b>
-      — the segments don't quite meet (largest ${worst} m). Distances span those gaps in a straight line,
-      so they're only as good as the join.</div>`);
+      — the segments don't quite meet (largest ${worst} m). Distances cross those gaps in a straight
+      line, so they're only as good as the join.</div>`);
   }
-  if (p.unused_routes && p.unused_routes.length)
-    warn.push(`<div class="box" style="border-color:var(--warning)"><b>${p.unused_routes.length} route(s) left out</b>
+  const orphans = p.unused_routes ? p.unused_routes.length : (p.unused_segments || 0);
+  if (orphans) warn.push(`<div class="box" style="border-color:var(--warning)"><b>${orphans} segment(s) left out</b>
       — they don't connect to the main run and aren't counted in the distances below.</div>`);
 
+  const name = p.subject ? p.subject.name : (p.source ? p.source.name : 'Path');
+  const sub = p.subject ? p.subject.sub : (p.source ? p.source.format.toUpperCase() + ' · ' + p.source.segments_in_file + ' segment(s) in file' : '');
   $('#locinfo').innerHTML = `${warn.join('')}
     <div class="box"><div class="nearby-hd">
-      <b>${esc(p.subject.name)}</b>${p.subject.sub ? ` <span class="muted small">${esc(p.subject.sub)}</span>` : ''}
-      <span class="small sec-muted">${p.segments.length} segment(s)</span>
+      <b>${esc(name)}</b>${sub ? ` <span class="muted small">${esc(sub)}</span>` : ''}
+      <span class="small sec-muted">${p.segments.length} segment(s) merged</span>
     </div>
     <div class="grid3" style="margin-top:8px">
       <div class="metric"><div class="l">Ground length</div><div class="v">${(p.total_m / 1000).toFixed(3)} km</div></div>
-      <div class="metric"><div class="l">Fibre length</div><div class="v">${(p.total_fibre_m / 1000).toFixed(3)} km</div></div>
-      <div class="metric"><div class="l">Structures</div><div class="v">${p.points.length}</div></div>
+      <div class="metric"><div class="l">Fibre length</div><div class="v">${p.total_fibre_km != null ? p.total_fibre_km : (p.total_fibre_m / 1000).toFixed(3)} km</div></div>
+      <div class="metric"><div class="l">${p.labels ? 'Named points' : 'Structures'}</div><div class="v">${(p.labels || p.points || []).length}</div></div>
     </div>
-    <div class="small sec-muted" style="margin-top:8px">${locSlackNote(p)}</div></div>`;
-
-  locRenderPoints();
-  locMapInit();
+    <div class="small sec-muted" style="margin-top:8px">${note}</div></div>`;
+  locRenderPoints(p);
+  locMapInit(p);
 }
 
-function locRenderPoints() {
-  const p = _locPath; if (!p) return;
-  const slack = locSlack();
+function locRenderPoints(p) {
+  const list = p.labels || p.points || [];
+  $('#locptshd').textContent = p.labels ? 'Named points in the file' : 'Splices & structures along the path';
   const el = $('#locpoints'); if (!el) return;
-  if (!p.points.length) { el.innerHTML = '<div class="help" style="padding:12px 14px">No structures are attached to this path yet.</div>'; return; }
-  // Fibre distance for each structure, so a trace reading can be matched to a span at a glance.
-  const k = slack === 'route' ? null : 1 - slack / 100;
-  el.innerHTML = p.points.map(s => `<div class="row">
+  const s = locSlack();
+  const k = s === 'route' ? null : 1 - s / 100;
+  if (!list.length) {
+    el.innerHTML = `<div class="help" style="padding:12px 14px">${p.labels
+      ? 'No named Point placemarks in that file — splice labels would show here.'
+      : 'No structures are attached to this path yet.'}</div>`;
+    return;
+  }
+  el.innerHTML = list.map(x => `<div class="row">
       <i class="ti ti-map-pin sec-muted"></i>
       <div style="flex:1;min-width:0">
-        <div><a href="${esc(s.href)}"><b>${esc(s.name)}</b></a> <span class="muted small">${esc((s.kind || '').replace('_', ' '))}</span></div>
-        <div class="small sec-muted">${(s.along_m / 1000).toFixed(3)} km ground${k ? ' · ' + (s.along_m / 1000 / k).toFixed(3) + ' km fibre' : ''}${s.offset_m > 25 ? ' · ' + s.offset_m + ' m off route' : ''}</div>
+        <div>${x.href ? `<a href="${esc(x.href)}"><b>${esc(x.name)}</b></a>` : `<b>${esc(x.name)}</b>`}
+          ${x.kind ? `<span class="muted small">${esc(String(x.kind).replace('_', ' '))}</span>` : ''}</div>
+        <div class="small sec-muted">${(x.along_m / 1000).toFixed(3)} km ground${k ? ' · ' + (x.along_m / 1000 / k).toFixed(3) + ' km fibre' : ''}${x.offset_m > 25 ? ' · ' + x.offset_m + ' m off route' : ''}</div>
       </div>
-      ${s.splices ? `<span class="pill" style="background:var(--surface2)">${s.splices} splice${s.splices > 1 ? 's' : ''}</span>` : ''}
+      ${x.splices ? `<span class="pill" style="background:var(--surface2)">${x.splices} splice${x.splices > 1 ? 's' : ''}</span>` : ''}
     </div>`).join('');
 }
 
-/**
- * Say plainly where each segment's slack came from. "Measured" means the source system gave a real
- * fibre length for that route and we derived the ratio; the rest is convention, and the user should
- * know which one they're looking at before they send a crew somewhere.
- */
+/** Where the slack came from — different story for a file than for the inventory. */
 function locSlackNote(p) {
+  if (p.slack_source === 'chosen')
+    return `Uploaded plant carries no measured fibre length, so the ${p.slack_pct}% above is applied throughout.`;
   if (p.slack_forced) return `Slack forced to ${p.default_slack_pct}% on all ${p.segments.length} segment(s).`;
   const c = p.slack_sources || {};
   const bits = [];
@@ -3827,7 +3935,7 @@ function locSlackNote(p) {
   if (c.route) bits.push(`<b>${c.route}</b> set manually on the route`);
   if (c.default) bits.push(`<b>${c.default}</b> using the ${p.default_slack_pct}% default`);
   return 'Slack per segment: ' + (bits.join(' · ') || '—') +
-    (c.default ? ' — routes without a measured length fall back to the default; pick a preset above to force one figure.' : '');
+    (c.default ? ' — routes without a measured length fall back to the default.' : '');
 }
 
 function locSlack() {
@@ -3837,24 +3945,99 @@ function locSlack() {
   return Number(sel.value);
 }
 function locSlackChange() {
-  const sel = $('#locslack');
-  $('#locslackc').style.display = sel.value === 'custom' ? '' : 'none';
-  locRenderPoints();
-  if ($('#lockm').value) locForward();
+  $('#locslackc').style.display = $('#locslack').value === 'custom' ? '' : 'none';
+  locForward(true);
 }
-// 'route' means "don't send a global slack, let each route's own value apply".
-const locSlackParam = () => { const s = locSlack(); return s === 'route' ? '' : '&slack=' + s; };
+// 'route' means send no slack, so each route's own (or measured) value applies. A file has
+// nothing measured, so it always needs an explicit figure.
+const locSlackParam = () => {
+  const s = locSlack();
+  if (s === 'route') return _locSource === 'file' ? '&slack=13' : '';
+  return '&slack=' + s;
+};
 
-function locMapInit() {
-  const el = $('#locmap'); if (!el || typeof L === 'undefined' || !_locPath) return;
-  if (_locMap) { _locMap.remove(); _locMap = null; _locPin = null; }
+// ---- calculate ----
+async function locForward(quiet) {
+  const kms = locFaultKms();
+  if (kms.some(k => !Number.isFinite(Number(k)))) { toast('Fault distances must be numbers'); return; }
+  const from = $('#locfrom') ? $('#locfrom').value : 'a';
+
+  if (_locSource === 'file') {
+    if (!_locFile) { if (!quiet) toast('Choose a KML or KMZ first'); return; }
+    const qs = `?km=${encodeURIComponent(kms.join(','))}&from=${from}${locSlackParam()}`;
+    let r;
+    try {
+      const resp = await fetch('/api/fiber/locate/file' + qs, {
+        method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: _locFile
+      });
+      r = await resp.json();
+      if (!resp.ok) throw new Error(r.error || resp.statusText);
+    } catch (e) {
+      $('#locinfo').innerHTML = `<div class="box" style="color:var(--danger)">${esc(e.message)}</div>`;
+      $('#loctools').style.display = 'none'; return;
+    }
+    _locPath = r;
+    $('#lockml').style.display = 'none';    // the file they uploaded already is the KML
+    locShowPathInfo(r, locSlackNote(r));
+    if (r.count) locShowFaults(r); else $('#locresult').innerHTML = '';
+    return;
+  }
+
+  if (!_locSubject) { if (!quiet) toast('Pick a circuit, cable or route first'); return; }
+  if (!kms.length) { if (!quiet) toast('Enter at least one fault distance'); return; }
+  const { type, id } = _locSubject;
+  let r;
+  try { r = await api(`/fiber/locate?type=${type}&id=${id}&km=${encodeURIComponent(kms.join(','))}&from=${from}${locSlackParam()}`); }
+  catch (e) { $('#locresult').innerHTML = `<div class="box" style="color:var(--danger)">${esc(e.message)}</div>`; return; }
+  $('#lockml').style.display = '';
+  $('#lockml').href = `/api/fiber/path.kml?type=${type}&id=${id}&faults=${encodeURIComponent(kms.join(','))}&from=${from}${locSlackParam()}`;
+  locShowFaults(r);
+}
+
+/** One card per located fault, ordered along the path with the gap to the one before. */
+function locShowFaults(r) {
+  const labels = _locFaults.map(f => f.label);
+  const ordered = [...r.points].sort((a, b) => a.ground_m - b.ground_m);
+  const rows = ordered.map(f => {
+    const b = f.between || {};
+    const span = [b.before && b.before.name, b.after && b.after.name].filter(Boolean).join(' → ');
+    const lab = labels[f.index - 1];
+    return `<div class="row">
+      <span class="pill" style="background:var(--danger);color:#fff;min-width:28px;justify-content:center">${f.index}</span>
+      <div style="flex:1;min-width:0">
+        <div><b class="mono">${f.lat}, ${f.lng}</b>
+          ${lab ? ` <span class="muted small">${esc(lab)}</span>` : ''}
+          <a class="small" href="https://maps.google.com/?q=${f.lat},${f.lng}" target="_blank">Maps <i class="ti ti-external-link" style="font-size:11px"></i></a>
+          ${f.beyond_end ? '<span class="small" style="color:var(--warning)"> · past the end of the path</span>' : ''}</div>
+        <div class="small sec-muted">${f.requested_fibre_km} km fibre · ${f.ground_km} km ground${span ? ' · between ' + esc(span) : ''}</div>
+      </div>
+      ${f.gap_from_previous_m != null ? `<span class="small sec-muted" title="From the previous fault">+${fmtDist(f.gap_from_previous_m)}</span>` : ''}
+      <button class="btn sm" onclick="locFocus(${f.lat},${f.lng},'Fault ${f.index}')"><i class="ti ti-target"></i> Show</button>
+    </div>`;
+  }).join('');
+  const tight = ordered.filter(f => f.gap_from_previous_m != null && f.gap_from_previous_m < 100).length;
+  const one = r.count === 1;
+  $('#locresult').innerHTML = `<div class="box">
+      <div class="nearby-hd"><b>${r.count} fault location${one ? '' : 's'}</b>
+        ${one ? '' : `<span class="small sec-muted">spread over ${fmtDist(r.span_m)} of route</span>`}
+        <span class="small sec-muted">${r.slack_pct}% slack · measured from the ${r.from === 'z' ? 'Z' : 'A'} end</span></div>
+      ${tight ? `<div class="small sec-muted" style="margin-top:6px">${tight} reading(s) fall within 100 m of the one before — likely one damaged section rather than separate faults.</div>` : ''}
+    </div><div class="card" style="margin-top:10px">${rows}</div>`;
+  $('#loccopy').style.display = ''; $('#locsave').style.display = isPriv() ? '' : 'none';
+  locDropFaults(ordered);
+}
+
+// ---- map ----
+function locMapInit(p) {
+  const el = $('#locmap'); if (!el || typeof L === 'undefined' || !p) return;
+  if (_locMap) { _locMap.remove(); _locMap = null; _locPin = null; window._locFaultLayer = []; }
   _locMap = L.map(el);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(_locMap);
-  _locLayer = L.geoJSON({ type: 'Feature', geometry: _locPath.geometry, properties: {} },
+  _locLayer = L.geoJSON({ type: 'Feature', geometry: p.geometry, properties: {} },
     { style: { color: '#378ADD', weight: 5, opacity: .9 } }).addTo(_locMap);
-  for (const s of _locPath.points)
+  for (const s of (p.labels || p.points || []))
     L.circleMarker([s.lat, s.lng], { radius: 5, color: '#fff', weight: 2, fillColor: '#1D9E75', fillOpacity: 1 })
-      .bindTooltip(`${s.name} · ${(s.along_m / 1000).toFixed(3)} km`, { permanent: false }).addTo(_locMap);
+      .bindTooltip(`${s.name} · ${(s.along_m / 1000).toFixed(3)} km`).addTo(_locMap);
   locZoomPath();
   _locMap.on('click', e => locReverse(e.latlng.lat, e.latlng.lng));
 }
@@ -3864,63 +4047,17 @@ function locZoomPath() {
   try { const b = _locLayer.getBounds(); if (b.isValid()) _locMap.fitBounds(b, { padding: [30, 30] }); } catch {}
 }
 
-async function locForward() {
-  if (!_locSubject) return;
-  const raw = $('#lockm').value.trim();
-  const kms = raw.split(/[,\s]+/).filter(Boolean);
-  if (!kms.length || kms.some(k => !Number.isFinite(Number(k)))) {
-    toast('Enter one distance in km, or several separated by commas'); return;
-  }
-  const { type, id } = _locSubject;
-  const from = $('#locfrom').value;
-  let r;
-  try { r = await api(`/fiber/locate?type=${type}&id=${id}&km=${encodeURIComponent(kms.join(','))}&from=${from}${locSlackParam()}`); }
-  catch (e) { $('#locresult').innerHTML = `<div class="box" style="color:var(--danger)">${esc(e.message)}</div>`; return; }
-  // Keep the faults in the KML so the whole trace can be handed over as one file.
-  $('#lockml').href = `/api/fiber/path.kml?type=${type}&id=${id}&faults=${encodeURIComponent(kms.join(','))}&from=${from}${locSlackParam()}`;
-  if (r.count > 1) locShowMulti(r); else locShowResult(r);
-}
-
-/** Several readings at once: each located, ordered along the path, with the gap between them. */
-function locShowMulti(r) {
-  const ordered = [...r.points].sort((a, b) => a.ground_m - b.ground_m);
-  const rows = ordered.map(f => {
-    const b = f.between || {};
-    const span = [b.before && b.before.name, b.after && b.after.name].filter(Boolean).join(' → ');
-    return `<div class="row">
-      <span class="pill" style="background:var(--danger);color:#fff;min-width:26px;justify-content:center">${f.index}</span>
-      <div style="flex:1;min-width:0">
-        <div><b class="mono">${f.lat}, ${f.lng}</b>
-          <a class="small" href="https://maps.google.com/?q=${f.lat},${f.lng}" target="_blank">Maps <i class="ti ti-external-link" style="font-size:11px"></i></a>
-          ${f.beyond_end ? '<span class="small" style="color:var(--warning)"> · past the end of the path</span>' : ''}</div>
-        <div class="small sec-muted">${f.requested_fibre_km} km fibre · ${f.ground_km} km ground${span ? ' · between ' + esc(span) : ''}</div>
-      </div>
-      ${f.gap_from_previous_m != null ? `<span class="small sec-muted" title="Distance from the previous fault">+${fmtDist(f.gap_from_previous_m)}</span>` : ''}
-      <button class="btn sm" onclick="locFocus(${f.lat},${f.lng},'Fault ${f.index}')">Show</button>
-    </div>`;
-  }).join('');
-  const tight = ordered.filter(f => f.gap_from_previous_m != null && f.gap_from_previous_m < 100).length;
-  $('#locresult').innerHTML = `<div class="box">
-    <div class="nearby-hd"><b>${r.count} fault locations</b>
-      <span class="small sec-muted">spread over ${fmtDist(r.span_m)} of route · ${r.slack_pct}% slack</span>
-      <button class="btn sm" style="margin-left:auto" onclick="locCopyAll()"><i class="ti ti-copy"></i> Copy all</button></div>
-    ${tight ? `<div class="small sec-muted" style="margin-top:6px">${tight} reading(s) fall within 100 m of the one before — likely one damaged section rather than separate faults.</div>` : ''}
-  </div><div class="card" style="margin-top:10px">${rows}</div>`;
-  $('#loccopy').style.display = 'none'; $('#locsave').style.display = 'none';
-  locDropFaults(ordered);
-}
-
-/** Numbered markers for every fault, framed together. */
 function locDropFaults(points) {
   if (!_locMap) return;
   if (_locPin) { _locMap.removeLayer(_locPin); _locPin = null; }
   (window._locFaultLayer || []).forEach(l => _locMap.removeLayer(l));
   window._locFaultLayer = points.map(f => L.marker([f.lat, f.lng], {
-    icon: L.divIcon({ className: '', iconSize: [24, 24], iconAnchor: [12, 12],
-      html: `<div style="background:var(--danger,#d93636);color:#fff;border:2px solid #fff;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.4)">${f.index}</div>` })
+    icon: L.divIcon({ className: '', iconSize: [26, 26], iconAnchor: [13, 13],
+      html: `<div style="background:#d93636;color:#fff;border:2px solid #fff;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.4)">${f.index}</div>` })
   }).bindPopup(`<b>Fault ${f.index}</b><br>${f.requested_fibre_km} km fibre<br><span class="mono">${f.lat}, ${f.lng}</span>`).addTo(_locMap));
   try { _locMap.fitBounds(L.latLngBounds(points.map(f => [f.lat, f.lng])).pad(0.35)); } catch {}
   window._locAll = points;
+  if (points.length === 1) window._locLast = { lat: points[0].lat, lng: points[0].lng, label: 'Fault 1' };
 }
 
 function locFocus(lat, lng, label) {
@@ -3929,38 +4066,24 @@ function locFocus(lat, lng, label) {
   window._locLast = { lat, lng, label };
 }
 
-function locCopyAll() {
-  const pts = window._locAll || [];
-  if (!pts.length) return;
-  const txt = pts.map(f => `${f.index}\t${f.requested_fibre_km} km\t${f.lat}, ${f.lng}`).join('\n');
-  if (navigator.clipboard && navigator.clipboard.writeText)
-    navigator.clipboard.writeText(txt).then(() => toast(`Copied ${pts.length} locations`), () => toast('Copy failed'));
-  else toast(txt);
-}
-
-function locShowResult(r) {
-  const b = r.between || {};
-  const span = [b.before && b.before.name, b.after && b.after.name].filter(Boolean).join(' → ');
-  $('#locresult').innerHTML = `<div class="box">
-    <div class="nearby-hd">
-      <b class="mono" style="font-size:16px">${r.lat}, ${r.lng}</b>
-      <a class="small" href="https://maps.google.com/?q=${r.lat},${r.lng}" target="_blank">Open in Google Maps <i class="ti ti-external-link" style="font-size:11px"></i></a>
-    </div>
-    ${r.beyond_end ? `<div class="small" style="color:var(--warning);margin-top:6px">
-      That distance is past the end of this path (${(r.total_m / 1000).toFixed(3)} km ground /
-      ${r.total_fibre_km} km fibre) — showing the far end.</div>` : ''}
-    <div class="kv"><span>Ground distance from ${r.from === 'z' ? 'Z' : 'A'} end</span><b>${r.ground_km} km</b></div>
-    <div class="kv"><span>Fibre entered</span><b>${r.requested_fibre_km} km @ ${r.slack_pct}% slack</b></div>
-    ${r.on_segment ? `<div class="kv"><span>On route</span><b><a href="#/fiber/route/${r.on_segment.route_id}">${esc(r.on_segment.name)}</a>${r.on_segment.slack_pct != null ? ` <span class="muted small">(${r.on_segment.slack_pct.toFixed ? r.on_segment.slack_pct.toFixed(1) : r.on_segment.slack_pct}% slack, ${esc(r.on_segment.slack_source || '')})</span>` : ''}</b></div>` : ''}
-    ${span ? `<div class="kv"><span>Between</span><b>${esc(span)}</b></div>` : ''}
-    ${b.before ? `<div class="kv"><span>Past ${esc(b.before.name)}</span><b>${((r.ground_m - b.before.along_m) / 1000).toFixed(3)} km</b></div>` : ''}
-  </div>`;
-  $('#loccopy').style.display = ''; $('#locsave').style.display = isPriv() ? '' : 'none';
-  locDropPin(r.lat, r.lng, `${r.requested_fibre_km} km fibre from the ${r.from === 'z' ? 'Z' : 'A'} end`);
-}
-
+// ---- reverse: click the map ----
 async function locReverse(lat, lng) {
-  if (!_locSubject) return;
+  if (_locSource === 'file' || !_locSubject) {
+    // The file path isn't stored server-side, so project locally against the geometry we hold.
+    if (!_locPath || !_locPath.geometry) return;
+    const near = locNearestOnPath(lat, lng, _locPath.geometry.coordinates);
+    if (!near) return;
+    const k = 1 - (_locPath.slack_pct ?? 13) / 100;
+    const totalFibre = (_locPath.total_m / 1000) / k;
+    $('#locresult').innerHTML = `<div class="box">
+      <div class="nearby-hd"><b class="mono" style="font-size:16px">${near.lat.toFixed(6)}, ${near.lng.toFixed(6)}</b>
+        <span class="small sec-muted">snapped to the path${near.offset_m > 25 ? ` from ${Math.round(near.offset_m)} m away` : ''}</span></div>
+      <div class="kv"><span>Fibre from A end</span><b>${(near.along_m / 1000 / k).toFixed(3)} km</b></div>
+      <div class="kv"><span>Fibre from Z end</span><b>${(totalFibre - near.along_m / 1000 / k).toFixed(3)} km</b></div>
+      <div class="kv"><span>Ground from A end</span><b>${(near.along_m / 1000).toFixed(3)} km</b></div></div>`;
+    locDropPin(near.lat, near.lng, 'clicked point');
+    return;
+  }
   const { type, id } = _locSubject;
   let r;
   try { r = await api(`/fiber/locate/reverse?type=${type}&id=${id}&lat=${lat}&lng=${lng}${locSlackParam()}`); }
@@ -3978,8 +4101,29 @@ async function locReverse(lat, lng) {
     ${b.before ? `<div class="kv"><span>After</span><b>${esc(b.before.name)} <span class="muted small">(${((r.ground_m - b.before.along_m) / 1000).toFixed(3)} km back)</span></b></div>` : ''}
     ${b.after ? `<div class="kv"><span>Before</span><b>${esc(b.after.name)} <span class="muted small">(${((b.after.along_m - r.ground_m) / 1000).toFixed(3)} km ahead)</span></b></div>` : ''}
   </div>`;
-  $('#loccopy').style.display = ''; $('#locsave').style.display = isPriv() ? '' : 'none';
   locDropPin(r.snapped.lat, r.snapped.lng, `${r.fibre_from_a_km} km fibre from the A end`);
+}
+
+/** Nearest point on a [[lng,lat],…] path, in browser-side maths (used for uploaded files). */
+function locNearestOnPath(lat, lng, coords) {
+  if (!Array.isArray(coords) || coords.length < 2) return null;
+  const rad = d => d * Math.PI / 180;
+  const kx = Math.cos(rad(lat)) * 111320, ky = 110574;
+  const px = lng * kx, py = lat * ky;
+  let best = null, acc = 0;
+  for (let i = 1; i < coords.length; i++) {
+    const ax = coords[i - 1][0] * kx, ay = coords[i - 1][1] * ky;
+    const bx = coords[i][0] * kx, by = coords[i][1] * ky;
+    const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+    const segLen = Math.sqrt(len2);
+    let t = len2 === 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / len2;
+    t = Math.max(0, Math.min(1, t));
+    const cx = ax + t * dx, cy = ay + t * dy;
+    const d = Math.hypot(px - cx, py - cy);
+    if (!best || d < best.offset_m) best = { offset_m: d, along_m: acc + t * segLen, lat: cy / ky, lng: cx / kx };
+    acc += segLen;
+  }
+  return best;
 }
 
 function locDropPin(lat, lng, label) {
@@ -3992,18 +4136,23 @@ function locDropPin(lat, lng, label) {
   _locMap.setView([lat, lng], Math.max(_locMap.getZoom(), 16));
   _locPin.openPopup();
   window._locLast = { lat, lng, label };
+  $('#loccopy').style.display = ''; $('#locsave').style.display = isPriv() ? '' : 'none';
 }
 
-function locCopy() {
-  const p = window._locLast; if (!p) return;
-  const txt = `${p.lat}, ${p.lng}`;
-  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(() => toast('Copied ' + txt), () => toast(txt));
+function locCopyAll() {
+  const pts = window._locAll;
+  const txt = pts && pts.length
+    ? pts.map(f => `${f.index}\t${f.requested_fibre_km} km\t${f.lat}, ${f.lng}`).join('\n')
+    : (window._locLast ? `${window._locLast.lat}, ${window._locLast.lng}` : '');
+  if (!txt) return;
+  if (navigator.clipboard && navigator.clipboard.writeText)
+    navigator.clipboard.writeText(txt).then(() => toast(pts && pts.length > 1 ? `Copied ${pts.length} locations` : 'Copied'), () => toast(txt));
   else toast(txt);
 }
 
 async function locSaveStructure() {
   const p = window._locLast; if (!p) return;
-  const name = prompt('Name for this point:', _locPath ? `${_locPath.subject.name} — ${p.label}` : 'Located point');
+  const name = prompt('Name for this point:', p.label || 'Located point');
   if (!name) return;
   try {
     const r = await api('/fiber/locate/mark', { method: 'POST', body: JSON.stringify({ lat: p.lat, lng: p.lng, name, notes: p.label }) });

@@ -13,6 +13,70 @@ import { shapefileToFeatures } from '../lib/shapefile.js';
 import { looksLikeIqgeo, parseIqgeo } from '../lib/iqgeo.js';
 import { bboxOf, simplifyPath, clipPathToBox, robustExtent } from '../lib/geo.js';
 
+/**
+ * Work out what an uploaded file is and turn it into { routes, structures, cables, circuits }.
+ *
+ * Shared by the importer and by the locator's "upload a file" mode, so both accept exactly the
+ * same formats and read them identically — if a KMZ imports cleanly it must also locate cleanly.
+ *
+ * @param input Buffer (raw upload) | { b64 } | { text }
+ * @returns { format, parsed } or { error }
+ */
+export function parseUpload(input) {
+  let raw = '', format = null, parsed = null;
+  let buf = null;
+  if (Buffer.isBuffer(input)) buf = input;
+  else if (input && input.b64 != null) {
+    try { buf = Buffer.from(String(input.b64), 'base64'); }
+    catch { return { error: 'Could not decode the uploaded file' }; }
+  } else raw = (input && input.text) || '';
+
+  if (buf) {
+    if (!buf.length) return { error: 'No file content received' };
+    if (looksLikeZip(buf)) {
+      // A zip is either a KMZ or a zipped shapefile set — look inside to decide.
+      let entries;
+      try { entries = listZipEntries(buf).filter(e => !e.name.endsWith('/')); }
+      catch (e) { return { error: e.message }; }
+      const shp = entries.find(e => /\.shp$/i.test(e.name));
+      if (shp) {
+        const base = shp.name.replace(/\.shp$/i, '');
+        const dbfEntry = entries.find(e => e.name.toLowerCase() === (base + '.dbf').toLowerCase());
+        try {
+          parsed = shapefileToFeatures(readZipEntry(buf, shp), dbfEntry ? readZipEntry(buf, dbfEntry) : null);
+          format = 'shapefile';
+        } catch (e) { return { error: e.message }; }
+      } else {
+        try { raw = extractKmlFromKmz(buf); format = 'kmz'; }
+        catch (e) { return { error: e.message }; }
+      }
+    } else if (buf.length > 4 && buf.readInt32BE(0) === 9994) {
+      // a bare .shp with no .dbf alongside — geometry only, names auto-numbered
+      try { parsed = shapefileToFeatures(buf, null); format = 'shapefile'; }
+      catch (e) { return { error: e.message }; }
+    } else raw = buf.toString('utf8');   // a plain text format sent as bytes — fine
+  }
+
+  if (!parsed) {
+    if (!raw.trim()) return { error: 'No file content received' };
+    const head = raw.slice(0, 4000);
+    if (format === 'kmz') parsed = parseKml(raw);
+    else if (/<gpx[\s>]/i.test(head)) { format = 'gpx'; parsed = parseGpx(raw); }
+    else if (/<kml|<Placemark/i.test(head)) { format = 'kml'; parsed = parseKml(raw); }
+    else if (/^\s*[{[]/.test(head)) {
+      let j; try { j = JSON.parse(raw); } catch (e) { return { error: 'Not valid GeoJSON: ' + e.message }; }
+      // A myWorld/IQGeo export is GeoJSON, but its user_* attributes carry cable counts,
+      // strand ranges and endpoint structures that a generic reader would discard.
+      if (looksLikeIqgeo(j)) { format = 'iqgeo'; parsed = parseIqgeo(j); }
+      else { format = 'geojson'; parsed = parseGeoJson(j); }
+    } else if (/[,;]/.test(head.split(/\r?\n/)[0] || '')) { format = 'csv'; parsed = parseCsv(raw); }
+    else return { error: 'Unrecognised file. Supported: GeoJSON, KML, KMZ, GPX, CSV, Shapefile (.shp or zipped).' };
+  }
+  if (!parsed.routes.length && !parsed.structures.length)
+    return { error: `No routes or points found in that ${format} file` };
+  return { format, parsed };
+}
+
 // TIA-598-C fibre colour sequence. Repeats every 12; beyond the first 12 units the standard
 // adds a black stripe (black itself gets a yellow stripe).
 export const TIA_COLORS = ['Blue', 'Orange', 'Green', 'Brown', 'Slate', 'White', 'Red', 'Black', 'Yellow', 'Violet', 'Rose', 'Aqua'];
@@ -543,51 +607,9 @@ export default function registerFiber(app, ctx) {
     const b = isRaw
       ? { commit: req.query.commit === '1' || req.query.commit === 'true', status: req.query.status, structure_kind: req.query.structure_kind }
       : (req.body || {});
-    let raw = '', format = null, parsed = null;
-    if (isRaw || b.data_b64) {
-      let buf;
-      if (isRaw) buf = req.body;
-      else { try { buf = Buffer.from(String(b.data_b64), 'base64'); } catch { return res.status(400).json({ error: 'Could not decode the uploaded file' }); } }
-      if (!buf.length) return res.status(400).json({ error: 'No file content received' });
-      if (looksLikeZip(buf)) {
-        // A zip is either a KMZ or a zipped shapefile set — look inside to decide.
-        let entries; try { entries = listZipEntries(buf).filter(e => !e.name.endsWith('/')); }
-        catch (e) { return res.status(400).json({ error: e.message }); }
-        const shp = entries.find(e => /\.shp$/i.test(e.name));
-        if (shp) {
-          const base = shp.name.replace(/\.shp$/i, '');
-          const dbfEntry = entries.find(e => e.name.toLowerCase() === (base + '.dbf').toLowerCase());
-          try {
-            parsed = shapefileToFeatures(readZipEntry(buf, shp), dbfEntry ? readZipEntry(buf, dbfEntry) : null);
-            format = 'shapefile';
-          } catch (e) { return res.status(400).json({ error: e.message }); }
-        } else {
-          try { raw = extractKmlFromKmz(buf); format = 'kmz'; }
-          catch (e) { return res.status(400).json({ error: e.message }); }
-        }
-      } else if (buf.length > 4 && buf.readInt32BE(0) === 9994) {
-        // a bare .shp with no .dbf alongside — geometry only, names auto-numbered
-        try { parsed = shapefileToFeatures(buf, null); format = 'shapefile'; }
-        catch (e) { return res.status(400).json({ error: e.message }); }
-      } else raw = buf.toString('utf8');   // someone base64'd a plain text format — fine
-    } else {
-      raw = typeof b.data === 'string' ? b.data : JSON.stringify(b.data || '');
-    }
-    if (!parsed) {
-      if (!raw.trim()) return res.status(400).json({ error: 'No file content received' });
-      const head = raw.slice(0, 4000);
-      if (format === 'kmz') parsed = parseKml(raw);
-      else if (/<gpx[\s>]/i.test(head)) { format = 'gpx'; parsed = parseGpx(raw); }
-      else if (/<kml|<Placemark/i.test(head)) { format = 'kml'; parsed = parseKml(raw); }
-      else if (/^\s*[{[]/.test(head)) {
-        let j; try { j = JSON.parse(raw); } catch (e) { return res.status(400).json({ error: 'Not valid GeoJSON: ' + e.message }); }
-        // A myWorld/IQGeo export is GeoJSON, but its user_* attributes carry cable counts,
-        // strand ranges and endpoint structures that a generic reader would discard.
-        if (looksLikeIqgeo(j)) { format = 'iqgeo'; parsed = parseIqgeo(j); }
-        else { format = 'geojson'; parsed = parseGeoJson(j); }
-      } else if (/[,;]/.test(head.split(/\r?\n/)[0] || '')) { format = 'csv'; parsed = parseCsv(raw); }
-      else return res.status(400).json({ error: 'Unrecognised file. Supported: GeoJSON, KML, KMZ, GPX, CSV, Shapefile (.shp or zipped).' });
-    }
+    const up = parseUpload(isRaw ? req.body : (b.data_b64 ? { b64: b.data_b64 } : { text: typeof b.data === 'string' ? b.data : JSON.stringify(b.data || '') }));
+    if (up.error) return res.status(400).json({ error: up.error });
+    const { format, parsed } = up;
     if (!parsed.routes.length && !parsed.structures.length) return res.status(400).json({ error: `No routes or points found in that ${format} file` });
     const status = ROUTE_STATUS.includes(b.status) ? b.status : 'as_built';
     const cablesIn = parsed.cables || [];

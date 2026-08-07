@@ -288,4 +288,52 @@ cookie = ''; await call('/api/login', { body: { email: 'admin@geekitek.test', pa
   ok(!/Fault 1/.test(noFaults.t), 'without the faults parameter the export is unchanged');
 }
 
+// ---- locating against an uploaded file, with nothing imported ----
+{
+  const upload = async (body, qs = '') => {
+    const h = { 'content-type': 'application/octet-stream' };
+    if (cookie) h.cookie = cookie;
+    const r = await fetch(B + '/api/fiber/locate/file' + qs, { method: 'POST', headers: h, body });
+    const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch {}
+    return { status: r.status, json: j, t };
+  };
+  // Segments deliberately out of order, one reversed, plus named splice points — a real KML.
+  const kml = `<?xml version="1.0"?><kml><Document>
+    <Placemark><name>Seg C</name><LineString><coordinates>-112,38.02,0 -112,38.03,0</coordinates></LineString></Placemark>
+    <Placemark><name>Seg A</name><LineString><coordinates>-112,38.00,0 -112,38.01,0</coordinates></LineString></Placemark>
+    <Placemark><name>Seg B</name><LineString><coordinates>-112,38.02,0 -112,38.01,0</coordinates></LineString></Placemark>
+    <Placemark><name>SPLICE-1</name><Point><coordinates>-112,38.01,0</coordinates></Point></Placemark>
+    <Placemark><name>SPLICE-2</name><Point><coordinates>-112,38.02,0</coordinates></Point></Placemark>
+  </Document></kml>`;
+  const before = (await call('/api/fiber/routes')).json.length;
+  const r = (await upload(Buffer.from(kml, 'utf8'), '?km=1,2.5,2.52&slack=13')).json;
+  ok(r.source.format === 'kml' && r.source.segments_in_file === 3, 'the uploaded KML is recognised and its segments counted');
+  ok(r.segments.map(s => s.name).join(',') === 'Seg A,Seg B,Seg C', 'segments are ordered, not taken as listed');
+  ok(r.segments[1].reversed === true, 'a reversed segment in the file is flipped');
+  ok(near(r.total_m, 3336, 25), 'the merged ground length is right');
+  ok(r.gaps.length === 0 && r.unused_segments === 0, 'a clean file reports no gaps and drops nothing');
+  ok(r.labels.length === 2 && r.labels[0].name === 'SPLICE-1', 'named Point placemarks become labels along the path');
+  ok(near(r.labels[0].along_m, 1112, 25), 'each label is referenced by distance along the merged path');
+  ok(r.count === 3 && r.points.length === 3, 'all three readings are located');
+  ok(near(r.points[0].ground_m, 870, 20), '1 km of fibre at 13% slack is 870 m of ground');
+  ok(r.slack_source === 'chosen', 'an uploaded path reports that the slack was chosen, not measured');
+  ok(r.geometry.type === 'LineString' && r.geometry.coordinates.length >= 4, 'the merged geometry comes back for drawing');
+  // The whole point: this must not touch the database.
+  ok((await call('/api/fiber/routes')).json.length === before, 'nothing was written to the inventory');
+
+  ok((await upload(Buffer.from(kml, 'utf8'), '')).json.count === 0, 'a file with no distances still returns the path');
+  ok((await upload(Buffer.from('not a map', 'utf8'), '?km=1')).status === 400, 'an unrecognised file is rejected');
+  ok((await upload(Buffer.alloc(0), '?km=1')).status === 400, 'an empty upload is rejected');
+  ok((await upload(Buffer.from(kml, 'utf8'), '?km=1,abc')).status === 400, 'a non-numeric distance is rejected');
+  // A points-only file has nothing to measure along, and should say so plainly.
+  const ptsOnly = `<kml><Document><Placemark><name>P</name><Point><coordinates>-112,38,0</coordinates></Point></Placemark></Document></kml>`;
+  const po = await upload(Buffer.from(ptsOnly, 'utf8'), '?km=1');
+  ok(po.status === 400 && /no line geometry/i.test(po.json.error), 'a file with only points explains that there is nothing to measure along');
+  // GeoJSON should work identically to KML.
+  const gj = JSON.stringify({ type: 'FeatureCollection', features: [
+    { type: 'Feature', properties: { name: 'G1' }, geometry: { type: 'LineString', coordinates: [[-112, 39.0], [-112, 39.01]] } } ] });
+  const g = (await upload(Buffer.from(gj, 'utf8'), '?km=0.5&slack=13')).json;
+  ok(g.source.format === 'geojson' && g.count === 1, 'GeoJSON uploads work the same way');
+}
+
 console.log('\nRESULT:', pass, 'passed,', fail, 'failed'); process.exit(fail ? 1 : 0);

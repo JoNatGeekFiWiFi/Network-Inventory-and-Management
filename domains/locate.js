@@ -10,6 +10,8 @@
 import { mergeSegments, cumulative, pathLengthM, pointAtDistance, distanceAlong,
          fibreToGround, groundToFibre, measuredSlackPct, DEFAULT_SLACK_PCT } from '../lib/path.js';
 import { haversineM } from '../lib/geo.js';
+import express from 'express';
+import { parseUpload, lineLengthM } from './fiber.js';
 
 const PATH_TYPES = ['circuit', 'cable', 'route'];
 const esc = s => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -337,6 +339,86 @@ export default function registerLocate(app, ctx) {
     res.setHeader('Content-Disposition', `attachment; filename="${file}.kml"`);
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(kml);
+  });
+
+  /**
+   * Locate faults against an UPLOADED file, without importing anything.
+   *
+   * For plant that isn't in the inventory — a KMZ a carrier just sent over, a one-off as-built.
+   * Nothing is written to the database: the file is parsed, its segments merged, the readings
+   * located, and the result handed straight back. Named Point placemarks in the file become
+   * labels along the path, which is how KML normally carries splice points.
+   *
+   * Uploaded plant has no measured fibre length, so the slack percentage the caller chooses is
+   * used throughout — there is nothing better to go on.
+   */
+  const rawUpload = express.raw({ type: () => true, limit: '64mb' });
+  app.post('/api/fiber/locate/file', rawUpload, (req, res) => {
+    if (!Buffer.isBuffer(req.body) || !req.body.length)
+      return res.status(400).json({ error: 'No file content received' });
+    const up = parseUpload(req.body);
+    if (up.error) return res.status(400).json({ error: up.error });
+
+    const segs = (up.parsed.routes || [])
+      .filter(r => Array.isArray(r.coordinates) && r.coordinates.length >= 2)
+      .map((r, i) => ({ id: i, coords: r.coordinates, meta: r }));
+    if (!segs.length)
+      return res.status(400).json({ error: `That ${up.format} file has no line geometry to measure along.` });
+
+    let snap = Number(req.query.snap);
+    if (!Number.isFinite(snap) || snap < 0) snap = 50;
+    snap = Math.min(snap, 5000);
+    const merged = mergeSegments(segs, snap);
+    if (merged.coords.length < 2) return res.status(400).json({ error: 'Could not build a continuous path from that file.' });
+
+    const coords = merged.coords;
+    const cum = cumulative(coords);
+    const total = cum[cum.length - 1];
+    const sl = slackOf(req);
+    // One flat slack across the whole uploaded path.
+    const spans = [{ endGround_m: total, slackPct: sl.pct }];
+    const totalFibre = groundToFibre(total, spans, sl.pct);
+
+    const byId = new Map(segs.map(x => [x.id, x]));
+    let acc = 0;
+    const segments = merged.order.map(o => {
+      const seg = byId.get(o.id);
+      const g = lineLengthM(seg.coords);
+      acc += (o.gapBefore || 0) + g;
+      return { name: seg.meta.name, reversed: o.reversed, ground_m: Math.round(g), ends_at_m: Math.round(acc), slack_pct: sl.pct, slack_source: 'chosen' };
+    });
+
+    // Named points in the file (splice labels, in KML terms), referenced by distance.
+    const labels = (up.parsed.structures || [])
+      .filter(x => Number.isFinite(+x.lat) && Number.isFinite(+x.lng))
+      .map(x => {
+        const d = distanceAlong(coords, +x.lat, +x.lng, cum);
+        return d && { name: x.name, lat: +x.lat, lng: +x.lng, along_m: Math.round(d.along_m), offset_m: Math.round(d.offset_m) };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.along_m - b.along_m);
+
+    const kms = String(req.query.km ?? '').split(/[,\s]+/).map(x => x.trim()).filter(Boolean).map(Number);
+    if (kms.some(k => !Number.isFinite(k)))
+      return res.status(400).json({ error: 'Distances must be numbers, separated by commas' });
+    if (kms.length > 50) return res.status(400).json({ error: 'Up to 50 distances at a time' });
+
+    const fromZ = String(req.query.from || 'a').toLowerCase() === 'z';
+    const pseudo = { coords, cum, total_m: total, segments };
+    const points = kms.map((km, i) => ({ index: i + 1, ...locateOne(pseudo, spans, sl, labels, km, fromZ, totalFibre) }));
+    const ordered = [...points].sort((a, b) => a.ground_m - b.ground_m);
+    ordered.forEach((x, i) => { x.order = i + 1; x.gap_from_previous_m = i === 0 ? null : Math.round(x.ground_m - ordered[i - 1].ground_m); });
+
+    res.json({
+      source: { format: up.format, segments_in_file: segs.length, name: (segs[0] && segs[0].meta.name) || 'Uploaded path' },
+      geometry: { type: 'LineString', coordinates: coords },
+      total_m: Math.round(total), total_fibre_km: +(totalFibre / 1000).toFixed(3),
+      slack_pct: sl.pct, slack_source: 'chosen',
+      segments, gaps: merged.gaps, unused_segments: merged.unused.length,
+      labels,
+      count: points.length, points,
+      span_m: points.length > 1 ? Math.round(ordered[ordered.length - 1].ground_m - ordered[0].ground_m) : 0
+    });
   });
 
   // ---- save a located point as a structure ----
