@@ -276,6 +276,48 @@ export function migrate() {
     stored_name TEXT,                        -- NULL when the file was not retained
     created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
   db.exec('CREATE INDEX IF NOT EXISTS idx_locup ON locator_uploads(created_at)');
+
+  // Units within a site — an apartment block, business park or strip mall is ONE site with many
+  // subscribers, not many sites. Without this, a 100-unit building put 100 near-identical rows in
+  // the sites list and the address had to be retyped for each one.
+  db.exec(`CREATE TABLE IF NOT EXISTS site_units (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL,
+    label TEXT NOT NULL,                    -- "Unit 101", "Suite B", "Bldg 3 Apt 12"
+    customer_id INTEGER,                    -- who is served there; NULL means vacant
+    status TEXT NOT NULL DEFAULT 'Active',
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE)`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_units_site ON site_units(site_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_units_cust ON site_units(customer_id)');
+  // One "Unit 101" per site. Case-insensitive so "unit 101" doesn't slip past.
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_units_uniq ON site_units(site_id, LOWER(label))');
+  ensure('sites', 'is_mdu', 'INTEGER DEFAULT 0');
+  // Normalised service address, so "10738 N 75Th Ave" and "10738 n 75th ave." resolve to the same
+  // site instead of quietly creating a second one. Maintained by the API on write.
+  ensure('sites', 'addr_key', 'TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_sites_addrkey ON sites(addr_key)');
+  // Devices can belong to a unit rather than just the building.
+  ensure('devices', 'unit_id', 'INTEGER');
+
+  // Accounts sit under a carrier — Cox, Verizon, AT&T, T-Mobile. The carrier is the company;
+  // the account is the specific billing relationship with them, so one carrier has many accounts.
+  //
+  // Deliberately reuses upstream_providers rather than adding a `carriers` table: that table is
+  // already "carriers / transit / wholesale", circuits already resolve their `carrier` endpoint
+  // against it, and Cox is already in it. A second table would mean the same company existing
+  // twice with no link between the two.
+  ensure('accounts', 'carrier_id', 'INTEGER');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_accounts_carrier ON accounts(carrier_id)');
+  // The carriers most US accounts sit under. Added only when absent, so renames and deletions
+  // stick and nothing is duplicated on restart.
+  {
+    const ins = db.prepare('INSERT INTO upstream_providers (name, provider_type) VALUES (?,?)');
+    const seen = db.prepare('SELECT id FROM upstream_providers WHERE LOWER(name)=LOWER(?)');
+    for (const n of ['Cox', 'Verizon', 'AT&T', 'T-Mobile', 'Lumen', 'Comcast', 'CenturyLink', 'Spectrum'])
+      if (!seen.get(n)) ins.run(n, 'Carrier');
+  }
   // Earlier builds stored IQGeo's fibre distance in length_m, conflating it with ground length.
   // Move it to its proper column and recompute length_m from the geometry. Implausible ratios are
   // rejected later at read time, so a value that was really a ground length does no harm here.

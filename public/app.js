@@ -97,6 +97,17 @@ function loc(s) {
 window.addEventListener('hashchange', route);
 window.addEventListener('DOMContentLoaded', () => { applyTheme(getTheme()); init(); });
 
+/**
+ * Re-read the cached lookup lists (accounts, POPs, models…).
+ *
+ * META is fetched once at sign-in and every picker is built from it, so anything created later in
+ * the session was invisible until a full page reload — a new account genuinely could not be
+ * assigned to a site. Call this after creating or deleting one of those records.
+ */
+async function refreshMeta() {
+  try { META = await api('/meta'); } catch {}
+}
+
 async function init() {
   try { CURRENT_USER = await api('/me'); }
   catch { return; } // 401 -> login screen already rendered
@@ -204,7 +215,7 @@ async function renderSites() {
       <span class="dot" style="background:${statCol};flex:none"></span>
       <div style="flex:1;min-width:0">
         <div>${esc(s.name)}</div>
-        <div class="small sec-muted">${esc(s.customer_name || s.account_name || '')}${s.customer_name && s.account_name ? ' · <span class="sec-muted">' + esc(s.account_name) + '</span>' : ''}</div>
+        <div class="small sec-muted">${esc(s.customer_name || s.account_name || '')}${s.customer_name && s.account_name ? ' · <span class="sec-muted">' + esc(s.account_name) + '</span>' : ''}${s.unit_count ? ` · <b>${s.unit_count} unit${s.unit_count > 1 ? 's' : ''}</b>` : ''}</div>
         <div class="small mono sec-muted">mgmt ${esc(s.current_mgmt_ip || '—')} · pub ${esc(s.current_public_ip || '—')}</div>
       </div>
       <div class="stat">${statusPill(s.conn_status)}<span class="small mono" style="${hwCol}">${s.device_online}/${s.device_total} online</span></div>
@@ -317,6 +328,23 @@ async function renderSite(id) {
 
     <div class="card"><div class="hd"><h2><i class="ti ti-topology-star-3"></i> Circuits · ${circuits.length}</h2>${isPriv() ? `<a class="btn sm" href="#/circuit/new?site=${s.id}"><i class="ti ti-plus"></i> Add circuit</a>` : ''}</div>
       ${circuits.length ? circuitMiniRows(circuits, 'site', s.id) : '<div class="row muted">No circuits reference this site. Add one from the Circuits menu or the button above.</div>'}</div>
+
+    <div class="card"><div class="hd"><h2><i class="ti ti-building-community"></i> Units · ${(s.units || []).length}</h2>
+      ${isPriv() ? `<button class="btn sm" onclick="addUnit(${s.id})"><i class="ti ti-plus"></i> Add unit</button>` : ''}</div>
+      ${(s.units || []).length
+        ? s.units.map(u => `<div class="row">
+            <i class="ti ti-door sec-muted"></i>
+            <div style="flex:1;min-width:0">
+              <div><b>${esc(u.label)}</b> ${u.customer_name ? `<a href="#/customer/${u.customer_id}">${esc(u.customer_name)}</a>` : '<span class="muted">vacant</span>'}</div>
+              ${u.notes ? `<div class="small sec-muted">${esc(u.notes)}</div>` : ''}
+            </div>
+            ${u.device_count ? `<span class="small sec-muted">${u.device_count} device${u.device_count > 1 ? 's' : ''}</span>` : ''}
+            ${statusPill(u.status)}
+            ${isPriv() ? `<button class="btn sm" onclick="editUnit(${u.id}, ${s.id})"><i class="ti ti-edit"></i> Edit</button>
+              <button class="btn sm" onclick="delUnit(${u.id}, ${s.id}, '${esc(u.label).replace(/'/g, "\\'")}')"><i class="ti ti-trash"></i> Remove</button>` : ''}
+          </div>`).join('')
+        : `<div class="row muted">No units. Add them for an apartment block, strip mall or business park so the
+             building stays one site instead of one per tenant.</div>`}</div>
 
     <div class="card"><div class="row rowlink" onclick="location.hash='#/site/${s.id}/patch'">
       <i class="ti ti-layout-grid sec-muted"></i>
@@ -558,13 +586,79 @@ async function postNote(id) {
 // ---------- Customers ----------
 async function renderCustomers() {
   const list = await api('/accounts');
-  const rows = list.map(a => `<div class="row rowlink" onclick="location.hash='#/account/${a.id}'">
+  const carriers = await api('/carriers').catch(() => []);
+
+  // Group under the carrier the account is with. Accounts with none collect at the bottom rather
+  // than being hidden, so they're visible enough to get assigned.
+  const groups = new Map();
+  for (const a of list) {
+    const key = a.carrier_name || '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(a);
+  }
+  const named = [...groups.keys()].filter(Boolean).sort((x, y) => x.localeCompare(y));
+  const ordered = [...named, ...(groups.has('') ? [''] : [])];
+
+  const row = a => `<div class="row rowlink" onclick="location.hash='#/account/${a.id}'">
     <div class="av">${initials(a.name)}</div>
     <div style="flex:1;min-width:0"><div>${esc(a.name)}</div><div class="small mono sec-muted">${esc(a.account_number || '')}</div></div>
     <span class="small sec-muted">${a.site_count} site${a.site_count === 1 ? '' : 's'}</span>
-    ${statusPill(a.status)}<i class="ti ti-chevron-right muted"></i></div>`).join('');
-  view().innerHTML = `<div class="head"><h1 style="flex:1">Accounts</h1>${isPriv() ? '<a class="btn" href="#/account/new"><i class="ti ti-plus"></i> Add account</a>' : ''}</div>
-    <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No accounts yet</div>'}</div>`;
+    ${statusPill(a.status)}<i class="ti ti-chevron-right muted"></i></div>`;
+
+  const body = list.length ? ordered.map(k => {
+    const accts = groups.get(k);
+    return `<div class="card"><div class="hd">
+        <h2>${k ? `<i class="ti ti-building-broadcast-tower"></i> ${esc(k)}` : '<span class="sec-muted">No carrier set</span>'}
+          <span class="small sec-muted" style="font-weight:400">· ${accts.length} account${accts.length === 1 ? '' : 's'}</span></h2></div>
+      ${accts.map(row).join('')}</div>`;
+  }).join('') : '<div class="card"><div class="row muted">No accounts yet</div></div>';
+
+  // Carriers with nothing under them yet, so they can be renamed or removed without hunting.
+  const empty = carriers.filter(c => !c.account_count);
+
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Accounts</h1>
+      ${isPriv() ? `<button class="btn" onclick="manageCarriers()"><i class="ti ti-building-broadcast-tower"></i> Carriers</button>
+        <a class="btn" href="#/account/new"><i class="ti ti-plus"></i> Add account</a>` : ''}</div>
+    <div style="margin-top:14px">${body}</div>
+    ${empty.length ? `<div class="help">Carriers with no accounts yet: ${empty.map(c => esc(c.name)).join(', ')}.</div>` : ''}`;
+}
+
+/** Rename or remove carriers. Deliberately light — a carrier is just a name. */
+async function manageCarriers() {
+  const carriers = await api('/carriers');
+  view().insertAdjacentHTML('afterbegin', `<div class="card" style="padding:16px;margin-bottom:12px;border:2px solid var(--info)" id="cf">
+    <div class="hd" style="padding:0 0 10px"><h2>Carriers</h2>
+      <button class="btn sm" onclick="$('#cf').remove()">Close</button></div>
+    <div class="help">The companies your accounts are with. Shared with the circuits inventory, so a
+      carrier named here is the same one a circuit can terminate on.</div>
+    ${carriers.map(c => `<div class="row">
+      <i class="ti ti-building-broadcast-tower sec-muted"></i>
+      <input id="cn-${c.id}" value="${esc(c.name)}" style="flex:1" />
+      <span class="small sec-muted">${c.account_count} account${c.account_count === 1 ? '' : 's'}</span>
+      <button class="btn sm" onclick="saveCarrier(${c.id})"><i class="ti ti-check"></i> Save</button>
+      <button class="btn sm" onclick="delCarrier(${c.id}, '${esc(c.name).replace(/'/g, "\\'")}')"><i class="ti ti-trash"></i> Delete</button>
+    </div>`).join('')}
+    <div class="row">
+      <i class="ti ti-plus sec-muted"></i>
+      <input id="newCarrierField" placeholder="Add a carrier, e.g. T-Mobile" style="flex:1"
+             onkeydown="if(event.key==='Enter')addCarrier()" />
+      <button class="btn sm primary" onclick="addCarrier()"><i class="ti ti-plus"></i> Add</button>
+    </div></div>`);
+}
+async function addCarrier() {
+  const name = $('#newCarrierField').value.trim();
+  if (!name) { toast('Enter a carrier name'); return; }
+  try { await api('/carriers', { method: 'POST', body: JSON.stringify({ name }) }); toast('Added'); $('#cf').remove(); renderCustomers().then(manageCarriers); }
+  catch (e) { toast(e.message); }
+}
+async function saveCarrier(id) {
+  try { await api('/carriers/' + id, { method: 'PUT', body: JSON.stringify({ name: $('#cn-' + id).value.trim() }) }); toast('Saved'); }
+  catch (e) { toast(e.message); }
+}
+async function delCarrier(id, name) {
+  if (!confirm(`Delete carrier "${name}"?`)) return;
+  try { await api('/carriers/' + id, { method: 'DELETE' }); toast('Deleted'); $('#cf').remove(); renderCustomers().then(manageCarriers); }
+  catch (e) { toast(e.message); }
 }
 
 async function renderCustomer(id) {
@@ -735,6 +829,7 @@ async function formCust(q) {
   if (q.id) c = await api('/customers/' + q.id);
   window._custAcctSel = new Set((c.accounts || []).map(a => a.id));
   if (q.account) window._custAcctSel.add(Number(q.account));
+  await refreshMeta();
   window._custAccts = META.accounts;
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${q.id ? 'Edit' : 'Add'} customer</h1>
@@ -1061,9 +1156,20 @@ async function formCustomer(q) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
   let a = { name: '', account_number: '', status: 'Active', billing_address: '', notes: '' };
   if (q.id) a = await api('/accounts/' + q.id);
+  window._carriers = await api('/carriers').catch(() => []);
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${q.id ? 'Edit' : 'Add'} account</h1>
     <div class="card" style="margin-top:14px;padding:16px" id="f">
+      <div class="fld">
+        <label class="fl" style="display:flex;justify-content:space-between;align-items:center">Carrier
+          <label class="small sec-muted" style="font-weight:400;cursor:pointer"><input type="checkbox" id="newCarrier" onchange="toggleNewCarrier()" style="width:auto"> New carrier</label></label>
+        <select id="acctCarrier" name="carrier_id">
+          <option value="">— none —</option>
+          ${(window._carriers || []).map(c => `<option value="${c.id}" ${String(a.carrier_id) === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+        </select>
+        <input id="newCarrierName" style="display:none;margin-top:6px" placeholder="Carrier name, e.g. T-Mobile" />
+        <div class="help">The company this account is with — Cox, Verizon, AT&amp;T. One carrier, many accounts.</div>
+      </div>
       ${field('Account name', 'name', a.name, { ph: 'e.g. Acme Logistics' })}
       <div class="grid2">${field('Account number', 'account_number', a.account_number, { mono: true })}
       ${field('Status', 'status', a.status, { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}</div>
@@ -1082,8 +1188,9 @@ async function formCustomer(q) {
 }
 async function saveCustomer(id) {
   const d = collect('#f');
-  if (id) { await api('/accounts/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/account/' + id; }
-  else { const r = await api('/accounts', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/account/' + r.id; }
+  try { d.carrier_id = await resolveCarrier(); } catch (e) { toast(e.message); return; }
+  if (id) { await api('/accounts/' + id, { method: 'PUT', body: JSON.stringify(d) }); await refreshMeta(); location.hash = '#/account/' + id; }
+  else { const r = await api('/accounts', { method: 'POST', body: JSON.stringify(d) }); await refreshMeta(); location.hash = '#/account/' + r.id; }
   toast('Saved');
 }
 
@@ -1092,6 +1199,7 @@ async function formSite(q) {
   if (q.id) s = await api('/sites/' + q.id);
   const custs = await api('/customers');
   const custOpts = custs.map(c => ({ v: c.id, l: c.name + (c.account_names ? ' · ' + c.account_names : '') }));
+  await refreshMeta();          // a picker must never be built from a list cached at sign-in
   const accOpts = META.accounts.map(a => ({ v: a.id, l: a.name }));
   const preCust = q.customer || (s.customer && s.customer.id) || s.customer_id || '';
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
@@ -1117,7 +1225,7 @@ async function formSite(q) {
       <div class="fld"><label class="fl">Served by account <span class="small sec-muted" style="font-weight:400">· optional, defaults to the customer's primary</span></label><div id="ss-siteacct"></div></div>
       <div class="fld"><label class="fl">Sub-account <span class="small sec-muted" style="font-weight:400">· optional</span></label><select id="ss-subacct" name="subaccount_id"><option value="">— none —</option></select></div>
       ${field('Site name', 'name', s.name, { ph: 'e.g. Riverside Office' })}
-      <div class="fld"><label class="fl">Service address</label><div id="ss-saddr"></div></div>
+      <div class="fld"><label class="fl">Service address</label><div id="ss-saddr"></div><div id="ss-addrmatch"></div></div>
       <div class="grid2">${field('Latitude', 'lat', s.lat || '', { mono: true })}${field('Longitude', 'lng', s.lng || '', { mono: true })}</div>
       <div class="grid2">${field('Status', 'status', s.status, { type: 'select', options: ['Active', 'Provisioning', 'Suspended', 'Cancelled'] })}
       ${field('Current public IP', 'current_public_ip', s.current_public_ip, { mono: true })}</div>
@@ -1128,6 +1236,14 @@ async function formSite(q) {
   attachSearch($('#ss-account'), accOpts, 'account_id', '', 'Search account…');
   attachSearch($('#ss-siteacct'), accOpts, 'site_account_id', (s.account && s.account.id) || '', 'Search account…', () => loadSiteSubaccounts());
   attachAddressSearch($('#ss-saddr'), { name: 'service_address', value: s.service_address || '', latName: 'lat', lngName: 'lng', placeholder: 'Street, city, state (optional if GPS)' });
+  // Warn about an existing site at this address before a duplicate is created, not after.
+  {
+    const addrInput = $('#ss-saddr').querySelector('input');
+    const check = debounce(() => siteAddrCheck(addrInput.value, 'ss-addrmatch'), 400);
+    addrInput.addEventListener('input', check);
+    addrInput.addEventListener('change', check);
+    if (!q.id && s.service_address) check();
+  }
   window._siteDefaultAcct = (s.account && s.account.id) || '';
   window._sitePreSub = s.subaccount_id || '';
   if (preCust && !window._siteDefaultAcct) onSiteCustomerPick(preCust); else loadSiteSubaccounts();
@@ -2249,6 +2365,7 @@ async function showWg(id) {
 // ---------- Import from Invoice Ninja (JSON export) ----------
 async function renderImport() {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  await refreshMeta();
   const accOpts = (META.accounts || []).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
   view().innerHTML = `<div class="crumb" onclick="location.hash='#/settings'"><i class="ti ti-chevron-left"></i> Settings</div>
     <h1>Import from Invoice Ninja</h1>
@@ -4245,4 +4362,105 @@ async function filesIds() {
       <span class="small sec-muted">${r.missing ? 'file missing' : `${esc(r.ext)} · ${fileSize(r.size)}`}</span>
       ${r.missing ? '' : `<a class="btn sm" href="/api/access/${r.id}/photo" target="_blank" rel="noopener"><i class="ti ti-eye"></i> View ID</a>`}
     </div>`).join('')}</div>`;
+}
+
+// ---------- Site units (MDUs) ----------
+// A building is one site; each subscriber in it is a unit. Keeps a 100-apartment block out of the
+// sites list as 100 near-identical rows, and means the address is typed once.
+
+async function addUnit(siteId) { await unitForm(siteId, null); }
+async function editUnit(unitId, siteId) {
+  const units = await api('/sites/' + siteId + '/units');
+  await unitForm(siteId, units.find(u => u.id === unitId) || null);
+}
+
+async function unitForm(siteId, unit) {
+  const custs = await api('/customers');
+  const opts = custs.map(c => `<option value="${c.id}" ${unit && String(unit.customer_id) === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+  view().insertAdjacentHTML('afterbegin', `<div class="card" style="padding:16px;margin-bottom:12px;border:2px solid var(--info)" id="uf">
+    <h2 style="margin-bottom:10px">${unit ? 'Edit' : 'Add'} unit</h2>
+    <div class="grid2">
+      ${field('Unit label', 'label', unit ? unit.label : '', { ph: 'e.g. Unit 101, Suite B' })}
+      ${field('Status', 'status', unit ? unit.status : 'Active', { type: 'select', options: ['Active', 'Provisioning', 'Suspended', 'Vacant'] })}
+    </div>
+    <div class="fld"><label class="fl">Customer <span class="small sec-muted" style="font-weight:400">· leave blank if vacant</span></label>
+      <select name="customer_id"><option value="">— vacant —</option>${opts}</select></div>
+    ${field('Notes', 'notes', unit ? (unit.notes || '') : '', { ph: 'optional' })}
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+      <button class="btn" onclick="$('#uf').remove()">Cancel</button>
+      <button class="btn primary" onclick="saveUnit(${siteId}, ${unit ? unit.id : 'null'})"><i class="ti ti-check"></i> Save</button>
+    </div></div>`);
+  $('#uf').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function saveUnit(siteId, unitId) {
+  const d = collect('#uf');
+  if (!d.label) { toast('Enter a unit label'); return; }
+  try {
+    if (unitId) await api('/units/' + unitId, { method: 'PUT', body: JSON.stringify(d) });
+    else await api('/sites/' + siteId + '/units', { method: 'POST', body: JSON.stringify(d) });
+    toast('Saved'); renderSite(siteId);
+  } catch (e) { toast(e.message); }
+}
+
+async function delUnit(unitId, siteId, label) {
+  if (!confirm(`Remove ${label} from this site?`)) return;
+  try { await api('/units/' + unitId, { method: 'DELETE' }); toast('Removed'); renderSite(siteId); }
+  catch (e) { toast(e.message); }
+}
+
+/**
+ * Check whether a site already exists at an address, and offer the sensible next step.
+ *
+ * Called as the address is typed on the site form. The point is that a building is entered once:
+ * if it's already there you attach to it, and if it isn't you create it from what you've already
+ * typed — rather than discovering the duplicate later.
+ */
+async function siteAddrCheck(addr, hostId) {
+  const host = $('#' + hostId); if (!host) return;
+  if (!addr || addr.trim().length < 6) { host.innerHTML = ''; return; }
+  let r; try { r = await api('/sites/lookup?address=' + encodeURIComponent(addr)); } catch { return; }
+  if (!r.key) { host.innerHTML = ''; return; }
+  if (!r.matches.length) {
+    host.innerHTML = `<div class="box small"><i class="ti ti-map-pin-plus"></i> No site here yet — saving will create one.
+      ${r.unit ? `<br>The address mentions <b>unit ${esc(r.unit)}</b>; add it as a unit once the site exists.` : ''}</div>`;
+    return;
+  }
+  host.innerHTML = `<div class="box" style="border-color:var(--warning)">
+    <b>A site already exists at this address</b>
+    ${r.matches.map(m => `<div class="row" style="padding:6px 0">
+      <i class="ti ti-building sec-muted"></i>
+      <div style="flex:1;min-width:0"><div><a href="#/site/${m.id}">${esc(m.name)}</a>
+        ${m.unit_count ? `<span class="muted small">· ${m.unit_count} unit(s)</span>` : ''}</div>
+        <div class="small sec-muted">${esc(m.service_address || '')}</div></div>
+      ${isPriv() ? `<button class="btn sm" onclick="location.hash='#/site/${m.id}'">Open</button>` : ''}
+    </div>`).join('')}
+    <div class="small sec-muted">Add this subscriber as a <b>unit</b> on that site rather than creating a second one${r.unit ? ` — the address suggests <b>${esc(r.unit)}</b>` : ''}.</div>
+  </div>`;
+}
+
+// ---------- Carriers ----------
+// The company an account is with (Cox, Verizon, AT&T). Stored in upstream_providers, which the
+// circuits inventory already uses as its carrier list — one record, not two.
+
+function toggleNewCarrier() {
+  const on = $('#newCarrier').checked;
+  $('#newCarrierName').style.display = on ? '' : 'none';
+  $('#acctCarrier').style.display = on ? 'none' : '';
+  if (on) $('#newCarrierName').focus();
+}
+
+/** Create the carrier typed inline, if any, and return the id to save against the account. */
+async function resolveCarrier() {
+  const box = $('#newCarrier');
+  if (box && box.checked) {
+    const name = $('#newCarrierName').value.trim();
+    if (!name) throw new Error('Enter the carrier name, or untick "New carrier"');
+    const existing = (window._carriers || []).find(c => c.name.toLowerCase() === name.toLowerCase());
+    if (existing) return existing.id;
+    const r = await api('/carriers', { method: 'POST', body: JSON.stringify({ name }) });
+    return r.id;
+  }
+  const sel = $('#acctCarrier');
+  return sel && sel.value ? Number(sel.value) : null;
 }

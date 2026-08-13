@@ -20,6 +20,7 @@ import registerNetwork from './domains/network.js';
 import registerFiber from './domains/fiber.js';
 import registerSearch from './domains/search.js';
 import registerLocate from './domains/locate.js';
+import { addressKey, unitFromAddress } from './lib/address.js';
 
 // HTTP(S) JSON request with a timeout; https tolerates self-signed certs (RouterOS). Returns {status, body}.
 function reqJson(mod, urlStr, opts = {}) {
@@ -634,9 +635,10 @@ app.get('/api/geocode', async (req, res) => {
 // ---- accounts ----
 app.get('/api/accounts', (req, res) => {
   const rows = db.prepare(`
-    SELECT a.*,
+    SELECT a.*, p.name AS carrier_name,
       (SELECT COUNT(*) FROM sites s WHERE s.account_id=a.id) AS site_count
-    FROM accounts a ORDER BY a.name`).all();
+    FROM accounts a LEFT JOIN upstream_providers p ON p.id = a.carrier_id
+    ORDER BY COALESCE(p.name, CHAR(255)), a.name`).all();
   rows.forEach(r => { delete r.pin; delete r.portal_password; delete r.security_questions; }); // never expose secrets in the list
   res.json(rows);
 });
@@ -659,6 +661,7 @@ function defaultAccountForCustomer(custId) {
 app.get('/api/accounts/:id', (req, res) => {
   const a = db.prepare('SELECT * FROM accounts WHERE id=?').get(req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
+  a.carrier = a.carrier_id ? db.prepare('SELECT id, name FROM upstream_providers WHERE id=?').get(a.carrier_id) : null;
   a.contacts = db.prepare('SELECT * FROM account_contacts WHERE account_id=?').all(a.id);
   a.previous_isps = db.prepare('SELECT * FROM previous_isps WHERE account_id=?').all(a.id);
   a.customers = accountCustomers(a.id).map(c => ({ ...c, site_count: db.prepare('SELECT COUNT(*) AS n FROM sites WHERE customer_id=?').get(c.id).n }));
@@ -678,8 +681,9 @@ function subAcctOut(s, req) { const o = { ...s, has_pin: !!s.pin }; if (!isPriv(
 app.post('/api/accounts', requireNoc, (req, res) => {
   const b = req.body || {};
   const cost = b.monthly_cost === '' || b.monthly_cost == null ? null : Math.max(0, parseFloat(b.monthly_cost) || 0);
-  const info = db.prepare('INSERT INTO accounts (name, account_number, sub_account, pin, email, portal_url, portal_password, security_questions, status, billing_address, notes, monthly_cost) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.pin), N(b.email), N(b.portal_url), N(b.portal_password), N(b.security_questions), b.status || 'Active', N(b.billing_address), N(b.notes), cost);
+  const info = db.prepare('INSERT INTO accounts (name, account_number, sub_account, pin, email, portal_url, portal_password, security_questions, status, billing_address, notes, monthly_cost, carrier_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.pin), N(b.email), N(b.portal_url), N(b.portal_password), N(b.security_questions), b.status || 'Active', N(b.billing_address), N(b.notes), cost,
+      b.carrier_id ? Number(b.carrier_id) : null);
   const id = info.lastInsertRowid;
   for (const c of (b.contacts || [])) {
     db.prepare('INSERT INTO account_contacts (account_id,name,role,email,phone,is_primary,is_billing) VALUES (?,?,?,?,?,?,?)')
@@ -698,6 +702,10 @@ app.put('/api/accounts/:id', requireNoc, (req, res) => {
   db.prepare('UPDATE accounts SET name=?, account_number=?, sub_account=?, email=?, portal_url=?, status=?, billing_address=?, notes=? WHERE id=?')
     .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.email), N(b.portal_url), N(b.status, 'Active'), N(b.billing_address), N(b.notes), req.params.id);
   if (b.monthly_cost !== undefined) db.prepare('UPDATE accounts SET monthly_cost=? WHERE id=?').run(b.monthly_cost === '' ? null : Math.max(0, parseFloat(b.monthly_cost) || 0), req.params.id);
+  // Absent leaves the carrier alone; empty clears it. Without that distinction a partial update
+  // from any other form would silently unassign the carrier.
+  if (b.carrier_id !== undefined)
+    db.prepare('UPDATE accounts SET carrier_id=? WHERE id=?').run(b.carrier_id ? Number(b.carrier_id) : null, req.params.id);
   if (b.pin) db.prepare('UPDATE accounts SET pin=? WHERE id=?').run(b.pin, req.params.id);
   if (b.portal_password) db.prepare('UPDATE accounts SET portal_password=? WHERE id=?').run(b.portal_password, req.params.id);
   if (b.security_questions) db.prepare('UPDATE accounts SET security_questions=? WHERE id=?').run(b.security_questions, req.params.id);
@@ -773,9 +781,11 @@ function withSiteSummary(s) {
   const conn_status = anyDown ? 'Down' : (onFailover ? 'On failover' : 'Up');
   const account = db.prepare('SELECT name FROM accounts WHERE id=?').get(s.account_id);
   const customer = s.customer_id ? db.prepare('SELECT name FROM customers WHERE id=?').get(s.customer_id) : null;
+  // Units let an apartment block be one row here instead of one row per tenant.
+  const unit_count = db.prepare('SELECT COUNT(*) n FROM site_units WHERE site_id=?').get(s.id).n;
   return {
     ...s, account_name: account ? account.name : null, customer_name: customer ? customer.name : null,
-    device_online: online, device_total: devs.length,
+    device_online: online, device_total: devs.length, unit_count,
     conn_status,
     needs_attention: anyDown || online < devs.length
   };
@@ -784,6 +794,25 @@ function withSiteSummary(s) {
 app.get('/api/sites', (req, res) => {
   const rows = db.prepare('SELECT * FROM sites ORDER BY name').all().map(withSiteSummary);
   res.json(rows);
+});
+
+/**
+ * Is there already a site at this address?
+ *
+ * Called as the address is typed on the customer and site forms, so a second site is never
+ * created for a building that already exists. Matching is on the normalised address only —
+ * see lib/address.js for why it deliberately doesn't guess.
+ */
+app.get('/api/sites/lookup', (req, res) => {
+  const addr = String(req.query.address || '');
+  const key = addressKey(addr);
+  const unit = unitFromAddress(addr);
+  if (!key) return res.json({ key: null, unit, matches: [] });
+  const matches = db.prepare(`SELECT s.id, s.name, s.service_address, s.lat, s.lng, s.is_mdu,
+      c.name AS customer_name, (SELECT COUNT(*) FROM site_units u WHERE u.site_id=s.id) AS unit_count
+    FROM sites s LEFT JOIN customers c ON c.id=s.customer_id
+    WHERE s.addr_key = ? ORDER BY s.name LIMIT 10`).all(key);
+  res.json({ key, unit, matches });
 });
 
 app.get('/api/sites/:id', (req, res) => {
@@ -796,6 +825,7 @@ app.get('/api/sites/:id', (req, res) => {
   out.connections = db.prepare('SELECT * FROM connections WHERE site_id=? ORDER BY priority').all(s.id).map(resolveConn);
   out.devices = db.prepare('SELECT d.*, m.manufacturer, m.model, m.device_type FROM devices d LEFT JOIN device_models m ON m.id=d.model_id WHERE d.assigned_type=\'site\' AND d.assigned_site_id=? ORDER BY d.name').all(s.id).map(publicDevice);
   out.notes = withNoteAttachments(db.prepare('SELECT * FROM site_notes WHERE site_id=? ORDER BY datetime(created_at) DESC').all(s.id));
+  out.units = unitsForSite(s.id);
   res.json(out);
 });
 
@@ -823,8 +853,9 @@ app.post('/api/sites', (req, res) => {
   const accountId = b.account_id || defaultAccountForCustomer(b.customer_id);
   if (!accountId) return res.status(400).json({ error: 'A customer (with at least one account) is required' });
   const subId = subaccountForAccount(b.subaccount_id, accountId); // only keep if it belongs to this account
-  const info = db.prepare('INSERT INTO sites (account_id,customer_id,name,service_address,lat,lng,status,current_mgmt_ip,current_public_ip,notes,subaccount_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-    .run(N(accountId), N(b.customer_id || null), N(b.name), N(b.service_address), N(b.lat || null), N(b.lng || null), b.status || 'Active', N(b.current_mgmt_ip), N(b.current_public_ip), N(b.notes), subId);
+  const info = db.prepare('INSERT INTO sites (account_id,customer_id,name,service_address,lat,lng,status,current_mgmt_ip,current_public_ip,notes,subaccount_id,is_mdu,addr_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run(N(accountId), N(b.customer_id || null), N(b.name), N(b.service_address), N(b.lat || null), N(b.lng || null), b.status || 'Active', N(b.current_mgmt_ip), N(b.current_public_ip), N(b.notes), subId,
+      b.is_mdu ? 1 : 0, addressKey(b.service_address) || null);
   audit(req, 'create', 'site#' + info.lastInsertRowid, b.name);
   res.json({ id: info.lastInsertRowid });
 });
@@ -837,11 +868,123 @@ app.put('/api/sites/:id', (req, res) => {
   const customerId = b.customer_id !== undefined ? b.customer_id : ex.customer_id;
   const accountId = b.account_id || (b.customer_id !== undefined && b.customer_id !== ex.customer_id ? defaultAccountForCustomer(customerId) : null) || ex.account_id;
   const subId = b.subaccount_id !== undefined ? subaccountForAccount(b.subaccount_id, accountId) : (subaccountForAccount(ex.subaccount_id, accountId)); // clear if it no longer belongs to the account
-  db.prepare('UPDATE sites SET account_id=?, customer_id=?, name=?, service_address=?, lat=?, lng=?, status=?, current_mgmt_ip=?, current_public_ip=?, notes=?, subaccount_id=? WHERE id=?')
-    .run(N(accountId), N(customerId || null), N(b.name, ex.name), N(b.service_address, ex.service_address),
+  const addr = N(b.service_address, ex.service_address);
+  db.prepare('UPDATE sites SET account_id=?, customer_id=?, name=?, service_address=?, lat=?, lng=?, status=?, current_mgmt_ip=?, current_public_ip=?, notes=?, subaccount_id=?, is_mdu=?, addr_key=? WHERE id=?')
+    .run(N(accountId), N(customerId || null), N(b.name, ex.name), addr,
          b.lat === undefined ? ex.lat : (b.lat || null), b.lng === undefined ? ex.lng : (b.lng || null),
-         N(b.status, ex.status), N(b.current_mgmt_ip, ex.current_mgmt_ip), N(b.current_public_ip, ex.current_public_ip), N(b.notes, ex.notes), subId, req.params.id);
+         N(b.status, ex.status), N(b.current_mgmt_ip, ex.current_mgmt_ip), N(b.current_public_ip, ex.current_public_ip), N(b.notes, ex.notes), subId,
+         b.is_mdu === undefined ? ex.is_mdu : (b.is_mdu ? 1 : 0), addressKey(addr) || null, req.params.id);
   audit(req, 'edit', 'site#' + req.params.id, b.name || ex.name);
+  res.json({ ok: true });
+});
+
+// ---- carriers ----
+//
+// A carrier is the company (Cox, Verizon, AT&T); an account is one billing relationship with it.
+// Stored in upstream_providers, which circuits already treat as the carrier list — see the note in
+// db.js for why this isn't a separate table.
+app.get('/api/carriers', (req, res) => {
+  res.json(db.prepare(`SELECT p.id, p.name, p.provider_type,
+      (SELECT COUNT(*) FROM accounts a WHERE a.carrier_id = p.id) AS account_count
+    FROM upstream_providers p ORDER BY p.name`).all());
+});
+
+app.post('/api/carriers', requireNoc, (req, res) => {
+  const name = String((req.body || {}).name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Carrier name required' });
+  const dupe = db.prepare('SELECT id, name FROM upstream_providers WHERE LOWER(name)=LOWER(?)').get(name);
+  if (dupe) return res.status(409).json({ error: `"${dupe.name}" already exists` });
+  const info = db.prepare('INSERT INTO upstream_providers (name, provider_type) VALUES (?,?)')
+    .run(name.slice(0, 80), N((req.body || {}).provider_type) || 'Carrier');
+  audit(req, 'create', 'carrier#' + info.lastInsertRowid, name);
+  res.json({ id: info.lastInsertRowid });
+});
+
+app.put('/api/carriers/:id', requireNoc, (req, res) => {
+  const ex = db.prepare('SELECT * FROM upstream_providers WHERE id=?').get(req.params.id);
+  if (!ex) return res.status(404).json({ error: 'not found' });
+  const name = String((req.body || {}).name ?? ex.name).trim();
+  if (!name) return res.status(400).json({ error: 'Carrier name required' });
+  const dupe = db.prepare('SELECT id FROM upstream_providers WHERE LOWER(name)=LOWER(?) AND id<>?').get(name, ex.id);
+  if (dupe) return res.status(409).json({ error: `"${name}" already exists` });
+  db.prepare('UPDATE upstream_providers SET name=?, provider_type=? WHERE id=?')
+    .run(name.slice(0, 80), N((req.body || {}).provider_type, ex.provider_type), ex.id);
+  audit(req, 'edit', 'carrier#' + ex.id, name);
+  res.json({ ok: true });
+});
+
+app.delete('/api/carriers/:id', requireNoc, (req, res) => {
+  const ex = db.prepare('SELECT * FROM upstream_providers WHERE id=?').get(req.params.id);
+  if (!ex) return res.status(404).json({ error: 'not found' });
+  // Blocked while anything points at it — a dangling carrier_id would leave accounts and circuits
+  // silently unattributed rather than visibly wrong.
+  const accts = db.prepare('SELECT COUNT(*) n FROM accounts WHERE carrier_id=?').get(ex.id).n;
+  const ckts = db.prepare("SELECT COUNT(*) n FROM circuits WHERE provider_id=? OR (a_type='carrier' AND a_ref_id=?) OR (z_type='carrier' AND z_ref_id=?)").get(ex.id, ex.id, ex.id).n;
+  const conns = db.prepare('SELECT COUNT(*) n FROM connections WHERE served_provider_id=?').get(ex.id).n;
+  const used = [accts && `${accts} account(s)`, ckts && `${ckts} circuit(s)`, conns && `${conns} connection(s)`].filter(Boolean);
+  if (used.length) return res.status(409).json({ error: `${ex.name} is still referenced by ${used.join(', ')} — reassign them first` });
+  db.prepare('DELETE FROM upstream_providers WHERE id=?').run(ex.id);
+  audit(req, 'delete', 'carrier#' + ex.id, ex.name);
+  res.json({ ok: true });
+});
+
+// ---- units within a site (MDUs) ----
+//
+// A building is one site. Each subscriber in it is a unit, so an apartment block appears once in
+// the sites list rather than once per tenant, and the address is entered once.
+function unitsForSite(siteId) {
+  return db.prepare(`SELECT u.*, c.name AS customer_name,
+      (SELECT COUNT(*) FROM devices d WHERE d.unit_id = u.id) AS device_count
+    FROM site_units u LEFT JOIN customers c ON c.id = u.customer_id
+    WHERE u.site_id = ?
+    -- Natural order: strip the leading word ("Unit ", "Apt ") and sort on the number, so Unit 2
+    -- comes before Unit 10. SQLite has no regex, so LTRIM with a character set does the work.
+    -- Labels with no number cast to 0 and fall back to alphabetical, which is what you want for
+    -- "Suite A" / "Suite B".
+    ORDER BY CAST(LTRIM(u.label, 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ #.-') AS INTEGER), u.label`).all(siteId);
+}
+
+app.get('/api/sites/:id/units', (req, res) => res.json(unitsForSite(req.params.id)));
+
+app.post('/api/sites/:id/units', requireNoc, (req, res) => {
+  const site = db.prepare('SELECT id FROM sites WHERE id=?').get(req.params.id);
+  if (!site) return res.status(404).json({ error: 'site not found' });
+  const b = req.body || {};
+  const label = String(b.label || '').trim();
+  if (!label) return res.status(400).json({ error: 'Unit label required (e.g. "Unit 101")' });
+  const dupe = db.prepare('SELECT id FROM site_units WHERE site_id=? AND LOWER(label)=LOWER(?)').get(site.id, label);
+  if (dupe) return res.status(409).json({ error: `"${label}" already exists at this site` });
+  const info = db.prepare('INSERT INTO site_units (site_id,label,customer_id,status,notes) VALUES (?,?,?,?,?)')
+    .run(site.id, label.slice(0, 60), N(b.customer_id || null), b.status || 'Active', N(b.notes));
+  // A site with units is an MDU by definition; flag it so the list renders it as one.
+  db.prepare('UPDATE sites SET is_mdu=1 WHERE id=?').run(site.id);
+  audit(req, 'create', 'site_unit#' + info.lastInsertRowid, label);
+  res.json({ id: info.lastInsertRowid });
+});
+
+app.put('/api/units/:id', requireNoc, (req, res) => {
+  const ex = db.prepare('SELECT * FROM site_units WHERE id=?').get(req.params.id);
+  if (!ex) return res.status(404).json({ error: 'not found' });
+  const b = req.body || {};
+  const label = b.label !== undefined ? String(b.label).trim() : ex.label;
+  if (!label) return res.status(400).json({ error: 'Unit label required' });
+  const dupe = db.prepare('SELECT id FROM site_units WHERE site_id=? AND LOWER(label)=LOWER(?) AND id<>?').get(ex.site_id, label, ex.id);
+  if (dupe) return res.status(409).json({ error: `"${label}" already exists at this site` });
+  db.prepare('UPDATE site_units SET label=?, customer_id=?, status=?, notes=? WHERE id=?')
+    .run(label.slice(0, 60),
+      b.customer_id === undefined ? ex.customer_id : (b.customer_id || null),
+      N(b.status, ex.status), N(b.notes, ex.notes), ex.id);
+  audit(req, 'edit', 'site_unit#' + ex.id, label);
+  res.json({ ok: true });
+});
+
+app.delete('/api/units/:id', requireNoc, (req, res) => {
+  const ex = db.prepare('SELECT * FROM site_units WHERE id=?').get(req.params.id);
+  if (!ex) return res.status(404).json({ error: 'not found' });
+  const devices = db.prepare('SELECT COUNT(*) n FROM devices WHERE unit_id=?').get(ex.id).n;
+  if (devices) return res.status(409).json({ error: `${devices} device(s) are assigned to this unit — move them first` });
+  db.prepare('DELETE FROM site_units WHERE id=?').run(ex.id);
+  audit(req, 'delete', 'site_unit#' + ex.id, ex.label);
   res.json({ ok: true });
 });
 
