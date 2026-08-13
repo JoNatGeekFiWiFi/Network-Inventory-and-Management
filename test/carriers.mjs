@@ -114,4 +114,32 @@ let mine;
   await call('/api/accounts/' + without.id, { method: 'DELETE' });
 }
 
+// ---- devices link to the same carrier list, not free text ----
+{
+  cookie = ''; await call('/api/login', { body: { email: 'admin@geekitek.test', password: 'admin123' } });
+  const carriers = (await call('/api/carriers')).json;
+  const verizon = carriers.find(c => c.name === 'Verizon');
+  const models = (await call('/api/models')).json;
+  const modelId = models.length ? models[0].id : null;
+
+  const dev = (await call('/api/devices', { body: { name: 'TEST-DEV-CARRIER', model_id: modelId, status: 'Deployed', management_mode: 'platform', ownership: 'carrier', carrier_id: verizon.id } })).json;
+  ok(dev && dev.id, 'a device can be created against a carrier');
+
+  const got = (await call('/api/devices/' + dev.id)).json;
+  ok(got.carrier_id === verizon.id, 'the device stores the carrier id, not just a typed name');
+  ok(got.carrier_name === 'Verizon', 'and the read resolves it to a name for display');
+
+  // The point of linking rather than storing a string: a rename follows.
+  await call('/api/carriers/' + verizon.id, { method: 'PUT', body: { name: 'Verizon Business' } });
+  ok((await call('/api/devices/' + dev.id)).json.carrier_name === 'Verizon Business',
+    'renaming the carrier updates every device on it — a free-text field would have gone stale');
+  await call('/api/carriers/' + verizon.id, { method: 'PUT', body: { name: 'Verizon' } });
+
+  // And a carrier with hardware on it is protected from deletion.
+  const del = await call('/api/carriers/' + verizon.id, { method: 'DELETE' });
+  ok(del.status === 409, 'a carrier with devices attached cannot be deleted');
+
+  await call('/api/devices/' + dev.id, { method: 'DELETE' });
+}
+
 console.log('\nRESULT:', pass, 'passed,', fail, 'failed'); process.exit(fail ? 1 : 0);

@@ -789,6 +789,7 @@ async function renderCust(id) {
       <div class="metric"><div class="l">Devices</div><div class="v">${c.device_count}</div></div>
       <div class="metric"><div class="l">Needs attention</div><div class="v" style="color:var(--warning)">${c.needs_attention}</div></div>
     </div>
+    ${serviceCard(c)}
     ${c.notes ? `<div class="card" style="padding:12px 14px"><div class="small sec-muted">${esc(c.notes)}</div></div>` : ''}
     ${bill && bill.any ? `<div class="card"><div class="hd"><h2><i class="ti ti-file-invoice"></i> Billing</h2>
       <div style="display:flex;align-items:center;gap:10px">${bill.outstanding > 0 ? `<span class="mono" style="color:var(--warning)">${fmtMoney(bill.outstanding)} outstanding</span>` : '<span class="pill s-up">Settled</span>'}<a class="btn sm" href="#/billing">All billing</a></div></div>
@@ -935,7 +936,7 @@ async function renderDevice(id) {
   info.push(['Serial', d.serial || '—']);
   info.push(['MAC', d.mac || '—']);
   if (d.hfc_mac) info.push(['HFC MAC', d.hfc_mac]);
-  info.push(['Ownership', d.ownership + (d.owner_org ? ' · ' + d.owner_org : '')]);
+  info.push(['Ownership', d.ownership + (d.carrier_name ? ' · ' + d.carrier_name : (d.owner_org ? ' · ' + d.owner_org : ''))]);
   if (d.account_number) info.push(['Account #', d.account_number]);
   if (d.owner_subaccount_name) info.push(['Sub-account', d.owner_subaccount_name + (d.owner_subaccount_account ? ' · ' + d.owner_subaccount_account : '')]);
   else if (d.owner_sub_account) info.push(['Sub-account', d.owner_sub_account]);
@@ -1315,6 +1316,7 @@ async function formDevice(q) {
     if (q.name) d.name = q.name;
     if (q.ip) d.mgmt_address = q.ip;
   }
+  window._carriers = await api('/carriers').catch(() => []);
   const modelOpts = (await api('/models')).map(m => ({ v: m.id, l: m.manufacturer + ' ' + m.model }));
   const siteOpts = (await api('/sites')).map(s => ({ v: s.id, l: s.name }));
   const popOpts = (await api('/pops')).map(p => ({ v: p.id, l: 'POP · ' + p.name }));
@@ -1343,7 +1345,18 @@ async function formDevice(q) {
         <button type="button" class="segbtn ${d.ownership === 'carrier' ? 'on' : ''}" id="ow-carrier" onclick="setOwn('carrier')">Carrier</button>
         <button type="button" class="segbtn ${d.ownership === 'distributor' ? 'on' : ''}" id="ow-distributor" onclick="setOwn('distributor')">Distributor</button>
       </div><input type="hidden" name="ownership" value="${d.ownership}"/>
-      <div class="grid2">${field('Carrier / distributor', 'owner_org', d.owner_org, { ph: 'e.g. Verizon, Granite' })}${field('Account number', 'account_number', d.account_number, { mono: true })}</div>
+      <div class="grid2">
+        <div class="fld">
+          <label class="fl" style="display:flex;justify-content:space-between;align-items:center">Carrier / distributor
+            <label class="small sec-muted" style="font-weight:400;cursor:pointer"><input type="checkbox" id="devNewCarrier" onchange="toggleDevCarrier()" style="width:auto"> New</label></label>
+          <select id="devCarrier" name="carrier_id">
+            <option value="">— none —</option>
+            ${(window._carriers || []).map(c => `<option value="${c.id}" ${String(d.carrier_id) === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+          </select>
+          <input id="devNewCarrierName" style="display:none;margin-top:6px" placeholder="Carrier name, e.g. Granite" />
+          ${d.owner_org && !d.carrier_id ? `<div class="help" style="color:var(--warning)">Previously typed as “${esc(d.owner_org)}” — pick it from the list so it links to the carrier.</div>` : ''}
+        </div>
+        ${field('Account number', 'account_number', d.account_number, { mono: true })}</div>
       <div class="fld"><label class="fl">Sub-account <span class="small sec-muted" style="font-weight:400">· pick from an account's sub-accounts</span></label>
         <select name="owner_subaccount_id">${subOptsHtml}</select></div>
       <div class="grid2">${field('Account (free text)', 'owner_account', d.owner_account, { mono: true, ph: 'if not linked above' })}${field('Sub-account (free text)', 'owner_sub_account', d.owner_sub_account, { mono: true, ph: 'if not linked above' })}</div>
@@ -1405,6 +1418,13 @@ async function saveDevice(id) {
   const d = collect('#f');
   d.online = 1;
   if (!d.name) { toast('Enter a device name'); return; }
+  // Carrier: either an existing one or a new one typed inline. owner_org is kept in step so the
+  // older free-text field and reports built on it still read correctly.
+  try {
+    d.carrier_id = await resolveDevCarrier();
+    const c = (window._carriers || []).find(x => String(x.id) === String(d.carrier_id));
+    if (c) d.owner_org = c.name;
+  } catch (e) { toast(e.message); return; }
   // Inline "New site": create the site (under a customer) first, then assign this device to it
   const newSite = $('#newSite') && $('#newSite').checked;
   if (d.status === 'Deployed' && d.assigned_type === 'site' && newSite) {
@@ -4469,4 +4489,60 @@ async function resolveCarrier() {
   }
   const sel = $('#acctCarrier');
   return sel && sel.value ? Number(sel.value) : null;
+}
+
+// Device carrier picker — same list the accounts and circuits use, not free text.
+function toggleDevCarrier() {
+  const on = $('#devNewCarrier').checked;
+  $('#devNewCarrierName').style.display = on ? '' : 'none';
+  $('#devCarrier').style.display = on ? 'none' : '';
+  if (on) $('#devNewCarrierName').focus();
+}
+async function resolveDevCarrier() {
+  const box = $('#devNewCarrier');
+  if (box && box.checked) {
+    const name = $('#devNewCarrierName').value.trim();
+    if (!name) throw new Error('Enter the carrier name, or untick "New"');
+    const existing = (window._carriers || []).find(c => c.name.toLowerCase() === name.toLowerCase());
+    if (existing) return existing.id;
+    const r = await api('/carriers', { method: 'POST', body: JSON.stringify({ name }) });
+    window._carriers.push({ id: r.id, name });
+    return r.id;
+  }
+  const sel = $('#devCarrier');
+  return sel && sel.value ? Number(sel.value) : null;
+}
+
+/**
+ * Carrier accounts this customer is served on.
+ *
+ * Read-only and derived from their sites and hardware — nothing here is typed on the customer.
+ * That's the point: the account and sub-account are already recorded where the work happens, and
+ * a copy on the customer would be a third place to keep in step.
+ */
+function serviceCard(c) {
+  const lines = c.service || [];
+  const row = l => {
+    const bits = [];
+    if (l.account) bits.push(l.account_id
+      ? `<a href="#/account/${l.account_id}">${esc(l.account)}</a>`
+      : esc(l.account));
+    if (l.account_number) bits.push(`<span class="mono small sec-muted">${esc(l.account_number)}</span>`);
+    const from = l.sources.map(s => s.type === 'site'
+      ? `<a href="#/site/${s.id}">${esc(s.label)}</a>`
+      : `<a href="#/device/${s.id}">${esc(s.label)}</a>`).join(', ');
+    return `<div class="row">
+      <i class="ti ti-building-broadcast-tower sec-muted"></i>
+      <div style="flex:1;min-width:0">
+        <div><b>${l.carrier ? esc(l.carrier) : '<span class="muted">carrier not set</span>'}</b>
+          ${bits.length ? ' · ' + bits.join(' ') : ''}
+          ${l.subaccount ? ` · <span class="tag">sub ${esc(l.subaccount)}</span>` : ''}</div>
+        <div class="small sec-muted">from ${from}</div>
+      </div></div>`;
+  };
+  return `<div class="card"><div class="hd"><h2><i class="ti ti-id-badge-2"></i> Carrier accounts · ${lines.length}</h2>
+      <span class="small sec-muted">from their sites &amp; hardware</span></div>
+    ${lines.length ? lines.map(row).join('')
+      : `<div class="row muted">Nothing recorded yet. Set the account and sub-account on their site,
+           or the carrier on their hardware, and it will appear here.</div>`}</div>`;
 }

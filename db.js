@@ -309,6 +309,10 @@ export function migrate() {
   // against it, and Cox is already in it. A second table would mean the same company existing
   // twice with no link between the two.
   ensure('accounts', 'carrier_id', 'INTEGER');
+  // Hardware sits on a carrier's account too. owner_org was free text, so the same company was
+  // spelled differently on different devices and none of it joined to the carrier list.
+  ensure('devices', 'carrier_id', 'INTEGER');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_devices_carrier ON devices(carrier_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_accounts_carrier ON accounts(carrier_id)');
   // The carriers most US accounts sit under. Added only when absent, so renames and deletions
   // stick and nothing is duplicated on restart.
@@ -317,6 +321,18 @@ export function migrate() {
     const seen = db.prepare('SELECT id FROM upstream_providers WHERE LOWER(name)=LOWER(?)');
     for (const n of ['Cox', 'Verizon', 'AT&T', 'T-Mobile', 'Lumen', 'Comcast', 'CenturyLink', 'Spectrum'])
       if (!seen.get(n)) ins.run(n, 'Carrier');
+  }
+  // Link devices whose typed owner_org matches a known carrier by name. Deliberately match-only:
+  // auto-creating a carrier from every typed string would turn typos into permanent entries.
+  {
+    const rows = db.prepare("SELECT id, owner_org FROM devices WHERE carrier_id IS NULL AND owner_org IS NOT NULL AND TRIM(owner_org) <> ''").all();
+    if (rows.length) {
+      const find = db.prepare('SELECT id FROM upstream_providers WHERE LOWER(name)=LOWER(TRIM(?))');
+      const upd = db.prepare('UPDATE devices SET carrier_id=? WHERE id=?');
+      let n = 0;
+      for (const r of rows) { const c = find.get(r.owner_org); if (c) { upd.run(c.id, r.id); n++; } }
+      if (n) console.log(`Linked ${n} device(s) to a carrier by name`);
+    }
   }
   // Earlier builds stored IQGeo's fibre distance in length_m, conflating it with ground length.
   // Move it to its proper column and recompute length_m from the geometry. Implausible ratios are
@@ -425,9 +441,15 @@ export function seed() {
     u('Support Tech', 'support@geekitek.test', 'support123', 'support');
 
     // Providers
-    const cox = db.prepare("INSERT INTO upstream_providers (name, provider_type) VALUES ('Cox','Wholesale')").run().lastInsertRowid;
-    const lumen = db.prepare("INSERT INTO upstream_providers (name, provider_type) VALUES ('Lumen','Transit')").run().lastInsertRowid;
-    db.prepare("INSERT INTO upstream_providers (name, provider_type) VALUES ('Cogent','Transit')").run();
+    // migrate() already seeds the common carriers and runs first, so reuse those rows rather than
+    // inserting a second Cox and a second Lumen on a fresh database.
+    const provider = (name, type) => {
+      const ex = db.prepare('SELECT id FROM upstream_providers WHERE LOWER(name)=LOWER(?)').get(name);
+      return ex ? ex.id : db.prepare('INSERT INTO upstream_providers (name, provider_type) VALUES (?,?)').run(name, type).lastInsertRowid;
+    };
+    const cox = provider('Cox', 'Wholesale');
+    const lumen = provider('Lumen', 'Transit');
+    provider('Cogent', 'Transit');
 
     // POPs
     const dal01 = db.prepare("INSERT INTO pops (name, code, address, lat, lng, status) VALUES ('Dallas 01','POP-DAL01','1101 Bryan St, Dallas TX',32.7820,-96.7975,'Active')").run().lastInsertRowid;

@@ -569,6 +569,12 @@ function publicDevice(d) {
   for (const f of ALL_CREDS) { out['has_' + f] = !!out[f]; delete out[f]; }
   out.wg_provisioned = !!out.wg_private_key;
   delete out.wg_private_key; // only released via the audited config endpoint
+  // Resolve the carrier so the UI can show a name rather than an id, and so a device linked to a
+  // renamed carrier follows the rename instead of keeping a stale string.
+  if (out.carrier_id) {
+    const c = db.prepare('SELECT id, name FROM upstream_providers WHERE id=?').get(out.carrier_id);
+    if (c) out.carrier_name = c.name;
+  }
   if (out.owner_subaccount_id) {
     const sa = db.prepare('SELECT sa.name, a.name AS account_name FROM account_subaccounts sa JOIN accounts a ON a.id=sa.account_id WHERE sa.id=?').get(out.owner_subaccount_id);
     if (sa) { out.owner_subaccount_name = sa.name; out.owner_subaccount_account = sa.account_name; }
@@ -919,9 +925,10 @@ app.delete('/api/carriers/:id', requireNoc, (req, res) => {
   // Blocked while anything points at it — a dangling carrier_id would leave accounts and circuits
   // silently unattributed rather than visibly wrong.
   const accts = db.prepare('SELECT COUNT(*) n FROM accounts WHERE carrier_id=?').get(ex.id).n;
+  const devs = db.prepare('SELECT COUNT(*) n FROM devices WHERE carrier_id=?').get(ex.id).n;
   const ckts = db.prepare("SELECT COUNT(*) n FROM circuits WHERE provider_id=? OR (a_type='carrier' AND a_ref_id=?) OR (z_type='carrier' AND z_ref_id=?)").get(ex.id, ex.id, ex.id).n;
   const conns = db.prepare('SELECT COUNT(*) n FROM connections WHERE served_provider_id=?').get(ex.id).n;
-  const used = [accts && `${accts} account(s)`, ckts && `${ckts} circuit(s)`, conns && `${conns} connection(s)`].filter(Boolean);
+  const used = [accts && `${accts} account(s)`, devs && `${devs} device(s)`, ckts && `${ckts} circuit(s)`, conns && `${conns} connection(s)`].filter(Boolean);
   if (used.length) return res.status(409).json({ error: `${ex.name} is still referenced by ${used.join(', ')} — reassign them first` });
   db.prepare('DELETE FROM upstream_providers WHERE id=?').run(ex.id);
   audit(req, 'delete', 'carrier#' + ex.id, ex.name);
@@ -999,6 +1006,68 @@ app.get('/api/customers', (req, res) => {
     FROM customers c${where} ORDER BY c.name`).all();
   res.json(rows);
 });
+/**
+ * Which carrier accounts is this customer actually served on?
+ *
+ * Derived rather than stored. The answer already exists in the records you fill in anyway — the
+ * site names the account and sub-account, the hardware names the carrier it sits on — so asking
+ * for it again on the customer would be a third place to keep in step, and the one most likely to
+ * go stale.
+ *
+ * Identical carrier/account/sub-account combinations collapse into one line, listing where the
+ * evidence came from.
+ */
+function customerServiceLines(customerId) {
+  const lines = new Map();
+  const add = (key, base, source) => {
+    if (!lines.has(key)) lines.set(key, { ...base, sources: [] });
+    lines.get(key).sources.push(source);
+  };
+
+  const acctOf = id => id ? db.prepare(`SELECT a.id, a.name, a.account_number, a.carrier_id, p.name AS carrier_name
+      FROM accounts a LEFT JOIN upstream_providers p ON p.id = a.carrier_id WHERE a.id=?`).get(id) : null;
+  const subOf = id => id ? db.prepare('SELECT id, name FROM account_subaccounts WHERE id=?').get(id) : null;
+
+  // Sites belonging to this customer, plus sites where they occupy a unit.
+  const siteIds = new Set();
+  for (const s of db.prepare('SELECT id FROM sites WHERE customer_id=?').all(customerId)) siteIds.add(s.id);
+  for (const u of db.prepare('SELECT site_id FROM site_units WHERE customer_id=?').all(customerId)) siteIds.add(u.site_id);
+
+  for (const sid of siteIds) {
+    const site = db.prepare('SELECT id, name, account_id, subaccount_id FROM sites WHERE id=?').get(sid);
+    if (!site) continue;
+    const a = acctOf(site.account_id), sub = subOf(site.subaccount_id);
+    if (!a) continue;
+    add(`a${a.id}:s${sub ? sub.id : 0}`, {
+      carrier: a.carrier_name || null, carrier_id: a.carrier_id || null,
+      account: a.name, account_id: a.id, account_number: a.account_number || null,
+      subaccount: sub ? sub.name : null, subaccount_id: sub ? sub.id : null
+    }, { type: 'site', id: site.id, label: site.name });
+  }
+
+  // Hardware carries its own carrier account, which is often the one that actually gets billed.
+  const devs = db.prepare(`SELECT d.id, d.name, d.carrier_id, d.owner_org, d.owner_account, d.owner_sub_account,
+      d.owner_subaccount_id, p.name AS carrier_name
+    FROM devices d LEFT JOIN upstream_providers p ON p.id = d.carrier_id
+    WHERE (d.assigned_type='site' AND d.assigned_site_id IN (SELECT id FROM sites WHERE customer_id=?))
+       OR d.unit_id IN (SELECT id FROM site_units WHERE customer_id=?)`).all(customerId, customerId);
+
+  for (const d of devs) {
+    const sub = subOf(d.owner_subaccount_id);
+    const carrier = d.carrier_name || d.owner_org || null;
+    const acctText = d.owner_account || null;
+    const subText = sub ? sub.name : (d.owner_sub_account || null);
+    if (!carrier && !acctText && !subText) continue;   // nothing recorded on this device
+    add(`d:${(carrier || '').toLowerCase()}|${(acctText || '').toLowerCase()}|${(subText || '').toLowerCase()}`, {
+      carrier, carrier_id: d.carrier_id || null,
+      account: acctText, account_id: null, account_number: null,
+      subaccount: subText, subaccount_id: sub ? sub.id : null
+    }, { type: 'device', id: d.id, label: d.name });
+  }
+
+  return [...lines.values()];
+}
+
 app.get('/api/customers/:id', (req, res) => {
   const c = db.prepare('SELECT * FROM customers WHERE id=?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'not found' });
@@ -1008,6 +1077,7 @@ app.get('/api/customers/:id', (req, res) => {
   c.device_count = c.sites.reduce((n, s) => n + s.device_total, 0);
   c.needs_attention = c.sites.filter(s => s.needs_attention).length;
   c.has_portal_password = !!c.portal_password; delete c.portal_password;
+  c.service = customerServiceLines(c.id);
   res.json(c);
 });
 app.post('/api/customers', requireNoc, (req, res) => {
