@@ -777,7 +777,7 @@ async function renderCust(id) {
     <div style="flex:1;min-width:0"><div>${esc(s.name)}</div><div class="small mono sec-muted">mgmt ${esc(s.current_mgmt_ip || '—')} · pub ${esc(s.current_public_ip || '—')}</div></div>
     <div class="stat">${statusPill(s.conn_status)}<span class="small mono">${s.device_online}/${s.device_total} online</span></div>
     <i class="ti ti-chevron-right muted"></i></div>`).join('');
-  const acctLinks = (c.accounts || []).map(a => `<a class="tag" href="#/account/${a.id}" style="margin:0 4px 0 0">${esc(a.name)}</a>`).join('') || '<span class="muted small">no accounts</span>';
+  const acctLinks = (c.accounts || []).map(a => `<a class="tag" href="#/account/${a.id}" style="margin:0 4px 0 0">${esc(a.name)}${a.subaccount_name ? ' · ' + esc(a.subaccount_name) : ''}</a>`).join('') || '<span class="muted small">no accounts</span>';
   view().innerHTML = `
     <div class="crumb" onclick="location.hash='#/accounts'"><i class="ti ti-chevron-left"></i> Accounts</div>
     <div class="head"><div class="av" style="width:46px;height:46px;border-radius:8px;font-size:16px">${initials(c.name)}</div>
@@ -835,7 +835,12 @@ async function formCust(q) {
   let c = { name: '', status: 'Active', notes: '', accounts: [] };
   if (q.id) c = await api('/customers/' + q.id);
   window._custAcctSel = new Set((c.accounts || []).map(a => a.id));
+  // Which sub-account of each account, keyed by account id.
+  window._custAcctSub = {};
+  for (const a of (c.accounts || [])) if (a.subaccount_id) window._custAcctSub[a.id] = a.subaccount_id;
   if (q.account) window._custAcctSel.add(Number(q.account));
+  // Sub-accounts are fetched per account, once, the first time one is ticked.
+  window._subCache = {};
   await refreshMeta();
   window._custAccts = META.accounts;
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
@@ -859,20 +864,54 @@ async function formCust(q) {
       </div>` : '<div class="help">Save the customer first, then edit it to enable portal login.</div>'}
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
       <button class="btn primary" onclick="saveCust(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
+  // Preload for the accounts already ticked, so their pickers render on first paint.
+  Promise.all([...window._custAcctSel].map(async id => {
+    try { window._subCache[id] = await api('/accounts/' + id + '/subaccounts'); } catch { window._subCache[id] = []; }
+  })).then(renderCustAccts);
   renderCustAccts();
 }
 function renderCustAccts() {
   const box = $('#custAccts'); if (!box) return;
   const sel = window._custAcctSel, q = ($('#acctFilter').value || '').toLowerCase();
   const items = (window._custAccts || []).filter(a => !q || a.name.toLowerCase().includes(q));
-  box.innerHTML = items.map(a => `<label class="row" style="cursor:pointer">
-    <input type="checkbox" ${sel.has(a.id) ? 'checked' : ''} onchange="toggleCustAcct(${a.id},this.checked)" style="width:auto"/>
-    <div style="flex:1;min-width:0">${esc(a.name)}</div></label>`).join('') || '<div class="row muted">No matching accounts</div>';
+  box.innerHTML = items.map(a => {
+    const on = sel.has(a.id);
+    const subs = window._subCache[a.id];
+    // The sub-account picker only appears for a ticked account that actually has any — otherwise
+    // it's a dead control on every row.
+    const picker = on && subs && subs.length ? `<div style="padding:0 12px 10px 40px">
+        <select onchange="setCustAcctSub(${a.id}, this.value)" style="max-width:280px">
+          <option value="">— no specific sub-account —</option>
+          ${subs.map(sb => `<option value="${sb.id}" ${String(window._custAcctSub[a.id]) === String(sb.id) ? 'selected' : ''}>${esc(sb.name)}${sb.status && sb.status !== 'active' ? ' (' + esc(sb.status) + ')' : ''}</option>`).join('')}
+        </select></div>`
+      : (on && subs && !subs.length ? '<div class="small sec-muted" style="padding:0 12px 10px 40px">No sub-accounts on this account.</div>' : '');
+    return `<div><label class="row" style="cursor:pointer">
+      <input type="checkbox" ${on ? 'checked' : ''} onchange="toggleCustAcct(${a.id},this.checked)" style="width:auto"/>
+      <div style="flex:1;min-width:0">${esc(a.name)}</div></label>${picker}</div>`;
+  }).join('') || '<div class="row muted">No matching accounts</div>';
 }
-function toggleCustAcct(id, on) { if (on) window._custAcctSel.add(id); else window._custAcctSel.delete(id); }
+
+async function toggleCustAcct(id, on) {
+  if (on) {
+    window._custAcctSel.add(id);
+    if (!window._subCache[id]) {
+      try { window._subCache[id] = await api('/accounts/' + id + '/subaccounts'); }
+      catch { window._subCache[id] = []; }
+    }
+  } else {
+    window._custAcctSel.delete(id);
+    delete window._custAcctSub[id];     // don't keep a sub-account for an account no longer served
+  }
+  renderCustAccts();
+}
+function setCustAcctSub(acctId, subId) {
+  if (subId) window._custAcctSub[acctId] = Number(subId);
+  else delete window._custAcctSub[acctId];
+}
 async function saveCust(id) {
   const d = collect('#f');
   d.account_ids = Array.from(window._custAcctSel || []);
+  d.account_subaccounts = window._custAcctSub || {};
   if (!d.account_ids.length) { toast('Pick at least one account'); return; }
   if (!d.name) { toast('Enter a customer name'); return; }
   if ($('#portalEnabled')) d.portal_enabled = $('#portalEnabled').checked;

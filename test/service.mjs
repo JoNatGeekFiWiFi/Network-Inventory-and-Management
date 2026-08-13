@@ -21,7 +21,10 @@ ok(acct.id && subA.id && subB.id && cust.id, 'fixtures created');
 // ---- nothing assigned yet ----
 {
   const c = (await call('/api/customers/' + cust.id)).json;
-  ok(Array.isArray(c.service) && c.service.length === 0, 'a customer with nothing assigned shows no carrier accounts');
+  // The customer is linked to the account, so that alone is a line — with no sub-account yet.
+  ok(c.service.length === 1 && c.service[0].sources[0].type === 'customer',
+    'the account link alone produces a line, before any site or hardware exists');
+  ok(c.service[0].subaccount === null, 'with no sub-account, because none has been chosen');
 }
 
 // ---- derived from a site ----
@@ -29,13 +32,14 @@ let site;
 {
   site = (await call('/api/sites', { body: { customer_id: cust.id, name: 'SVC-SITE', account_id: acct.id, subaccount_id: subA.id, service_address: '5 Service Rd, Tempe, AZ' } })).json;
   const c = (await call('/api/customers/' + cust.id)).json;
-  ok(c.service.length === 1, 'the site produces one carrier account line');
+  // The vague "account, no sub" line folds into the specific one rather than showing twice.
+  ok(c.service.length === 1, 'the site\'s sub-account absorbs the account-only line into one relationship');
   const l = c.service[0];
   ok(l.carrier === 'Cox', 'the carrier comes through from the account');
   ok(l.account === 'SVC-ACCT' && l.account_id === acct.id, 'the account is named and linkable');
   ok(l.subaccount === 'SUB-A', 'the sub-account comes from the site, which is where it was set');
-  ok(l.sources.length === 1 && l.sources[0].type === 'site' && l.sources[0].label === 'SVC-SITE',
-    'the line says which site it was derived from');
+  ok(l.sources.some(x => x.type === 'site' && x.label === 'SVC-SITE'), 'the line says which site it was derived from');
+  ok(l.sources.some(x => x.type === 'customer'), 'and keeps the customer link as corroborating evidence');
 }
 
 // ---- a second site on the same account+sub collapses ----
@@ -43,14 +47,15 @@ let site;
   await call('/api/sites', { body: { customer_id: cust.id, name: 'SVC-SITE-2', account_id: acct.id, subaccount_id: subA.id, service_address: '6 Service Rd, Tempe, AZ' } });
   const c = (await call('/api/customers/' + cust.id)).json;
   ok(c.service.length === 1, 'two sites on the same account and sub-account collapse to one line');
-  ok(c.service[0].sources.length === 2, 'but both sites are cited');
+  ok(c.service[0].sources.filter(x => x.type === 'site').length === 2, 'but both sites are cited');
 }
 
 // ---- a different sub-account is its own line ----
 {
   await call('/api/sites', { body: { customer_id: cust.id, name: 'SVC-SITE-3', account_id: acct.id, subaccount_id: subB.id, service_address: '7 Service Rd, Tempe, AZ' } });
   const c = (await call('/api/customers/' + cust.id)).json;
-  ok(c.service.length === 2, 'a different sub-account is a separate line');
+  ok(c.service.filter(l => l.account_id === acct.id).length === 2,
+    'a DIFFERENT sub-account stays a separate line — that mismatch is worth seeing');
   ok(c.service.some(l => l.subaccount === 'SUB-B'), 'and it names the other sub-account');
 }
 
@@ -86,6 +91,42 @@ let site;
   const after = (await call('/api/customers/' + cust.id)).json;
   ok(!after.service.some(l => l.subaccount === 'SUB-A' && l.sources.some(s => s.label === 'SVC-SITE')),
     'moving the site to another sub-account immediately changes what the customer shows');
+}
+
+// ---- setting the sub-account directly on the customer ----
+{
+  const c2 = (await call('/api/customers', { body: { name: 'SVC-DIRECT', account_ids: [acct.id], account_subaccounts: { [acct.id]: subA.id } } })).json;
+  ok(c2 && c2.id, 'a customer can be created on a specific sub-account');
+
+  let got = (await call('/api/customers/' + c2.id)).json;
+  ok(got.accounts[0].subaccount_id === subA.id, 'the link stores which sub-account');
+  ok(got.accounts[0].subaccount_name === 'SUB-A', 'and reads back its name');
+  ok(got.accounts[0].carrier_name === 'Cox', 'the carrier comes along with it');
+
+  // It shows immediately, before any site or hardware exists.
+  ok(got.service.length === 1 && got.service[0].subaccount === 'SUB-A', 'it appears in the rollup with no site or device');
+  ok(got.service[0].sources[0].type === 'customer', 'and is marked as set on the customer, not inferred');
+
+  // Changing it.
+  await call('/api/customers/' + c2.id, { method: 'PUT', body: { name: 'SVC-DIRECT', account_ids: [acct.id], account_subaccounts: { [acct.id]: subB.id } } });
+  got = (await call('/api/customers/' + c2.id)).json;
+  ok(got.accounts[0].subaccount_name === 'SUB-B', 'the sub-account can be changed');
+
+  // Clearing it.
+  await call('/api/customers/' + c2.id, { method: 'PUT', body: { name: 'SVC-DIRECT', account_ids: [acct.id], account_subaccounts: {} } });
+  got = (await call('/api/customers/' + c2.id)).json;
+  ok(got.accounts[0].subaccount_id === null, 'and cleared, leaving the account link intact');
+
+  // A sub-account belonging to a DIFFERENT account must not stick — otherwise re-pointing a
+  // customer would leave it billed against a stranger's sub-account.
+  const other = (await call('/api/accounts', { body: { name: 'SVC-OTHER-ACCT', status: 'Active' } })).json;
+  await call('/api/customers/' + c2.id, { method: 'PUT', body: { name: 'SVC-DIRECT', account_ids: [other.id], account_subaccounts: { [other.id]: subA.id } } });
+  got = (await call('/api/customers/' + c2.id)).json;
+  ok(got.accounts[0].id === other.id && got.accounts[0].subaccount_id === null,
+    "a sub-account from another account is rejected rather than carried across");
+
+  await call('/api/customers/' + c2.id, { method: 'DELETE' });
+  await call('/api/accounts/' + other.id, { method: 'DELETE' });
 }
 
 console.log('\nRESULT:', pass, 'passed,', fail, 'failed'); process.exit(fail ? 1 : 0);

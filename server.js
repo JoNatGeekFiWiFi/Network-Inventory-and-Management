@@ -650,13 +650,34 @@ app.get('/api/accounts', (req, res) => {
 });
 
 // Accounts <-> Customers many-to-many helpers
-function customerAccounts(custId) { return db.prepare('SELECT a.id, a.name FROM account_customers ac JOIN accounts a ON a.id=ac.account_id WHERE ac.customer_id=? ORDER BY a.name').all(custId); }
+function customerAccounts(custId) {
+  return db.prepare(`SELECT a.id, a.name, a.account_number, a.carrier_id, p.name AS carrier_name,
+      ac.subaccount_id, sa.name AS subaccount_name
+    FROM account_customers ac
+    JOIN accounts a ON a.id = ac.account_id
+    LEFT JOIN upstream_providers p ON p.id = a.carrier_id
+    LEFT JOIN account_subaccounts sa ON sa.id = ac.subaccount_id
+    WHERE ac.customer_id=? ORDER BY a.name`).all(custId);
+}
 function accountCustomers(acctId) { return db.prepare('SELECT c.* FROM account_customers ac JOIN customers c ON c.id=ac.customer_id WHERE ac.account_id=? ORDER BY c.name').all(acctId); }
-function setCustomerAccounts(custId, ids) {
+/**
+ * Replace a customer's account links.
+ *
+ * @param ids   account ids the customer is served by
+ * @param subs  optional { accountId: subaccountId } — which sub-account of each, when it matters
+ *
+ * A sub-account is only kept when it genuinely belongs to the account it was paired with,
+ * so re-pointing a customer at a different account can't leave it on a stranger's sub-account.
+ */
+function setCustomerAccounts(custId, ids, subs) {
   const clean = [...new Set((ids || []).map(Number).filter(Boolean))];
   db.prepare('DELETE FROM account_customers WHERE customer_id=?').run(custId);
-  const ins = db.prepare('INSERT OR IGNORE INTO account_customers (account_id, customer_id) VALUES (?,?)');
-  for (const a of clean) ins.run(a, custId);
+  const ins = db.prepare('INSERT OR IGNORE INTO account_customers (account_id, customer_id, subaccount_id) VALUES (?,?,?)');
+  for (const a of clean) {
+    const want = subs && (subs[a] ?? subs[String(a)]);
+    const subId = want ? (db.prepare('SELECT id FROM account_subaccounts WHERE id=? AND account_id=?').get(Number(want), a) || {}).id || null : null;
+    ins.run(a, custId, subId);
+  }
   db.prepare('UPDATE customers SET account_id=? WHERE id=?').run(clean[0] || null, custId); // keep legacy primary
 }
 function defaultAccountForCustomer(custId) {
@@ -1024,6 +1045,16 @@ function customerServiceLines(customerId) {
     lines.get(key).sources.push(source);
   };
 
+  // What was set directly on the customer. Listed first because it's stated rather than inferred,
+  // and it means the page shows something before any site or hardware exists.
+  for (const a of customerAccounts(customerId)) {
+    add(`a${a.id}:s${a.subaccount_id || 0}`, {
+      carrier: a.carrier_name || null, carrier_id: a.carrier_id || null,
+      account: a.name, account_id: a.id, account_number: a.account_number || null,
+      subaccount: a.subaccount_name || null, subaccount_id: a.subaccount_id || null
+    }, { type: 'customer', id: customerId, label: 'set on the customer' });
+  }
+
   const acctOf = id => id ? db.prepare(`SELECT a.id, a.name, a.account_number, a.carrier_id, p.name AS carrier_name
       FROM accounts a LEFT JOIN upstream_providers p ON p.id = a.carrier_id WHERE a.id=?`).get(id) : null;
   const subOf = id => id ? db.prepare('SELECT id, name FROM account_subaccounts WHERE id=?').get(id) : null;
@@ -1065,7 +1096,24 @@ function customerServiceLines(customerId) {
     }, { type: 'device', id: d.id, label: d.name });
   }
 
-  return [...lines.values()];
+  const out = [...lines.values()];
+
+  // "Account X, sub-account unspecified" isn't a separate service line — it's the same one with
+  // less detail. Where something more specific is known for that account, fold the vague entry
+  // into it rather than showing the relationship twice.
+  //
+  // Two DIFFERENT sub-accounts on the same account are left as separate lines on purpose: that's
+  // a genuine mismatch worth seeing, not noise to tidy away.
+  const specific = new Set(out.filter(l => l.account_id && l.subaccount_id).map(l => l.account_id));
+  const merged = [];
+  for (const l of out) {
+    if (l.account_id && !l.subaccount_id && specific.has(l.account_id)) {
+      for (const target of out) if (target.account_id === l.account_id && target.subaccount_id) target.sources.push(...l.sources);
+      continue;
+    }
+    merged.push(l);
+  }
+  return merged;
 }
 
 app.get('/api/customers/:id', (req, res) => {
@@ -1087,7 +1135,7 @@ app.post('/api/customers', requireNoc, (req, res) => {
   if (!b.name) return res.status(400).json({ error: 'Customer name required' });
   const info = db.prepare('INSERT INTO customers (account_id,name,status,notes,billing_email,sms_number,whatsapp_number,preferred_channel) VALUES (?,?,?,?,?,?,?,?)')
     .run(ids[0], N(b.name), b.status || 'Active', N(b.notes), N(b.billing_email), N(normPhone(b.sms_number) || null), N(normPhone(b.whatsapp_number) || null), N(['email', 'sms', 'whatsapp'].includes(b.preferred_channel) ? b.preferred_channel : null));
-  setCustomerAccounts(info.lastInsertRowid, ids);
+  setCustomerAccounts(info.lastInsertRowid, ids, b.account_subaccounts);
   audit(req, 'create', 'customer#' + info.lastInsertRowid, b.name);
   res.json({ id: info.lastInsertRowid });
 });
@@ -1102,7 +1150,7 @@ app.put('/api/customers/:id', requireNoc, (req, res) => {
   if (b.account_ids !== undefined || b.account_id !== undefined) {
     const ids = accountIdsFrom(b);
     if (!ids.length) return res.status(400).json({ error: 'A customer must have at least one account' });
-    setCustomerAccounts(req.params.id, ids);
+    setCustomerAccounts(req.params.id, ids, b.account_subaccounts);
   }
   if (b.portal_enabled !== undefined) db.prepare('UPDATE customers SET portal_enabled=? WHERE id=?').run(b.portal_enabled ? 1 : 0, req.params.id);
   if (b.portal_password) db.prepare('UPDATE customers SET portal_password=? WHERE id=?').run(hashPassword(String(b.portal_password)), req.params.id);

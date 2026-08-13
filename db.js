@@ -312,6 +312,9 @@ export function migrate() {
   // Hardware sits on a carrier's account too. owner_org was free text, so the same company was
   // spelled differently on different devices and none of it joined to the carrier list.
   ensure('devices', 'carrier_id', 'INTEGER');
+  // Which sub-account of that account the customer is served on. Nullable: an account with no
+  // sub-accounts, or one not yet chosen, is still a valid link.
+  ensure('account_customers', 'subaccount_id', 'INTEGER');
   db.exec('CREATE INDEX IF NOT EXISTS idx_devices_carrier ON devices(carrier_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_accounts_carrier ON accounts(carrier_id)');
   // The carriers most US accounts sit under. Added only when absent, so renames and deletions
