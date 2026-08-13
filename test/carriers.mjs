@@ -95,4 +95,23 @@ let mine;
   ok((await call('/api/carriers')).status === 401, 'anonymous callers get nothing');
 }
 
+// ---- the account page can always show the carrier ----
+{
+  cookie = ''; await call('/api/login', { body: { email: 'admin@geekitek.test', password: 'admin123' } });
+  const cox = (await call('/api/carriers')).json.find(c => c.name === 'Cox');
+  const withC = (await call('/api/accounts', { body: { name: 'TEST-SHOW-CARRIER', status: 'Active', carrier_id: cox.id } })).json;
+  const without = (await call('/api/accounts', { body: { name: 'TEST-NO-CARRIER', status: 'Active' } })).json;
+
+  const a1 = (await call('/api/accounts/' + withC.id)).json;
+  ok(a1.carrier && a1.carrier.name === 'Cox', 'account detail names the carrier so the page can show it');
+
+  // The unset case is the one that matters — the page warns on it, so it must be distinguishable
+  // rather than merely absent.
+  const a2 = (await call('/api/accounts/' + without.id)).json;
+  ok('carrier' in a2 && a2.carrier === null, 'an account with no carrier reports null, not a missing field');
+
+  await call('/api/accounts/' + withC.id, { method: 'DELETE' });
+  await call('/api/accounts/' + without.id, { method: 'DELETE' });
+}
+
 console.log('\nRESULT:', pass, 'passed,', fail, 'failed'); process.exit(fail ? 1 : 0);

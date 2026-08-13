@@ -670,6 +670,12 @@ async function renderCustomer(id) {
     <div style="display:flex;justify-content:space-between"><span>${esc(p.provider)}</span><span class="small muted">${esc(p.until_label || '')}</span></div>
     <div class="small sec-muted" style="margin-top:3px"><span class="muted">Why they left:</span> ${esc(p.reason || '')}</div></div>`).join('');
   const det = [];
+  // Carrier first, and always shown — including when it's missing. The point of surfacing it here
+  // is to catch the ones that were never set, so an empty value has to be visible rather than an
+  // absent row.
+  det.push(`<div class="kv"><span class="small sec-muted">Carrier</span>${a.carrier
+    ? `<span><i class="ti ti-building-broadcast-tower" style="font-size:12px"></i> ${esc(a.carrier.name)}</span>`
+    : `<span style="color:var(--warning)">Not set${isPriv() ? ` · <a class="iplink" href="#/account/${a.id}/edit">set it</a>` : ''}</span>`}</div>`);
   if (isPriv() && a.has_pin) det.push(`<div class="kv"><span class="small sec-muted">PIN <span class="badge noc">NOC</span></span><span class="mono" style="cursor:pointer;filter:blur(5px)" title="click to reveal" onclick="this.style.filter='none'">${esc(a.pin)}</span></div>`);
   if (a.email) det.push(`<div class="kv"><span class="small sec-muted">Email</span><a class="iplink" href="mailto:${esc(a.email)}">${esc(a.email)}</a></div>`);
   if (a.portal_url) det.push(`<div class="kv"><span class="small sec-muted">Portal</span><a class="iplink" href="${esc(a.portal_url)}" target="_blank" rel="noopener">Open portal <i class="ti ti-external-link" style="font-size:11px"></i></a></div>`);
