@@ -134,3 +134,15 @@ label.fl{display:block;font-size:13px;color:var(--text2);margin-bottom:5px}
 .nearby-row:first-child{border-top:0}
 .nearby-row .d{flex:none;width:70px;text-align:right;color:var(--text2);font-variant-numeric:tabular-nums}
 .nearby-row .n{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* Tables. Used by the import wizard, where a column-by-column grid is the honest shape for
+   "here is what we think each of your columns means" — cards would hide the comparison. */
+.tablewrap{overflow-x:auto;border:.5px solid var(--border);border-radius:var(--radius)}
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;font-weight:500;color:var(--text2);font-size:12px;padding:8px 10px;background:var(--surface2);white-space:nowrap}
+.tbl td{padding:8px 10px;border-top:.5px solid var(--border);vertical-align:top}
+.tbl select{font-size:12px;padding:4px 6px;max-width:220px}
+.tbl tr:hover td{background:var(--surface2)}
+.err{background:var(--danger-bg);color:var(--danger);padding:10px 12px;border-radius:var(--radius);font-size:13px}
+.btn.danger{color:var(--danger);border-color:var(--danger)}
+.btn.danger:hover{background:var(--danger-bg)}

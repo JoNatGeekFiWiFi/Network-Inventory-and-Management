@@ -176,6 +176,7 @@ async function route() {
     if (p[0] === 'billing') { setNav('billing'); return await renderBilling(); }
     if (p[0] === 'pnl') { setNav('pnl'); return await renderPnl(); }
     if (p[0] === 'import') { setNav('settings'); return await renderImport(); }
+    if (p[0] === 'importwiz') { setNav('settings'); return await renderImportWiz(p[1]); }
     if (p[0] === 'tickets' && p[1] === 'new') { setNav('tickets'); return await formTicket(); }
     if (p[0] === 'tickets' && p[1]) { setNav('tickets'); return await renderTicket(p[1]); }
     if (p[0] === 'tickets') { setNav('tickets'); return await renderTickets(); }
@@ -1983,7 +1984,11 @@ async function renderSettings() {
         <div class="fld"><label class="fl">Email (Mailgun / Postmark / SendGrid parse)</label><input readonly value="${esc(s.public_base_url_effective + '/inbound/email/' + s.inbound_secret)}" style="font-family:var(--mono);background:var(--surface2)"/></div>` : '<div class="small sec-muted">Set the Public server URL (in Zero-touch provisioning) and save this section to generate your webhook URLs.</div>'}
         <div class="help">For email replies to thread automatically, keep the <span class="mono">[TKT-####]</span> subject tag and the <span class="mono">Reply-To</span> address intact (both are set on outgoing mail). IMAP polling needs no webhooks — just the mailbox login above.</div></div>
     </div>
-    <div class="card"><div class="row rowlink" onclick="location.hash='#/import'">
+    <div class="card"><div class="row rowlink" onclick="location.hash='#/importwiz'">
+      <i class="ti ti-table-import sec-muted"></i>
+      <div style="flex:1;min-width:0"><div>Import a spreadsheet</div><div class="small sec-muted">Upload a CSV or Excel file, check how it's been read, then approve it</div></div>
+      <i class="ti ti-chevron-right muted"></i></div>
+      <div class="row rowlink" onclick="location.hash='#/import'">
       <i class="ti ti-file-import sec-muted"></i>
       <div style="flex:1;min-width:0"><div>Import from Invoice Ninja</div><div class="small sec-muted">Bring clients, invoices &amp; payments across from a JSON export</div></div>
       <i class="ti ti-chevron-right muted"></i></div></div>
@@ -4584,4 +4589,234 @@ function serviceCard(c) {
     ${lines.length ? lines.map(row).join('')
       : `<div class="row muted">Nothing recorded yet. Set the account and sub-account on their site,
            or the carrier on their hardware, and it will appear here.</div>`}</div>`;
+}
+
+// ---------- Spreadsheet import wizard ----------
+//
+// Three steps on one page: check the columns, check the rows, apply. The point of the wizard is
+// that the reading is shown before it's acted on — bulk-loading a hand-kept sheet is exactly where
+// one wrong guess quietly becomes several hundred wrong records.
+let IW = null;          // the current analysis
+let IW_FILE = null;     // kept so a mapping change can be re-analysed without re-picking the file
+let IW_ACTIONS = {};    // row index -> action override
+const IW_ACTION_LABEL = { create: 'Create new', attach: 'Link to existing', update: 'Update existing', skip: 'Skip' };
+
+async function renderImportWiz(sub) {
+  if (sub === 'history') return await renderImportHistory();
+  IW = null; IW_FILE = null; IW_ACTIONS = {};
+  view().innerHTML = `
+    <div class="crumb"><a href="#/settings">Settings</a> <i class="ti ti-chevron-right"></i> Import a spreadsheet</div>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <h1 style="flex:1;min-width:200px">Import a spreadsheet</h1>
+      <a class="btn" href="#/importwiz/history"><i class="ti ti-history"></i> Past imports</a></div>
+    <div class="card" style="padding:16px">
+      <div class="fld"><label class="fl">Spreadsheet</label>
+        <input type="file" id="iwFile" accept=".csv,.tsv,.txt,.xlsx,.xlsm,.xltx" onchange="iwAnalyze()"/>
+        <div class="help">CSV, TSV or Excel. Nothing is saved until you press Import at the bottom.</div></div>
+    </div>
+    <div id="iwOut"></div>`;
+}
+
+async function iwAnalyze(opts = {}) {
+  const el = document.getElementById('iwFile');
+  if (el && el.files && el.files[0]) IW_FILE = el.files[0];
+  if (!IW_FILE) return;
+  const out = document.getElementById('iwOut');
+  out.innerHTML = `<div class="card" style="padding:16px" class="muted">Reading ${esc(IW_FILE.name)}…</div>`;
+
+  const qs = new URLSearchParams({ filename: IW_FILE.name });
+  if (opts.sheet != null) qs.set('sheet', opts.sheet);
+  if (opts.headerRow != null) qs.set('headerRow', String(opts.headerRow));
+  if (opts.mapping) qs.set('mapping', JSON.stringify(opts.mapping));
+  try {
+    const buf = await IW_FILE.arrayBuffer();
+    const r = await fetch('/api/import/analyze?' + qs.toString(),
+      { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: buf });
+    if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.statusText); }
+    IW = await r.json();
+    if (!opts.keepActions) IW_ACTIONS = {};
+    iwDraw();
+  } catch (e) {
+    out.innerHTML = `<div class="card" style="padding:16px"><div class="err">${esc(e.message)}</div></div>`;
+  }
+}
+
+/** Column mapping, row preview and the Import button. */
+function iwDraw() {
+  const d = IW;
+  const grouped = {};
+  for (const f of d.fields) (grouped[f.group] = grouped[f.group] || []).push(f);
+  const options = (sel) => `<option value="">— ignore this column —</option>` +
+    Object.entries(grouped).map(([g, fs]) => `<option disabled>── ${esc(g)} ──</option>` +
+      fs.map(f => `<option value="${esc(f.key)}"${f.key === sel ? ' selected' : ''}>${esc(f.label)}</option>`).join('')).join('');
+
+  const conf = c => c >= 0.85 ? ['s-up', 'confident'] : c >= 0.6 ? ['s-warn', 'fairly sure'] : ['s-down', 'a guess — please check'];
+
+  const sheetPicker = (d.sheets && d.sheets.length > 1)
+    ? `<div class="fld" style="max-width:280px"><label class="fl">Sheet</label>
+        <select onchange="iwAnalyze({sheet:this.value})">${d.sheets.map(s =>
+          `<option${s === d.sheet ? ' selected' : ''}>${esc(s)}</option>`).join('')}</select></div>` : '';
+
+  const s = d.summary;
+  const cols = `
+    <div class="card" style="padding:16px">
+      <h2 style="margin-bottom:4px">1. What each column means</h2>
+      <div class="small sec-muted" style="margin-bottom:12px">
+        ${esc(d.filename || 'file')} · ${esc(d.format.toUpperCase())} · ${d.total} data row${d.total === 1 ? '' : 's'}
+        · headers taken from row ${d.headerRow + 1}. Change anything that's wrong.</div>
+      ${sheetPicker}
+      <div class="fld" style="max-width:320px"><label class="fl">Header row</label>
+        <select onchange="iwAnalyze({headerRow:this.value})">
+          <option value="-1"${d.headerRow < 0 ? ' selected' : ''}>No header row — every line is data</option>
+          ${[0,1,2,3,4,5].map(i => `<option value="${i}"${d.headerRow === i ? ' selected' : ''}>Row ${i + 1}</option>`).join('')}
+        </select></div>
+      <div class="tablewrap"><table class="tbl"><thead><tr>
+        <th>Column in your file</th><th>Example</th><th>Read as</th><th>How sure</th></tr></thead><tbody>
+        ${d.columns.map(c => { const [cls, txt] = conf(c.confidence); return `<tr>
+          <td><strong>${esc(c.header)}</strong></td>
+          <td class="small sec-muted mono">${esc((c.samples || []).slice(0, 2).join(' · ')) || '—'}</td>
+          <td><select data-iwcol="${c.index}" onchange="iwRemap()">${options(c.field)}</select></td>
+          <td>${c.field ? `<span class="pill ${cls}">${txt}</span>` : '<span class="small sec-muted">—</span>'}
+              ${c.field && c.why ? `<div class="small sec-muted">${esc(c.why)}</div>` : ''}</td></tr>`; }).join('')}
+      </tbody></table></div>
+    </div>`;
+
+  const chips = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      ${s.matched ? `<span class="pill s-warn">${s.matched} already in the system</span>` : ''}
+      ${s.clean ? `<span class="pill s-up">${s.clean} brand new</span>` : ''}
+      ${s.issues ? `<span class="pill s-down">${s.issues} need a look</span>` : ''}
+      ${s.unusable ? `<span class="tag">${s.unusable} nothing recognised</span>` : ''}
+    </div>`;
+
+  const rows = `
+    <div class="card" style="padding:16px">
+      <h2 style="margin-bottom:4px">2. What each row will do</h2>
+      <div class="small sec-muted" style="margin-bottom:12px">
+        <strong>Link to existing</strong> attaches to what's already there and fills blanks only.
+        <strong>Update existing</strong> overwrites with the sheet's values. Nothing is saved yet.</div>
+      ${chips}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        <span class="small sec-muted" style="align-self:center">Set every row to:</span>
+        ${Object.entries(IW_ACTION_LABEL).map(([k, v]) =>
+          `<button class="btn sm" onclick="iwAll('${k}')">${v}</button>`).join('')}
+        <button class="btn sm" onclick="iwAll(null)">Back to suggested</button></div>
+      <div class="tablewrap"><table class="tbl"><thead><tr>
+        <th style="width:44px">Row</th><th>Will do this</th><th>What it makes or matches</th><th>Notes</th></tr></thead><tbody>
+        ${d.rows.map(r => iwRowHtml(r)).join('')}
+      </tbody></table></div>
+      ${d.total > d.rows.length ? `<div class="help">Showing the first ${d.rows.length} of ${d.total} rows.
+        The rest use the suggested action unless you set every row above.</div>` : ''}
+    </div>
+    <div class="card" style="padding:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <div style="flex:1;min-width:200px" class="small sec-muted" id="iwTally"></div>
+      <button class="btn primary" onclick="iwCommit()"><i class="ti ti-check"></i> Import ${d.total} row${d.total === 1 ? '' : 's'}</button>
+    </div>`;
+
+  document.getElementById('iwOut').innerHTML = cols + rows;
+  iwTally();
+}
+
+function iwRowHtml(r) {
+  const act = IW_ACTIONS[r.index] || r.action;
+  const dot = e => e.state === 'new' ? '<span class="pill s-up">new</span>'
+    : e.state === 'run' ? '<span class="tag">same as an earlier row</span>'
+    : '<span class="pill s-warn">exists</span>';
+  return `<tr>
+    <td class="small sec-muted">${r.index + 1}</td>
+    <td><select data-iwrow="${r.index}" onchange="iwSetAction(${r.index}, this.value)" ${r.entities.length ? '' : 'disabled'}>
+      ${Object.entries(IW_ACTION_LABEL).map(([k, v]) =>
+        `<option value="${k}"${k === act ? ' selected' : ''}>${v}</option>`).join('')}</select></td>
+    <td>${r.entities.length
+      ? r.entities.map(e => `<div class="small" style="margin:2px 0">
+          <span class="sec-muted">${esc(e.entity)}</span> ${esc(e.label || '')} ${dot(e)}
+          ${e.matched_on ? `<span class="small sec-muted">(matched on ${esc(e.matched_on)})</span>` : ''}</div>`).join('')
+      : '<span class="small sec-muted">—</span>'}</td>
+    <td class="small">${r.issues.length
+      ? r.issues.map(i => `<div class="small" style="color:var(--warning)">${esc(i)}</div>`).join('')
+      : '<span class="sec-muted">—</span>'}</td></tr>`;
+}
+
+function iwSetAction(i, v) {
+  IW_ACTIONS[i] = v;
+  iwTally();
+}
+function iwAll(v) {
+  IW_ACTIONS = {};
+  if (v) for (const r of IW.rows) if (r.entities.length) IW_ACTIONS[r.index] = v;
+  document.querySelectorAll('[data-iwrow]').forEach(sel => {
+    const r = IW.rows[Number(sel.dataset.iwrow)];
+    if (r) sel.value = IW_ACTIONS[r.index] || r.action;
+  });
+  iwTally();
+}
+function iwTally() {
+  const n = { create: 0, attach: 0, update: 0, skip: 0 };
+  for (const r of IW.rows) n[IW_ACTIONS[r.index] || r.action]++;
+  const el = document.getElementById('iwTally');
+  if (el) el.textContent = `${n.create} to create · ${n.attach} to link · ${n.update} to update · ${n.skip} skipped`;
+}
+
+/** Re-run the analysis with the corrected mapping, so the row preview matches the new columns. */
+function iwRemap() {
+  const mapping = {};
+  document.querySelectorAll('[data-iwcol]').forEach(sel => { mapping[sel.dataset.iwcol] = sel.value || null; });
+  iwAnalyze({ mapping });
+}
+
+async function iwCommit() {
+  if (!IW) return;
+  try {
+    const r = await api('/import/commit', { method: 'POST', body: JSON.stringify({ token: IW.token, actions: IW_ACTIONS }) });
+    const c = r.counts, t = r.tally;
+    const made = Object.entries(t).filter(([, n]) => n).map(([k, n]) => `${n} ${k}${n === 1 ? '' : 's'}`).join(', ');
+    view().innerHTML = `
+      <div class="crumb"><a href="#/settings">Settings</a> <i class="ti ti-chevron-right"></i> Import a spreadsheet</div>
+      <h1>Import complete</h1>
+      <div class="card" style="padding:16px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+          <span class="pill s-up">${c.created} created</span>
+          <span class="tag">${c.attached} linked</span>
+          <span class="tag">${c.updated} updated</span>
+          <span class="tag">${c.skipped} skipped</span></div>
+        ${made ? `<div class="small sec-muted">Added: ${esc(made)}.</div>` : ''}
+        <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+          <a class="btn" href="#/importwiz">Import another</a>
+          <a class="btn" href="#/importwiz/history">Past imports</a>
+          <button class="btn danger" onclick="iwUndo(${r.batch_id}, '#/importwiz')"><i class="ti ti-arrow-back-up"></i> Undo this import</button>
+        </div></div>`;
+    await refreshMeta();
+    toast('Imported');
+  } catch (e) { toast(e.message); }
+}
+
+async function renderImportHistory() {
+  const list = await api('/imports');
+  view().innerHTML = `
+    <div class="crumb"><a href="#/importwiz">Import a spreadsheet</a> <i class="ti ti-chevron-right"></i> Past imports</div>
+    <h1>Past imports</h1>
+    <div class="card">${list.length ? list.map(b => `
+      <div class="row">
+        <i class="ti ti-table-import sec-muted"></i>
+        <div style="flex:1;min-width:0">
+          <div>${esc(b.filename || 'spreadsheet')} <span class="small sec-muted">${esc(b.format || '')}</span>
+            ${b.status === 'undone' ? '<span class="tag">undone</span>' : ''}</div>
+          <div class="small sec-muted">${esc(b.created_at)} · ${b.actor ? esc(b.actor) + ' · ' : ''}${b.row_count} rows ·
+            ${b.created_count} created, ${b.attached_count} linked, ${b.updated_count} updated, ${b.skipped_count} skipped</div></div>
+        ${b.status === 'undone' ? '' :
+          `<button class="btn sm danger" onclick="iwUndo(${b.id}, '#/importwiz/history')"><i class="ti ti-arrow-back-up"></i> Undo</button>`}
+      </div>`).join('') : '<div class="row muted">No spreadsheet imports yet.</div>'}</div>`;
+}
+
+async function iwUndo(id, back) {
+  if (!confirm('Undo this import? Records it created will be deleted, and records it changed will be put back as they were.\n\nAnything added or attached since will be kept.')) return;
+  try {
+    const r = await api('/imports/' + id + '/undo', { method: 'POST', body: '{}' });
+    await refreshMeta();
+    if (r.kept && r.kept.length) {
+      alert(`Undone: ${r.removed} deleted, ${r.restored} put back.\n\n${r.kept.length} record(s) were kept because something has been attached to them since:\n` +
+        r.kept.map(k => `• ${k.entity} #${k.id} — ${k.why}`).join('\n'));
+    } else toast(`Undone — ${r.removed} deleted, ${r.restored} put back`);
+    location.hash = back; route();
+  } catch (e) { toast(e.message); }
 }

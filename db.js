@@ -315,6 +315,29 @@ export function migrate() {
   // Which sub-account of that account the customer is served on. Nullable: an account with no
   // sub-accounts, or one not yet chosen, is still a valid link.
   ensure('account_customers', 'subaccount_id', 'INTEGER');
+
+  // Spreadsheet imports, and everything each one created.
+  //
+  // Every record an import makes is tagged with its batch so the run can be reversed. Bulk-loading
+  // years of hand-kept spreadsheets is exactly where a mistake lands hundreds of wrong rows at
+  // once, and "restore last night's backup" also throws away the day's real work.
+  db.exec(`CREATE TABLE IF NOT EXISTS import_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT, format TEXT, sheet TEXT, row_count INTEGER,
+    mapping_json TEXT,
+    created_count INTEGER DEFAULT 0, attached_count INTEGER DEFAULT 0,
+    updated_count INTEGER DEFAULT 0, skipped_count INTEGER DEFAULT 0,
+    actor TEXT, status TEXT NOT NULL DEFAULT 'committed',   -- committed | undone
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), undone_at TEXT)`);
+  db.exec(`CREATE TABLE IF NOT EXISTS import_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL,
+    entity TEXT NOT NULL,        -- customer | site | unit | device | account | subaccount | carrier
+    entity_id INTEGER NOT NULL,
+    action TEXT NOT NULL,        -- created | updated
+    before_json TEXT,            -- prior values, so an update can be put back
+    FOREIGN KEY (batch_id) REFERENCES import_batches(id) ON DELETE CASCADE)`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_imprec ON import_records(batch_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_devices_carrier ON devices(carrier_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_accounts_carrier ON accounts(carrier_id)');
   // The carriers most US accounts sit under. Added only when absent, so renames and deletions
