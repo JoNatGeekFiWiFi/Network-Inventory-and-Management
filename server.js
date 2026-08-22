@@ -14,6 +14,7 @@ import http from 'node:http';
 import net from 'node:net';
 import nodemailer from 'nodemailer';
 import { r2, todayStr, esc2, normPhone } from './lib/core.js';
+import { normalizeDueDay, normalizeBool, normalizeMac, normalizeMoney, normalizePlan, normalizeName } from './lib/normalize.js';
 import registerBilling from './domains/billing.js';
 import registerSupport from './domains/support.js';
 import registerNetwork from './domains/network.js';
@@ -155,6 +156,10 @@ backfillAccountCustomers();
 
 // ---- helpers ----
 const N = (v, d = null) => (v === undefined ? d : v); // null-coalesce for SQLite binding
+// Shared with the spreadsheet importer, so a due day typed into the form and one read out of
+// a sheet end up stored the same way.
+const dueDay = v => (v === undefined ? null : normalizeDueDay(v));
+const boolFlag = v => (v === undefined ? null : normalizeBool(v));
 const PRIV = new Set(['noc', 'admin']);
 const role = (req) => (req.user ? req.user.role : 'support');
 const isPriv = (req) => PRIV.has(role(req));
@@ -646,7 +651,7 @@ app.get('/api/accounts', (req, res) => {
       (SELECT COUNT(*) FROM sites s WHERE s.account_id=a.id) AS site_count
     FROM accounts a LEFT JOIN upstream_providers p ON p.id = a.carrier_id
     ORDER BY COALESCE(p.name, CHAR(255)), a.name`).all();
-  rows.forEach(r => { delete r.pin; delete r.portal_password; delete r.security_questions; }); // never expose secrets in the list
+  rows.forEach(r => { delete r.pin; delete r.portal_password; delete r.portal_username; delete r.security_questions; }); // never expose secrets in the list
   res.json(rows);
 });
 
@@ -690,6 +695,7 @@ app.get('/api/accounts/:id', (req, res) => {
   const a = db.prepare('SELECT * FROM accounts WHERE id=?').get(req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
   a.carrier = a.carrier_id ? db.prepare('SELECT id, name FROM upstream_providers WHERE id=?').get(a.carrier_id) : null;
+  a.carrier_name = a.carrier ? a.carrier.name : null;   // the list endpoint exposes this; match it
   a.contacts = db.prepare('SELECT * FROM account_contacts WHERE account_id=?').all(a.id);
   a.previous_isps = db.prepare('SELECT * FROM previous_isps WHERE account_id=?').all(a.id);
   a.customers = accountCustomers(a.id).map(c => ({ ...c, site_count: db.prepare('SELECT COUNT(*) AS n FROM sites WHERE customer_id=?').get(c.id).n }));
@@ -700,7 +706,8 @@ app.get('/api/accounts/:id', (req, res) => {
   a.has_portal_password = !!a.portal_password;
   a.has_security_questions = !!a.security_questions;
   a.subaccounts = db.prepare('SELECT * FROM account_subaccounts WHERE account_id=? ORDER BY id').all(a.id).map(s => subAcctOut(s, req));
-  if (!isPriv(req)) { delete a.pin; delete a.portal_password; delete a.security_questions; } // sensitive: NOC/Admin only
+  a.has_portal_username = !!a.portal_username;
+  if (!isPriv(req)) { delete a.pin; delete a.portal_password; delete a.portal_username; delete a.security_questions; } // sensitive: NOC/Admin only
   res.json(a);
 });
 // PIN is NOC/Admin-only, mirror the account pattern
@@ -709,9 +716,10 @@ function subAcctOut(s, req) { const o = { ...s, has_pin: !!s.pin }; if (!isPriv(
 app.post('/api/accounts', requireNoc, (req, res) => {
   const b = req.body || {};
   const cost = b.monthly_cost === '' || b.monthly_cost == null ? null : Math.max(0, parseFloat(b.monthly_cost) || 0);
-  const info = db.prepare('INSERT INTO accounts (name, account_number, sub_account, pin, email, portal_url, portal_password, security_questions, status, billing_address, notes, monthly_cost, carrier_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
-    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.pin), N(b.email), N(b.portal_url), N(b.portal_password), N(b.security_questions), b.status || 'Active', N(b.billing_address), N(b.notes), cost,
-      b.carrier_id ? Number(b.carrier_id) : null);
+  const info = db.prepare(`INSERT INTO accounts (name, account_number, sub_account, pin, email, portal_url, portal_username, portal_password, security_questions, status, billing_address, notes, monthly_cost, carrier_id, due_day, autopay, payment_method, plan)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.pin), N(b.email), N(b.portal_url), N(b.portal_username), N(b.portal_password), N(b.security_questions), b.status || 'Active', N(b.billing_address), N(b.notes), cost,
+      b.carrier_id ? Number(b.carrier_id) : null, dueDay(b.due_day), boolFlag(b.autopay), N(b.payment_method), N(b.plan));
   const id = info.lastInsertRowid;
   for (const c of (b.contacts || [])) {
     db.prepare('INSERT INTO account_contacts (account_id,name,role,email,phone,is_primary,is_billing) VALUES (?,?,?,?,?,?,?)')
@@ -727,8 +735,9 @@ app.post('/api/accounts', requireNoc, (req, res) => {
 
 app.put('/api/accounts/:id', requireNoc, (req, res) => {
   const b = req.body || {};
-  db.prepare('UPDATE accounts SET name=?, account_number=?, sub_account=?, email=?, portal_url=?, status=?, billing_address=?, notes=? WHERE id=?')
-    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.email), N(b.portal_url), N(b.status, 'Active'), N(b.billing_address), N(b.notes), req.params.id);
+  db.prepare('UPDATE accounts SET name=?, account_number=?, sub_account=?, email=?, portal_url=?, status=?, billing_address=?, notes=?, due_day=?, autopay=?, payment_method=?, plan=? WHERE id=?')
+    .run(N(b.name), N(b.account_number), N(b.sub_account), N(b.email), N(b.portal_url), N(b.status, 'Active'), N(b.billing_address), N(b.notes),
+      dueDay(b.due_day), boolFlag(b.autopay), N(b.payment_method), N(b.plan), req.params.id);
   if (b.monthly_cost !== undefined) db.prepare('UPDATE accounts SET monthly_cost=? WHERE id=?').run(b.monthly_cost === '' ? null : Math.max(0, parseFloat(b.monthly_cost) || 0), req.params.id);
   // Absent leaves the carrier alone; empty clears it. Without that distinction a partial update
   // from any other form would silently unassign the carrier.
@@ -736,6 +745,7 @@ app.put('/api/accounts/:id', requireNoc, (req, res) => {
     db.prepare('UPDATE accounts SET carrier_id=? WHERE id=?').run(b.carrier_id ? Number(b.carrier_id) : null, req.params.id);
   if (b.pin) db.prepare('UPDATE accounts SET pin=? WHERE id=?').run(b.pin, req.params.id);
   if (b.portal_password) db.prepare('UPDATE accounts SET portal_password=? WHERE id=?').run(b.portal_password, req.params.id);
+  if (b.portal_username !== undefined) db.prepare('UPDATE accounts SET portal_username=? WHERE id=?').run(N(b.portal_username), req.params.id);
   if (b.security_questions) db.prepare('UPDATE accounts SET security_questions=? WHERE id=?').run(b.security_questions, req.params.id);
   audit(req, 'edit', 'account#' + req.params.id, b.name);
   res.json({ ok: true });
@@ -1084,12 +1094,33 @@ function customerServiceLines(customerId) {
     WHERE (d.assigned_type='site' AND d.assigned_site_id IN (SELECT id FROM sites WHERE customer_id=?))
        OR d.unit_id IN (SELECT id FROM site_units WHERE customer_id=?)`).all(customerId, customerId);
 
+  // A device records its carrier account as free text. Where that text names an account we
+  // actually hold, resolve it to the real one and key the line the same way the site line is
+  // keyed — otherwise the identical relationship appears twice, once as "GEEKFILTE LLC" from the
+  // site and once as "942797643" from the hardware, and the page looks like a discrepancy.
+  const acctByText = t => {
+    const v = String(t || '').trim();
+    if (!v) return null;
+    return db.prepare(`SELECT a.id, a.name, a.account_number, a.carrier_id, p.name AS carrier_name
+      FROM accounts a LEFT JOIN upstream_providers p ON p.id = a.carrier_id
+      WHERE LOWER(a.name)=LOWER(?) OR (a.account_number IS NOT NULL AND TRIM(a.account_number)=?) LIMIT 1`).get(v, v);
+  };
+
   for (const d of devs) {
     const sub = subOf(d.owner_subaccount_id);
     const carrier = d.carrier_name || d.owner_org || null;
     const acctText = d.owner_account || null;
     const subText = sub ? sub.name : (d.owner_sub_account || null);
     if (!carrier && !acctText && !subText) continue;   // nothing recorded on this device
+    const real = acctByText(acctText);
+    if (real) {
+      add(`a${real.id}:s${sub ? sub.id : 0}`, {
+        carrier: real.carrier_name || carrier, carrier_id: real.carrier_id || d.carrier_id || null,
+        account: real.name, account_id: real.id, account_number: real.account_number || null,
+        subaccount: sub ? sub.name : null, subaccount_id: sub ? sub.id : null
+      }, { type: 'device', id: d.id, label: d.name });
+      continue;
+    }
     add(`d:${(carrier || '').toLowerCase()}|${(acctText || '').toLowerCase()}|${(subText || '').toLowerCase()}`, {
       carrier, carrier_id: d.carrier_id || null,
       account: acctText, account_id: null, account_number: null,

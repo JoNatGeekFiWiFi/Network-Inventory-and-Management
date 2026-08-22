@@ -9,9 +9,12 @@
 import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { loadTable } from '../lib/tabular.js';
-import { detectColumns, FIELDS, fieldLabel } from '../lib/colmap.js';
+import { detectColumns, FIELDS, SECRET_FIELDS, maskSecret } from '../lib/colmap.js';
 import { addressKey, unitFromAddress } from '../lib/address.js';
 import { excelDateToISO } from '../lib/xlsx.js';
+import { normalizeMac, normalizeDueDay, normalizeBool, normalizeMoney, normalizePlan, normalizeName } from '../lib/normalize.js';
+import { TEMPLATES, buildTemplate } from '../lib/templates.js';
+import { contentDisposition } from '../lib/core.js';
 
 const MAX_BYTES = 24 * 1024 * 1024;
 const MAX_ROWS = 5000;
@@ -27,11 +30,6 @@ function stash(data) {
   for (const [k, v] of staged) if (now - v.at > STAGE_TTL_MS) staged.delete(k);
   return token;
 }
-const money = v => {
-  const n = Number(String(v ?? '').replace(/[$,\s]/g, ''));
-  return Number.isFinite(n) ? n : null;
-};
-
 export default function registerImportWizard(app, ctx) {
   const { db, N, requireNoc, audit, normPhone } = ctx;
 
@@ -77,6 +75,10 @@ export default function registerImportWizard(app, ctx) {
       if (extra && !out.service_address.toLowerCase().includes(String(out.city || '').toLowerCase()))
         out.service_address = out.service_address + ', ' + extra;
     }
+    // Tidy the values people actually type, so the same thing spelled two ways lands once.
+    if (out.mac) out.mac = normalizeMac(out.mac);
+    if (out.customer_name) out.customer_name = normalizeName(out.customer_name);
+    if (out.bandwidth) out.bandwidth = normalizePlan(out.bandwidth);
     // Excel hands dates over as day counts.
     if (out.install_date && /^\d{5}$/.test(out.install_date))
       out.install_date = excelDateToISO(out.install_date) || out.install_date;
@@ -179,11 +181,27 @@ export default function registerImportWizard(app, ctx) {
         p.issues.push(`model "${vals.device_model}" isn't in the catalogue — the device will be created without one`);
     }
 
+    if (vals.monthly_revenue && vals.customer_name)
+      p.entities.push({ entity: 'billing', label: '$' + vals.monthly_revenue + '/mo', state: 'new', existing_id: null });
+    if (vals.monthly_cost && !vals.monthly_revenue)
+      p.issues.push('cost but no sell price — P&L will show this account at a full loss');
     if (!p.entities.length) p.issues.push('nothing recognised in this row');
     if (vals.customer_name && !vals.service_address && !vals.site_name)
       p.issues.push('customer has no address, so no site will be created');
     return p;
   }
+
+  // ---- templates ----
+  app.get('/api/import/templates', requireNoc, (req, res) =>
+    res.json(TEMPLATES.map(t => ({ key: t.key, label: t.label, columns: t.headers.length }))));
+
+  app.get('/api/import/template/:key', requireNoc, (req, res) => {
+    const t = buildTemplate(String(req.params.key));
+    if (!t) return res.status(404).json({ error: 'No such template' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', contentDisposition(t.filename));
+    res.send(t.buffer);
+  });
 
   // ---- analyse ----
   const rawUpload = express.raw({ type: () => true, limit: MAX_BYTES });
@@ -214,6 +232,17 @@ export default function registerImportWizard(app, ctx) {
     }
     for (const c of columns) mapping[c.index] = c.field || null;
 
+    // Columns holding credentials, so their values can be masked everywhere they'd be displayed.
+    const secretCols = new Set(Object.entries(mapping)
+      .filter(([, f]) => SECRET_FIELDS.has(f)).map(([i]) => Number(i)));
+    const redactRow = r => secretCols.size ? r.map((v, i) => secretCols.has(i) ? maskSecret(v) : v) : r;
+    const redactVals = v => {
+      if (!secretCols.size) return v;
+      const o = { ...v };
+      for (const f of SECRET_FIELDS) if (o[f]) o[f] = maskSecret(o[f]);
+      return o;
+    };
+
     const seen = { customer: new Set(), device: new Set() };
     const memo = new Map();          // what earlier rows of THIS file already account for
     const rows = table.rows.map((r, i) => {
@@ -228,13 +257,19 @@ export default function registerImportWizard(app, ctx) {
       };
     });
 
+    // The stash keeps the true values — it is what the commit applies. Only the response is
+    // masked. Redacting before stashing would write "••••••••" into the password field, which is
+    // worse than not importing it at all: it looks set, and nobody can sign in.
     const token = stash({ filename: String(req.query.filename || '').slice(0, 200), table, mapping, rows });
+    const safeRows = rows.slice(0, 500).map(r => ({ ...r, raw: redactRow(r.raw), values: redactVals(r.values) }));
     res.json({
       token,
       filename: String(req.query.filename || '') || null,
       format: table.format, sheets: table.sheets, sheet: table.sheet,
       headerRow: table.headerRow, headers: table.headers,
-      columns, fields: FIELDS.map(f => ({ key: f.key, label: f.label, group: f.group })),
+      columns: columns.map(c => secretCols.has(c.index) || SECRET_FIELDS.has(c.field)
+        ? { ...c, samples: (c.samples || []).map(maskSecret), secret: true } : c),
+      fields: FIELDS.map(f => ({ key: f.key, label: f.label, group: f.group })),
       total: rows.length,
       summary: {
         matched: rows.filter(r => r.matched).length,
@@ -242,7 +277,7 @@ export default function registerImportWizard(app, ctx) {
         issues: rows.filter(r => r.issues.length).length,
         unusable: rows.filter(r => !r.entities.length).length
       },
-      rows: rows.slice(0, 500)     // the UI pages; the full set stays staged server-side
+      rows: safeRows               // the UI pages; the full set stays staged server-side
     });
   });
 
@@ -255,7 +290,7 @@ export default function registerImportWizard(app, ctx) {
     // Per-row decisions from the UI, defaulting to what analysis proposed.
     const actions = b.actions || {};
     const counts = { created: 0, attached: 0, updated: 0, skipped: 0 };
-    const tally = { carrier: 0, account: 0, subaccount: 0, site: 0, unit: 0, customer: 0, device: 0 };
+    const tally = { carrier: 0, account: 0, subaccount: 0, site: 0, unit: 0, customer: 0, device: 0, billing: 0 };
 
     let batchId;
     db.exec('BEGIN');
@@ -309,8 +344,14 @@ export default function registerImportWizard(app, ctx) {
           accountKey = K.account(v.account_name, v.account_number);
           const r = ensure('account', accountKey, force,
             () => findAccount(v.account_name, v.account_number),
-            () => db.prepare('INSERT INTO accounts (name, account_number, status, carrier_id) VALUES (?,?,?,?)')
-              .run((v.account_name || v.account_number).slice(0, 160), v.account_number || null, 'Active', carrierId).lastInsertRowid);
+            () => db.prepare(`INSERT INTO accounts (name, account_number, status, carrier_id, billing_address,
+                due_day, autopay, payment_method, plan, portal_username, portal_password, pin, monthly_cost)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+              .run((v.account_name || v.account_number).slice(0, 160), v.account_number || null, 'Active', carrierId,
+                v.billing_address || null, normalizeDueDay(v.due_day), normalizeBool(v.autopay),
+                v.payment_method || null, v.bandwidth || null,
+                v.portal_username || null, v.portal_password || null, v.account_pin || null,
+                normalizeMoney(v.monthly_cost)).lastInsertRowid);
           accountId = r.id;
           const ex = r.row;
           if (ex && overwrite) {
@@ -321,6 +362,27 @@ export default function registerImportWizard(app, ctx) {
             // Filling a blank is not overwriting, and it is the whole point of the import.
             updated('account', ex.id, { carrier_id: ex.carrier_id });
             db.prepare('UPDATE accounts SET carrier_id=? WHERE id=?').run(carrierId, ex.id);
+          }
+
+          // The carrier-account detail: portal login, billing day, plan and so on.
+          //
+          // On "update" the sheet wins; otherwise only blanks are filled. Credentials are held to
+          // the stricter rule either way — silently replacing a password that someone has since
+          // rotated in the portal would lock the team out of the account with no trace of why.
+          if (ex) {
+            const DETAIL = { billing_address: v.billing_address, payment_method: v.payment_method,
+              plan: v.bandwidth, portal_username: v.portal_username,
+              due_day: normalizeDueDay(v.due_day), autopay: normalizeBool(v.autopay) };
+            const SECRET = { portal_password: v.portal_password, pin: v.account_pin };
+            const before = {}, sets = [], args = [];
+            for (const [col, val] of Object.entries(DETAIL))
+              if (val != null && val !== '' && (overwrite || ex[col] == null || ex[col] === '')) { before[col] = ex[col]; sets.push(col + '=?'); args.push(val); }
+            for (const [col, val] of Object.entries(SECRET))
+              if (val != null && val !== '' && (ex[col] == null || ex[col] === '')) { before[col] = ex[col]; sets.push(col + '=?'); args.push(val); }
+            if (sets.length) {
+              updated('account', ex.id, before);
+              db.prepare(`UPDATE accounts SET ${sets.join(', ')} WHERE id=?`).run(...args, ex.id);
+            }
           }
         }
 
@@ -411,7 +473,7 @@ export default function registerImportWizard(app, ctx) {
                 v.serial || null, v.mac || null, 'Deployed', 0, 'platform',
                 siteId ? 'site' : 'stock', siteId || null, unitId || null,
                 carrierId ? 'carrier' : 'us', v.carrier || null, carrierId, subId,
-                v.account_number || null, v.account_number || v.account_name || null).lastInsertRowid);
+                v.account_number || null, v.account_name || v.account_number || null).lastInsertRowid);
           const ex = r.row;
           if (ex && overwrite) {
             updated('device', ex.id, { name: ex.name, serial: ex.serial, mac: ex.mac, assigned_type: ex.assigned_type, assigned_site_id: ex.assigned_site_id, unit_id: ex.unit_id, carrier_id: ex.carrier_id, owner_subaccount_id: ex.owner_subaccount_id });
@@ -425,13 +487,26 @@ export default function registerImportWizard(app, ctx) {
           }
         }
 
-        // money — recorded on the account, which is where the P&L reads it
+        // What it costs us — on the account, which is where P&L reads cost from.
         if (accountId && v.monthly_cost != null) {
-          const c = money(v.monthly_cost);
+          const c = normalizeMoney(v.monthly_cost);
           const ex = db.prepare('SELECT monthly_cost FROM accounts WHERE id=?').get(accountId);
           if (c != null && ex && (overwrite || ex.monthly_cost == null)) {
             updated('account', accountId, { monthly_cost: ex.monthly_cost });
             db.prepare('UPDATE accounts SET monthly_cost=? WHERE id=?').run(c, accountId);
+          }
+        }
+
+        // What we bill them. P&L derives revenue from recurring billing lines, not from a column,
+        // so a sell price has to become one or the margin silently reads as -100%.
+        if (customerId && v.monthly_revenue != null) {
+          const price = normalizeMoney(v.monthly_revenue);
+          const existing = db.prepare('SELECT id FROM bill_recurring WHERE customer_id=? AND active=1').get(customerId);
+          if (price != null && price > 0 && !existing) {
+            const items = JSON.stringify([{ description: v.bandwidth || 'Monthly internet service', quantity: 1, unit_price: price, taxable: 1 }]);
+            const id = db.prepare(`INSERT INTO bill_recurring (customer_id, frequency, next_date, tax_rate, items_json, auto_send, active)
+              VALUES (?, 'monthly', date('now','start of month','+1 month'), 0, ?, 0, 1)`).run(customerId, items).lastInsertRowid;
+            created('billing', id);
           }
         }
 
@@ -502,7 +577,7 @@ export default function registerImportWizard(app, ctx) {
       // blocker test: anything left is either older than the import or was deliberately kept.
       // Excluding this batch's own rows (the obvious way to write it) is wrong — it would delete
       // an account whose site we had just chosen to keep, and the site would go with it.
-      const order = ['device', 'unit', 'site', 'customer', 'subaccount', 'account', 'carrier'];
+      const order = ['billing', 'device', 'unit', 'site', 'customer', 'subaccount', 'account', 'carrier'];
       const BLOCKERS = {
         site: [['site_units', 'site_id', 'units'], ['devices', 'assigned_site_id', 'devices']],
         unit: [['devices', 'unit_id', 'devices']],
@@ -514,7 +589,7 @@ export default function registerImportWizard(app, ctx) {
         carrier: [['accounts', 'carrier_id', 'accounts'], ['devices', 'carrier_id', 'devices']]
       };
       const TABLE = { carrier: 'upstream_providers', account: 'accounts', subaccount: 'account_subaccounts',
-        customer: 'customers', site: 'sites', unit: 'site_units', device: 'devices' };
+        customer: 'customers', site: 'sites', unit: 'site_units', device: 'devices', billing: 'bill_recurring' };
 
       for (const e of order) {
         for (const r of recs.filter(x => x.action === 'created' && x.entity === e)) {

@@ -316,6 +316,19 @@ export function migrate() {
   // sub-accounts, or one not yet chosen, is still a valid link.
   ensure('account_customers', 'subaccount_id', 'INTEGER');
 
+  // What the carrier-account spreadsheets actually carry, beyond a number and a cost.
+  //
+  // portal_username joins the existing pin / portal_password / security_questions group, which is
+  // stripped for anyone below NOC. It belongs with them: a login name is half a credential, and
+  // it identifies which of several logins opens a given account.
+  ensure('accounts', 'portal_username', 'TEXT');
+  // Day of the month the carrier bills, 1-31. Stored as a number, not the "17th" the sheets use,
+  // so it can be sorted and compared.
+  ensure('accounts', 'due_day', 'INTEGER');
+  ensure('accounts', 'autopay', 'INTEGER');       // 1 / 0 / NULL for unknown
+  ensure('accounts', 'payment_method', 'TEXT');   // "on angela BOA card" — which card pays this
+  ensure('accounts', 'plan', 'TEXT');             // the carrier's plan name, normalised on import
+
   // Spreadsheet imports, and everything each one created.
   //
   // Every record an import makes is tagged with its batch so the run can be reversed. Bulk-loading

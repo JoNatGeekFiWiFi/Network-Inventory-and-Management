@@ -7,6 +7,7 @@
 //
 // Both directions are supported, because both come up: distance → position when a trace lands,
 // and position → distance when a locate crew finds damage and the OTDR tech needs a number.
+import { contentDisposition } from '../lib/core.js';
 import { mergeSegments, cumulative, pathLengthM, pointAtDistance, distanceAlong,
          fibreToGround, groundToFibre, measuredSlackPct, DEFAULT_SLACK_PCT } from '../lib/path.js';
 import { haversineM } from '../lib/geo.js';
@@ -341,7 +342,7 @@ export default function registerLocate(app, ctx) {
 </Document></kml>`;
     const file = String(name).replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 80) || 'path';
     res.setHeader('Content-Type', 'application/vnd.google-earth.kml+xml');
-    res.setHeader('Content-Disposition', `attachment; filename="${file}.kml"`);
+    res.setHeader('Content-Disposition', contentDisposition(file + '.kml'));
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(kml);
   });

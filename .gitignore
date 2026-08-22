@@ -25,3 +25,8 @@ push-to-github.sh
 myw_report_*.json
 az_spans_*.json
 *.myw.json
+
+# Filled-in carrier import sheets — real accounts, addresses and portal credentials
+*import-ready*.xlsx
+*accounts-filled*.xlsx
+/private/

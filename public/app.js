@@ -4604,6 +4604,8 @@ const IW_ACTION_LABEL = { create: 'Create new', attach: 'Link to existing', upda
 async function renderImportWiz(sub) {
   if (sub === 'history') return await renderImportHistory();
   IW = null; IW_FILE = null; IW_ACTIONS = {};
+  let templates = [];
+  try { templates = await api('/import/templates'); } catch {}
   view().innerHTML = `
     <div class="crumb"><a href="#/settings">Settings</a> <i class="ti ti-chevron-right"></i> Import a spreadsheet</div>
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -4614,6 +4616,15 @@ async function renderImportWiz(sub) {
         <input type="file" id="iwFile" accept=".csv,.tsv,.txt,.xlsx,.xlsm,.xltx" onchange="iwAnalyze()"/>
         <div class="help">CSV, TSV or Excel. Nothing is saved until you press Import at the bottom.</div></div>
     </div>
+    ${templates.length ? `<div class="card" style="padding:16px">
+      <h2 style="margin-bottom:4px">Start from a template</h2>
+      <div class="small sec-muted" style="margin-bottom:12px">Each one has the right columns for that
+        carrier's structure, worked example rows, and a "How to use" sheet. Your own sheets import
+        fine too — the templates just map with nothing to correct.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${templates.map(t => `<a class="btn" href="/api/import/template/${esc(t.key)}" download>
+          <i class="ti ti-download"></i> ${esc(t.label)}</a>`).join('')}</div>
+    </div>` : ''}
     <div id="iwOut"></div>`;
 }
 
@@ -4674,7 +4685,8 @@ function iwDraw() {
         <th>Column in your file</th><th>Example</th><th>Read as</th><th>How sure</th></tr></thead><tbody>
         ${d.columns.map(c => { const [cls, txt] = conf(c.confidence); return `<tr>
           <td><strong>${esc(c.header)}</strong></td>
-          <td class="small sec-muted mono">${esc((c.samples || []).slice(0, 2).join(' · ')) || '—'}</td>
+          <td class="small sec-muted mono">${esc((c.samples || []).slice(0, 2).join(' · ')) || '—'}
+              ${c.secret ? '<div class="small" style="color:var(--warning)">hidden — stored for NOC/admin only</div>' : ''}</td>
           <td><select data-iwcol="${c.index}" onchange="iwRemap()">${options(c.field)}</select></td>
           <td>${c.field ? `<span class="pill ${cls}">${txt}</span>` : '<span class="small sec-muted">—</span>'}
               ${c.field && c.why ? `<div class="small sec-muted">${esc(c.why)}</div>` : ''}</td></tr>`; }).join('')}

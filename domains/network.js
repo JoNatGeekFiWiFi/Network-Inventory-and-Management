@@ -1,6 +1,7 @@
 // Network operations domain: everything that talks to RouterOS — DHCP leases, WiFi,
 // config backups (SFTP/FTP retrieval), zero-touch provisioning, the .npk package library,
 // provisioning bench nodes, fleet batch config, telemetry read APIs and the threat blocklist.
+import { contentDisposition } from '../lib/core.js';
 import express from "express";
 import { randomUUID, randomBytes } from "node:crypto";
 import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync, copyFileSync } from "node:fs";
@@ -440,7 +441,7 @@ export default function registerNetwork(app, ctx) {
     audit(req, 'backup_read', 'device#' + b.device_id, 'download backup#' + b.id);
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Length', statSync(fp).size);
-    res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+    res.setHeader('Content-Disposition', contentDisposition(fname));
     createReadStream(fp).pipe(res);
   });
   app.delete('/api/backups/:id', requireNoc, (req, res) => {
@@ -639,7 +640,7 @@ export default function registerNetwork(app, ctx) {
     if (!existsSync(fp)) return res.status(404).type('text/plain').send('# file missing');
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Length', statSync(fp).size);
-    res.setHeader('Content-Disposition', `attachment; filename="${(p.filename || 'package.npk').replace(/"/g, '')}"`);
+    res.setHeader('Content-Disposition', contentDisposition(p.filename || 'package.npk'));
     createReadStream(fp).pipe(res);
   });
 
