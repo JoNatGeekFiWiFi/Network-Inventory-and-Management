@@ -36,9 +36,19 @@ export function parseCookies(req) {
   }
   return out;
 }
+// Add Secure in production so the session cookie is never sent over plain HTTP — without it, one
+// stray http:// link to the site hands the session token to anyone on the path. Left off when
+// running locally, where there is no TLS and the flag would stop login working at all.
+const SECURE = process.env.NODE_ENV === 'production' || process.env.COOKIE_SECURE === '1' ? ' Secure;' : '';
+
 export function setSessionCookie(res, token) {
-  res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}`);
+  res.setHeader('Set-Cookie', `sid=${token}; HttpOnly;${SECURE} Path=/; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}`);
 }
 export function clearSessionCookie(res) {
-  res.setHeader('Set-Cookie', 'sid=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0');
+  res.setHeader('Set-Cookie', `sid=; HttpOnly;${SECURE} Path=/; SameSite=Lax; Max-Age=0`);
+}
+
+/** Delete sessions that have already expired. Called on a slow timer from the server. */
+export function pruneSessions() {
+  return db.prepare("DELETE FROM sessions WHERE expires_at < datetime('now')").run().changes;
 }

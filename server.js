@@ -6,14 +6,14 @@ import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync, copy
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, backfillAccountCustomers, UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR } from './db.js';
 import { importModelCatalog } from './model-catalog.js';
-import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie } from './auth.js';
+import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie, pruneSessions } from './auth.js';
 import { hashPassword, verifyPassword } from './hash.js';
 import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseCidr } from './wg.js';
 import https from 'node:https';
 import http from 'node:http';
 import net from 'node:net';
 import nodemailer from 'nodemailer';
-import { r2, todayStr, esc2, normPhone } from './lib/core.js';
+import { r2, todayStr, esc2, normPhone, clientIp, contentDisposition } from './lib/core.js';
 import { normalizeDueDay, normalizeBool, normalizeMac, normalizeMoney, normalizePlan, normalizeName } from './lib/normalize.js';
 import registerBilling from './domains/billing.js';
 import registerSupport from './domains/support.js';
@@ -176,14 +176,14 @@ function audit(req, action, target, details='') {
 // Brute-force throttle for the internet-facing logins. In-memory sliding window keyed by IP+identifier.
 const _loginHits = new Map();
 function loginThrottle(req, key, { max = 8, windowMs = 15 * 60 * 1000 } = {}) {
-  const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '?';
+  const ip = clientIp(req);
   const k = ip + '|' + key; const now = Date.now();
   const hits = (_loginHits.get(k) || []).filter(t => now - t < windowMs);
   if (_loginHits.size > 5000) _loginHits.clear(); // crude cap so it can't grow unbounded
   if (hits.length >= max) { _loginHits.set(k, hits); return Math.ceil((windowMs - (now - hits[0])) / 60000); }
   hits.push(now); _loginHits.set(k, hits); return 0;
 }
-const loginSucceeded = (req, key) => { const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '?'; _loginHits.delete(ip + '|' + key); };
+const loginSucceeded = (req, key) => { _loginHits.delete(clientIp(req) + '|' + key); };
 app.post('/api/login', (req, res) => {
   const { email, password } = req.body || {};
   const ident = (email || '').toLowerCase().trim();
@@ -1209,7 +1209,7 @@ app.delete('/api/customers/:id', requireNoc, (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete('/api/sites/:id', (req, res) => {
+app.delete('/api/sites/:id', requireNoc, (req, res) => {
   const s = db.prepare('SELECT * FROM sites WHERE id=?').get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   // hardware survives the site: back to unassigned (connections/notes/access cascade away)
@@ -1541,7 +1541,7 @@ app.get('/api/attachments/:id', (req, res) => {
   res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${(a.filename || 'file').replace(/[^\w.\-() ]/g, '_')}"`);
   createReadStream(fp).pipe(res);
 });
-app.delete('/api/attachments/:id', (req, res) => {
+app.delete('/api/attachments/:id', requireNoc, (req, res) => {
   const a = db.prepare('SELECT * FROM note_attachments WHERE id=?').get(req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
   if (!isPriv(req) && a.author !== (req.user && req.user.email)) return res.status(403).json({ error: 'Only the author or NOC/Admin can delete' });
@@ -1632,6 +1632,11 @@ const ctx = {
   harvestThreats, pushBlocklistToDevice, activeBlockIps, blocklistMinHits,
   attachmentsFor, deleteAttachmentsFor,
   geocode, normPhone,
+  // The credential field lists. domains/network.js reveals and masks against these; without them
+  // on ctx its /reveal route threw ReferenceError on every call.
+  NOC_CREDS, TECH_CREDS, ALL_CREDS,
+  // The customer portal throttles its own logins with these.
+  loginThrottle, loginSucceeded,
   jobs: {}
 };
 registerNetwork(app, ctx);
@@ -1721,9 +1726,9 @@ const LOCATOR_RATE = { max: 20, windowMs: 60 * 1000 };
 const _locatorHits = new Map();
 
 function locatorThrottled(req) {
-  // Behind nginx the socket address is always the proxy, so prefer the forwarded client.
-  const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-  const ip = fwd || req.socket.remoteAddress || 'unknown';
+  // Behind nginx the socket address is always the proxy, so resolve the real client — taking the
+  // header at face value would make this limit trivially bypassable.
+  const ip = clientIp(req);
   const now = Date.now();
   const hits = (_locatorHits.get(ip) || []).filter(t => now - t < LOCATOR_RATE.windowMs);
   hits.push(now);
@@ -1746,7 +1751,7 @@ app.post('/locator/calc', express.raw({ type: () => true, limit: LOCATOR_MAX_BYT
   // Metadata only for anonymous uploads — see the note on locator_uploads in db.js.
   if (ctx.jobs.recordLocatorUpload) ctx.jobs.recordLocatorUpload(req.body, r, {
     source: 'public',
-    ip: (String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '').slice(0, 60),
+    ip: clientIp(req).slice(0, 60),
     filename: String(req.query.filename || '').slice(0, 200) || null
   });
   res.status(r.status).json(r.body);
@@ -1925,4 +1930,53 @@ app.get('*', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+/**
+ * Last-resort error handler.
+ *
+ * Without one, Express answers a thrown error with its own HTML page containing the full stack
+ * trace and absolute server paths. That actually happened here: a non-ASCII character in a
+ * download filename produced a 500 whose body listed the source file, line number and the
+ * deployment directory. Log the detail, tell the caller nothing but that it failed.
+ *
+ * Must be registered after every route, and must take four arguments — Express identifies error
+ * middleware by arity, so dropping `next` silently turns this back into a normal handler.
+ */
+const CLIENT_ERRORS = {
+  400: 'Bad request',
+  413: 'That file is too large',
+  415: 'Unsupported content type',
+  429: 'Too many requests'
+};
+app.use((err, req, res, next) => {                                    // eslint-disable-line no-unused-vars
+  console.error(`[error] ${req.method} ${req.originalUrl}:`, err && err.stack ? err.stack : err);
+  if (res.headersSent) return req.destroy();
+  // Express and body-parser set a status for the errors they raise — an oversized body is a 413,
+  // not a server fault. Collapsing everything to 500 would tell the caller their upload broke the
+  // server rather than that it was too big, and would hide a legitimate limit behind a bug report.
+  const status = Number((err && (err.status || err.statusCode)) || 500);
+  const client = status >= 400 && status < 500;
+  res.status(client ? status : 500)
+    .json({ error: client ? (CLIENT_ERRORS[status] || 'Request rejected') : 'Something went wrong on the server' });
+});
+
+// A rejected promise in an async route would otherwise take the whole service down: since Node 15
+// an unhandled rejection is fatal by default, so one flaky outbound call to Stripe, SMTP or a
+// router would end every other session too. Log it and stay up; systemd restarts are for crashes
+// we cannot contain, not for a timeout.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason && reason.stack ? reason.stack : reason);
+});
+// An uncaught exception is different: the process state is undefined from here on, so carrying on
+// risks serving wrong data or writing it. Log it and exit non-zero — systemd has Restart=on-failure
+// and a clean restart is far safer than a process that is still running but no longer trustworthy.
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err && err.stack ? err.stack : err);
+  process.exit(1);
+});
+
+// Expired sessions are only removed when someone happens to present one; on a long-running
+// service that leaves the table growing with rows nobody will ever look at again.
+const _sessionSweep = setInterval(() => { try { pruneSessions(); } catch {} }, 6 * 60 * 60 * 1000);
+if (_sessionSweep.unref) _sessionSweep.unref();
+
 app.listen(PORT, () => console.log(`Network Inventory Platform running on http://localhost:${PORT}`));

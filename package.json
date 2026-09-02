@@ -19,5 +19,9 @@
     "mailparser": "^3.9.14",
     "nodemailer": "^6.9.14",
     "ssh2": "^1.17.0"
+  },
+  "devDependencies": {
+    "acorn": "^8.14.0",
+    "acorn-walk": "^8.3.4"
   }
 }

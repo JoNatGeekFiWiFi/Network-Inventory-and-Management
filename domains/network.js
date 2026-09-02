@@ -13,7 +13,8 @@ export default function registerNetwork(app, ctx) {
   const { db, N, audit, requireNoc, isPriv, role, getSetting, setSetting,
           restReq, rosHeaders, rosErr, publicDevice, pollDeviceCore,
           UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR,
-          harvestThreats, pushBlocklistToDevice, activeBlockIps, blocklistMinHits } = ctx;
+          harvestThreats, pushBlocklistToDevice, activeBlockIps, blocklistMinHits,
+          TECH_CREDS, ALL_CREDS } = ctx;
 
   function mapLease(l) {
     return {
@@ -1012,8 +1013,14 @@ export default function registerNetwork(app, ctx) {
 
   app.post('/api/devices', (req, res) => {
     const b = req.body || {};
-    const cols = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','carrier_id','account_number','owner_account','owner_sub_account','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_password','admin_password','tech_username','tech_password','factory_wifi_ssid','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase','zt_node_id','admin_username'];
-    const vals = cols.map(c => b[c] === undefined ? null : b[c]);
+    if (!isPriv(req)) for (const c of ['factory_password','admin_password','tech_password','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase']) delete b[c];
+    if (!b.name || !String(b.name).trim()) return res.status(400).json({ error: 'A device needs a name' });
+    const ALLOWED = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','carrier_id','account_number','owner_account','owner_sub_account','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_password','admin_password','tech_username','tech_password','factory_wifi_ssid','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase','zt_node_id','admin_username'];
+    // Only name the columns the caller actually supplied. Listing them all and binding null for
+    // the rest overrides the schema defaults — which made `status`, `management_mode` and their
+    // NOT NULL constraints fail, so any create that omitted them came back as a 500.
+    const cols = ALLOWED.filter(c => b[c] !== undefined && b[c] !== null);
+    const vals = cols.map(c => b[c]);
     const info = db.prepare(`INSERT INTO devices (${cols.join(',')}) VALUES (${cols.map(()=>'?').join(',')})`).run(...vals);
     audit(req, 'create', 'device#' + info.lastInsertRowid, b.name);
     res.json({ id: info.lastInsertRowid });
@@ -1028,7 +1035,9 @@ export default function registerNetwork(app, ctx) {
     const credCols = ['factory_password','admin_password','tech_password','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase'];
     const sets = [], vals = [];
     for (const c of cols) { sets.push(`${c}=?`); vals.push(b[c] === undefined ? existing[c] : b[c]); }
-    for (const c of credCols) { if (b[c]) { sets.push(`${c}=?`); vals.push(b[c]); } }
+    // Reading these is gated to NOC/admin; writing has to be too. Otherwise support can replace a
+    // router's admin password with a value they choose, locking out the people who can read it.
+    if (isPriv(req)) for (const c of credCols) { if (b[c]) { sets.push(`${c}=?`); vals.push(b[c]); } }
     vals.push(req.params.id);
     db.prepare(`UPDATE devices SET ${sets.join(', ')} WHERE id=?`).run(...vals);
     // finishing setup (assigning to a site/POP) clears the pending-enrollment flag
@@ -1037,7 +1046,7 @@ export default function registerNetwork(app, ctx) {
     res.json({ ok: true });
   });
 
-  app.delete('/api/devices/:id', (req, res) => {
+  app.delete('/api/devices/:id', requireNoc, (req, res) => {
     db.prepare('DELETE FROM devices WHERE id=?').run(req.params.id);
     audit(req, 'delete', 'device#' + req.params.id);
     res.json({ ok: true });

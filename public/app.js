@@ -1411,7 +1411,7 @@ async function formDevice(q) {
         ${field('Management IP', 'mgmt_address', d.mgmt_address, { mono: true, ph: 'auto-set when provisioned' })}
         ${field('ZeroTier node ID (if using ZeroTier)', 'zt_node_id', d.zt_node_id, { mono: true, ph: '10-hex node id' })}
         <div class="box"><div class="small" style="font-weight:500;margin-bottom:8px"><i class="ti ti-key"></i> Credentials</div>
-        <div class="grid2">${field('Admin username', 'admin_username', d.admin_username || 'admin', { mono: true })}${field('Admin password', 'admin_password', '', { ph: q.id ? 'unchanged' : '' })}</div>
+        <div class="grid2">${field('Admin username', 'admin_username', d.admin_username || 'admin', { mono: true })}${isPriv() ? field('Admin password', 'admin_password', '', { ph: q.id ? 'unchanged' : '' }) : ''}</div>
         <div class="grid2">${field('Tech username', 'tech_username', d.tech_username)}${field('Tech password', 'tech_password', '', { ph: q.id ? 'unchanged' : '' })}</div>
         ${field('Factory password', 'factory_password', '', { ph: q.id ? 'unchanged' : '' })}
         <div class="help">Admin login is used to poll the device for its live ports (MikroTik RouterOS).</div></div>

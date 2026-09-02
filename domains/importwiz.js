@@ -20,14 +20,30 @@ const MAX_BYTES = 24 * 1024 * 1024;
 const MAX_ROWS = 5000;
 // Staged uploads live in memory between analyse and commit, so the file isn't re-sent and the
 // plan the user approved is exactly the one applied.
+//
+// This holds the parsed file INCLUDING any portal passwords and PINs it contained, in plaintext,
+// because the commit has to write the real values. So it is swept on a timer rather than only
+// when the next upload happens — otherwise a sheet analysed and then abandoned leaves credentials
+// resident in memory until the service restarts. It is also capped: each entry can be thousands of
+// rows, and nothing else limits how many a user may start.
 const STAGE_TTL_MS = 45 * 60 * 1000;
+const STAGE_MAX = 12;
 const staged = new Map();
+
+function sweepStaged(now = Date.now()) {
+  for (const [k, v] of staged) if (now - v.at > STAGE_TTL_MS) staged.delete(k);
+}
+// unref so an idle sweep timer never holds the process open (tests exit cleanly).
+const _stageSweep = setInterval(() => sweepStaged(), 5 * 60 * 1000);
+if (_stageSweep.unref) _stageSweep.unref();
 
 function stash(data) {
   const token = randomUUID();
+  sweepStaged();
+  // Map preserves insertion order, so the oldest is first — drop it rather than refusing the
+  // upload, since the person in front of the wizard wants the file they just chose.
+  while (staged.size >= STAGE_MAX) staged.delete(staged.keys().next().value);
   staged.set(token, { ...data, at: Date.now() });
-  const now = Date.now();
-  for (const [k, v] of staged) if (now - v.at > STAGE_TTL_MS) staged.delete(k);
   return token;
 }
 export default function registerImportWizard(app, ctx) {
@@ -284,8 +300,11 @@ export default function registerImportWizard(app, ctx) {
   // ---- commit ----
   app.post('/api/import/commit', requireNoc, (req, res) => {
     const b = req.body || {};
-    const st = staged.get(String(b.token || ''));
-    if (!st) return res.status(410).json({ error: 'That preview has expired — upload the file again.' });
+    const key = String(b.token || '');
+    const st = staged.get(key);
+    if (st && Date.now() - st.at > STAGE_TTL_MS) { staged.delete(key); }
+    if (!st || Date.now() - st.at > STAGE_TTL_MS)
+      return res.status(410).json({ error: 'That preview has expired — upload the file again.' });
 
     // Per-row decisions from the UI, defaulting to what analysis proposed.
     const actions = b.actions || {};
@@ -521,7 +540,7 @@ export default function registerImportWizard(app, ctx) {
       return res.status(500).json({ error: 'Import failed and nothing was written: ' + e.message });
     }
 
-    staged.delete(String(b.token));
+    staged.delete(key);
     audit(req, 'import', 'import_batch#' + batchId, st.filename || '');
     res.json({ batch_id: batchId, counts, tally });
   });

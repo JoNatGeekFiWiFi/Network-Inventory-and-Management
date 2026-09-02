@@ -10,7 +10,7 @@ const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "public")
 
 export default function registerSupport(app, ctx) {
   const { db, N, audit, requireNoc, getSetting, setSetting, sendMail, mailSafe,
-          verifyPassword, parseCookies } = ctx;
+          verifyPassword, parseCookies, loginThrottle, loginSucceeded, customerAccounts } = ctx;
 
   // ---------- Omnichannel messaging (email / SMS / WhatsApp via Twilio or Telnyx) ----------
   // email Reply-To woven with a per-ticket token: support+<token>@domain  (so inbound replies thread back)

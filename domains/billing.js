@@ -2,7 +2,7 @@
 // the public pay/quote pages, per-account P&L, and the Invoice Ninja importer.
 // Registered from server.js; shared services arrive via ctx so this module owns no globals.
 import express from "express";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHmac, timingSafeEqual } from "node:crypto";
 import { r2, todayStr, esc2, normPhone } from "../lib/core.js";
 
 export default function registerBilling(app, ctx) {
@@ -548,7 +548,13 @@ export default function registerBilling(app, ctx) {
         db.exec(`DELETE FROM ${table}`);
         const list = Array.isArray(rows) ? rows : [];
         if (list.length) {
-          const cols = Object.keys(list[0]);
+          // Column names come out of an uploaded file and are interpolated into SQL, which no
+          // amount of parameter binding protects — binding covers values, not identifiers. Take
+          // them from the live schema instead and keep only the ones that actually exist, so a
+          // doctored backup can name whatever it likes and still get nowhere.
+          const real = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name));
+          const cols = Object.keys(list[0]).filter(c => real.has(c));
+          if (!cols.length) throw new Error(`No recognisable columns for ${table}`);
           const ins = db.prepare(`INSERT INTO ${table} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`);
           for (const row of list) ins.run(...cols.map(c => row[c] === undefined ? null : row[c]));
         }
