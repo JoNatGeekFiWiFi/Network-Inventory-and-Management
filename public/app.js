@@ -1992,6 +1992,19 @@ async function renderSettings() {
       <i class="ti ti-file-import sec-muted"></i>
       <div style="flex:1;min-width:0"><div>Import from Invoice Ninja</div><div class="small sec-muted">Bring clients, invoices &amp; payments across from a JSON export</div></div>
       <i class="ti ti-chevron-right muted"></i></div></div>
+    <div class="card" style="padding:16px" id="devicetokens">
+      <h2 style="margin-bottom:4px"><i class="ti ti-device-mobile"></i> Phone &amp; tablet access</h2>
+      <div class="small sec-muted" style="margin-bottom:12px">Each device gets its own key, so a lost
+        phone can be shut off on its own without touching anyone else's. A key is shown once when
+        it is created and never again — if it is lost, revoke it and issue another.</div>
+      <div id="tokenList" class="muted small">Loading…</div>
+      <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:flex-end">
+        <div class="fld" style="margin:0;flex:1;min-width:180px"><label class="fl">Device name</label>
+          <input id="tokName" placeholder="e.g. Jon's iPhone"/></div>
+        <div class="fld" style="margin:0;width:130px"><label class="fl">Type</label>
+          <select id="tokPlatform"><option value="ios">iPhone</option><option value="ipados">iPad</option><option value="other">Other</option></select></div>
+        <button class="btn primary" onclick="addToken()"><i class="ti ti-plus"></i> Add device</button></div>
+    </div>
     <div class="card" style="padding:16px" id="accesscfg">
       <h2 style="margin-bottom:12px"><i class="ti ti-id-badge-2"></i> Site access</h2>
       ${field('Auto check-out time (HH:MM, blank = off)', 'auto_checkout_at', s.auto_checkout_at, { mono: true, ph: 'e.g. 18:00' })}
@@ -2017,6 +2030,7 @@ async function renderSettings() {
       <div id="nodeTok"></div>
       <div class="help">Each bench node uses its token to pull packages + the generic config and to enroll devices. The token is shown once when created.</div>
     </div>`;
+  loadTokens();   // fills the phone & tablet card once the page is on screen
 }
 async function saveSettings() {
   const z = collect('#zt'), w = collect('#wg'), bk = collect('#bak');
@@ -2045,6 +2059,45 @@ async function saveMessaging() {
   for (const k of ['twilio_token', 'telnyx_key', 'imap_pass']) if (!d[k]) delete d[k]; // blank = keep existing secret
   try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Messaging settings saved'); renderSettings(); } catch (e) { toast(e.message); }
 }
+async function loadTokens() {
+  const el = document.getElementById('tokenList');
+  if (!el) return;
+  try {
+    const list = await api('/tokens');
+    const mine = list.filter(t => !t.revoked_at);
+    el.innerHTML = mine.length ? mine.map(t => `
+      <div class="row" style="padding:10px 0">
+        <i class="ti ti-${t.platform === 'ipados' ? 'device-ipad' : t.platform === 'ios' ? 'device-mobile' : 'device-desktop'} sec-muted"></i>
+        <div style="flex:1;min-width:0">
+          <div>${esc(t.name)} <span class="tag mono">${esc(t.prefix)}…</span></div>
+          <div class="small sec-muted">Added ${esc(t.created_at)}${t.last_used_at
+            ? ` · last used ${esc(t.last_used_at)}${t.last_ip ? ' from ' + esc(t.last_ip) : ''}`
+            : ' · never used'}</div></div>
+        <button class="btn sm danger" onclick="revokeToken(${t.id}, ${esc(JSON.stringify(t.name))})"><i class="ti ti-trash"></i> Revoke</button>
+      </div>`).join('') : '<div class="muted small">No devices yet.</div>';
+  } catch (e) { el.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+
+async function addToken() {
+  const name = ($('#tokName').value || '').trim();
+  if (!name) { toast('Give the device a name'); return; }
+  try {
+    const r = await api('/tokens', { method: 'POST', body: JSON.stringify({ name, platform: $('#tokPlatform').value }) });
+    $('#tokName').value = '';
+    // Shown once. Deliberately a blocking dialog rather than a toast that can scroll away, because
+    // there is no way to retrieve this afterwards.
+    window.prompt(`Key for "${name}" — copy it into the app now. It cannot be shown again.`, r.token);
+    await loadTokens();
+    toast('Device added');
+  } catch (e) { toast(e.message); }
+}
+
+async function revokeToken(id, name) {
+  if (!confirm(`Revoke "${name}"?\n\nThat device will stop working immediately and will need a new key.`)) return;
+  try { await api('/tokens/' + id, { method: 'DELETE' }); await loadTokens(); toast('Device revoked'); }
+  catch (e) { toast(e.message); }
+}
+
 async function saveAccessCfg() {
   const d = collect('#accesscfg');
   try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Saved'); renderSettings(); } catch (e) { toast(e.message); }

@@ -351,6 +351,31 @@ export function migrate() {
     before_json TEXT,            -- prior values, so an update can be put back
     FOREIGN KEY (batch_id) REFERENCES import_batches(id) ON DELETE CASCADE)`);
   db.exec('CREATE INDEX IF NOT EXISTS idx_imprec ON import_records(batch_id)');
+
+  // Per-device API tokens, for the phone and tablet apps.
+  //
+  // Deliberately NOT the sessions table. A session cookie is short-lived, browser-scoped and
+  // interchangeable; a device token lives on a phone for months, travels in a header, and has to
+  // be killable on its own when that phone is lost — which means it needs an identity, a name a
+  // person recognises, and a revocation of its own.
+  //
+  // Only a hash is stored. The token is high-entropy random, so a single SHA-256 is the right
+  // choice: it cannot be reversed, and unlike scrypt it is cheap enough to run on every request.
+  // Password hashing is slow on purpose because passwords are guessable; a 256-bit random token
+  // is not, and paying scrypt per API call would just make the app slow.
+  db.exec(`CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,              -- "Jon's iPhone" — what the person sees when revoking
+    token_hash TEXT NOT NULL UNIQUE, -- sha256 of the token; the token itself is shown once
+    prefix TEXT NOT NULL,            -- first few characters, so a token can be identified in a list
+    platform TEXT,                   -- ios | ipados | web | other
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT, last_ip TEXT, -- so a forgotten or suspicious device stands out
+    expires_at TEXT,                 -- null = no expiry
+    revoked_at TEXT)`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_devices_carrier ON devices(carrier_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_accounts_carrier ON accounts(carrier_id)');
   // The carriers most US accounts sit under. Added only when absent, so renames and deletions

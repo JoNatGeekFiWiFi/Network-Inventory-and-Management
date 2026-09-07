@@ -6,7 +6,8 @@ import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync, copy
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, backfillAccountCustomers, UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR } from './db.js';
 import { importModelCatalog } from './model-catalog.js';
-import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie, pruneSessions } from './auth.js';
+import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie, pruneSessions,
+         createApiToken, userForApiToken, listApiTokens, revokeApiToken, allApiTokens } from './auth.js';
 import { hashPassword, verifyPassword } from './hash.js';
 import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseCidr } from './wg.js';
 import https from 'node:https';
@@ -22,6 +23,7 @@ import registerFiber from './domains/fiber.js';
 import registerSearch from './domains/search.js';
 import registerLocate from './domains/locate.js';
 import registerImportWizard from './domains/importwiz.js';
+import registerMobile from './domains/mobile.js';
 import { addressKey, unitFromAddress } from './lib/address.js';
 
 // HTTP(S) JSON request with a timeout; https tolerates self-signed certs (RouterOS). Returns {status, body}.
@@ -206,24 +208,87 @@ app.post('/api/logout', (req, res) => {
 });
 
 // ---- require auth for everything else under /api ----
+//
+// Two ways in: the browser's session cookie, or a device token in an Authorization header for the
+// phone and tablet apps. The bearer path is checked first because a request that bothers to send
+// one means it, and because a cookie may also be present in a WebView.
+//
+// req.authVia records which was used. That matters: a token sits on a device that can be lost or
+// stolen, so it is deliberately not allowed to do everything a signed-in browser can.
 app.use('/api', (req, res, next) => {
+  // How a device gets its token in the first place, so it cannot require one. It carries its own
+  // password check and the same throttle as the web login. Matched exactly — a prefix test here
+  // would open anything beginning with those characters.
+  if (req.path === '/m/session') return next();
+  const bearer = String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
+  if (bearer) {
+    const u = userForApiToken(bearer[1].trim(), clientIp(req));
+    if (!u) return res.status(401).json({ error: 'Invalid or revoked device token' });
+    req.user = u; req.authVia = 'token';
+    return next();
+  }
   const u = userForToken(parseCookies(req).sid);
   if (!u) return res.status(401).json({ error: 'auth required' });
-  req.user = u;
+  req.user = u; req.authVia = 'cookie';
   next();
 });
+
+/**
+ * Refuse anything a stolen device must not be able to do.
+ *
+ * A device token grants the user's normal role, which is right for daily work. But it should not
+ * be able to widen its own reach: minting more tokens, editing users, or changing a password would
+ * turn one lost phone into permanent access that revoking the phone no longer removes. Those stay
+ * cookie-only, so they need someone at a browser who knows the password.
+ */
+const requireCookieAuth = (req, res, next) => req.authVia === 'token'
+  ? res.status(403).json({ error: 'Not available to a device app — sign in on the web for this' })
+  : next();
 
 const requireAdmin = (req, res, next) => (req.user && req.user.role === 'admin') ? next() : res.status(403).json({ error: 'Admin only' });
 const requireNoc = (req, res, next) => (req.user && ['noc', 'admin'].includes(req.user.role)) ? next() : res.status(403).json({ error: 'NOC/Admin only' });
 
 app.get('/api/me', (req, res) => res.json(req.user));
 
+// ---- device tokens for the phone / tablet apps ----
+//
+// All cookie-only: issuing and revoking are exactly the operations a stolen device must not reach.
+// A person manages their own tokens; an admin can see and revoke everyone's, because the point of
+// the feature is being able to kill a device belonging to someone who has left or lost it.
+app.get('/api/tokens', requireCookieAuth, (req, res) => res.json(listApiTokens(req.user.id)));
+
+app.post('/api/tokens', requireCookieAuth, (req, res) => {
+  const b = req.body || {};
+  const name = String(b.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Give the device a name you will recognise' });
+  if (listApiTokens(req.user.id).filter(t => !t.revoked_at).length >= 10)
+    return res.status(409).json({ error: 'You already have 10 active device tokens — revoke one first' });
+  const platform = ['ios', 'ipados', 'web', 'other'].includes(b.platform) ? b.platform : 'other';
+  const days = Number(b.expires_days);
+  const expiresAt = Number.isFinite(days) && days > 0
+    ? new Date(Date.now() + days * 86400000).toISOString() : null;
+  const { id, token } = createApiToken(req.user.id, { name, platform, expiresAt });
+  audit(req, 'token_issue', 'api_token#' + id, name);
+  // The only time the token is ever readable. There is no endpoint that can show it again.
+  res.json({ id, name, platform, expires_at: expiresAt, token });
+});
+
+app.delete('/api/tokens/:id', requireCookieAuth, (req, res) => {
+  // Admins may revoke anyone's; everyone else only their own.
+  const changed = revokeApiToken(Number(req.params.id), req.user.role === 'admin' ? null : req.user.id);
+  if (!changed) return res.status(404).json({ error: 'No such active token' });
+  audit(req, 'token_revoke', 'api_token#' + req.params.id, '');
+  res.json({ ok: true });
+});
+
+app.get('/api/tokens/all', requireCookieAuth, requireAdmin, (req, res) => res.json(allApiTokens()));
+
 // ---- users (admin only) ----
 const VALID_ROLES = ['admin', 'noc', 'field', 'support'];
 app.get('/api/users', requireAdmin, (req, res) => {
   res.json(db.prepare('SELECT id, name, email, role, active, created_at FROM users ORDER BY name').all());
 });
-app.post('/api/users', requireAdmin, (req, res) => {
+app.post('/api/users', requireCookieAuth, requireAdmin, (req, res) => {
   const b = req.body || {};
   if (!b.email || !b.password) return res.status(400).json({ error: 'Email and password required' });
   if (!VALID_ROLES.includes(b.role)) return res.status(400).json({ error: 'Invalid role' });
@@ -234,7 +299,7 @@ app.post('/api/users', requireAdmin, (req, res) => {
   audit(req, 'create', 'user#' + info.lastInsertRowid, b.email);
   res.json({ id: info.lastInsertRowid });
 });
-app.put('/api/users/:id', requireAdmin, (req, res) => {
+app.put('/api/users/:id', requireCookieAuth, requireAdmin, (req, res) => {
   const b = req.body || {};
   const ex = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.id);
   if (!ex) return res.status(404).json({ error: 'not found' });
@@ -245,7 +310,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
   audit(req, 'edit', 'user#' + req.params.id, ex.email + (b.password ? ' (password reset)' : ''));
   res.json({ ok: true });
 });
-app.delete('/api/users/:id', requireAdmin, (req, res) => {
+app.delete('/api/users/:id', requireCookieAuth, requireAdmin, (req, res) => {
   if (Number(req.params.id) === req.user.id) return res.status(400).json({ error: 'Cannot delete yourself' });
   db.prepare('DELETE FROM users WHERE id=?').run(req.params.id);
   audit(req, 'delete', 'user#' + req.params.id);
@@ -1635,8 +1700,9 @@ const ctx = {
   // The credential field lists. domains/network.js reveals and masks against these; without them
   // on ctx its /reveal route threw ReferenceError on every call.
   NOC_CREDS, TECH_CREDS, ALL_CREDS,
-  // The customer portal throttles its own logins with these.
+  // The customer portal and the device apps throttle their own logins with these.
   loginThrottle, loginSucceeded,
+  createApiToken, clientIp,
   jobs: {}
 };
 registerNetwork(app, ctx);
@@ -1644,6 +1710,7 @@ registerFiber(app, ctx);
 registerSearch(app, ctx);
 registerLocate(app, ctx);
 registerImportWizard(app, ctx);
+registerMobile(app, ctx);
 registerSupport(app, ctx);   // messaging helpers first: billing has no dependency, but portal/pubBase are shared
 registerBilling(app, ctx);
 
