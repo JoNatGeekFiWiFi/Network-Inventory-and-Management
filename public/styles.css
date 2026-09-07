@@ -146,3 +146,43 @@ label.fl{display:block;font-size:13px;color:var(--text2);margin-bottom:5px}
 .err{background:var(--danger-bg);color:var(--danger);padding:10px 12px;border-radius:var(--radius);font-size:13px}
 .btn.danger{color:var(--danger);border-color:var(--danger)}
 .btn.danger:hover{background:var(--danger-bg)}
+
+/* ---- phones and tablets ----
+   The layout was built for a desk. These rules are the minimum that makes it usable in one hand:
+   the sidebar becomes a horizontal strip instead of eating half the width, tap targets grow to
+   something a gloved thumb can hit, and inputs reach 16px so iOS stops zooming the page whenever
+   a field is focused. */
+@media (max-width: 760px) {
+  .layout { flex-direction: column; }
+  .sidebar {
+    width: auto; display: flex; gap: 4px; overflow-x: auto; padding: 8px 10px;
+    border-right: 0; border-bottom: .5px solid var(--border);
+    -webkit-overflow-scrolling: touch; scrollbar-width: none;
+  }
+  .sidebar::-webkit-scrollbar { display: none; }
+  .sidebar a { flex: 0 0 auto; margin: 0; padding: 8px 12px; white-space: nowrap; }
+  .content { padding: 16px 14px 28px; }
+  .topbar { padding: 8px 12px; gap: 8px; }
+  .brand span:not(.env) { display: none; }        /* the icon alone carries it at this width */
+  .grid2, .grid3 { grid-template-columns: 1fr; }
+  .row { padding: 14px; }
+  .btn { padding: 10px 14px; }                     /* ~44px tall, which is the usable minimum */
+  .btn.sm { padding: 8px 11px; }
+  /* Anything under 16px makes iOS zoom the whole page on focus, and it never zooms back. */
+  input, select, textarea { font-size: 16px; }
+  h1 { font-size: 22px; }
+  .tablewrap { -webkit-overflow-scrolling: touch; }
+}
+
+/* Installed to the home screen: paint into the notch and home-indicator areas, then inset the
+   content so nothing lands under them. Only applies in standalone — in a browser tab Safari's own
+   chrome already handles it. */
+@media (display-mode: standalone) {
+  .topbar { padding-top: calc(10px + env(safe-area-inset-top)); }
+  .content {
+    padding-left: calc(14px + env(safe-area-inset-left));
+    padding-right: calc(14px + env(safe-area-inset-right));
+    padding-bottom: calc(28px + env(safe-area-inset-bottom));
+  }
+  .sidebar { padding-left: calc(10px + env(safe-area-inset-left)); }
+}

@@ -122,6 +122,10 @@ function setNav(name) { document.querySelectorAll('.sidebar a').forEach(a => a.c
 async function route() {
   if (!CURRENT_USER) return await renderLogin();
   const h = location.hash.replace(/^#/, '') || '/sites';
+  // Navigating away from the scanner must release the camera. route() replaces the whole view, so
+  // without this the video track keeps running: the indicator light stays on and the battery
+  // drains in someone's pocket.
+  stopScanner();
   const p = h.split('?')[0].split('/').filter(Boolean);
   const q = Object.fromEntries(new URLSearchParams(h.split('?')[1] || ''));
   view().innerHTML = '<div class="loading">Loading…</div>';
@@ -177,6 +181,7 @@ async function route() {
     if (p[0] === 'pnl') { setNav('pnl'); return await renderPnl(); }
     if (p[0] === 'import') { setNav('settings'); return await renderImport(); }
     if (p[0] === 'importwiz') { setNav('settings'); return await renderImportWiz(p[1]); }
+    if (p[0] === 'scan') { setNav('scan'); return await renderScan(q); }
     if (p[0] === 'tickets' && p[1] === 'new') { setNav('tickets'); return await formTicket(); }
     if (p[0] === 'tickets' && p[1]) { setNav('tickets'); return await renderTicket(p[1]); }
     if (p[0] === 'tickets') { setNav('tickets'); return await renderTickets(); }
@@ -4883,5 +4888,255 @@ async function iwUndo(id, back) {
         r.kept.map(k => `• ${k.entity} #${k.id} — ${k.why}`).join('\n'));
     } else toast(`Undone — ${r.removed} deleted, ${r.restored} put back`);
     location.hash = back; route();
+  } catch (e) { toast(e.message); }
+}
+
+// ---------- Scan (camera → hardware) ----------
+//
+// The job this page exists for: point the phone at the label on a router, and have the system say
+// what it is and where it belongs — or offer to add it. Everything else on the page is in service
+// of that, which is why manual entry sits right under the viewfinder rather than behind a menu.
+// Labels get scuffed, printers smudge, and a tech who cannot type the serial is stuck.
+let _scan = null;     // { stream, video, canvas, timer, confirmer, detector }
+
+/** Release the camera. Safe to call at any time, and called on every navigation. */
+function stopScanner() {
+  if (!_scan) return;
+  try { clearInterval(_scan.timer); } catch {}
+  try { if (_scan.stream) _scan.stream.getTracks().forEach(t => t.stop()); } catch {}
+  _scan = null;
+}
+
+async function renderScan(q = {}) {
+  const secure = window.isSecureContext || location.hostname === 'localhost';
+  view().innerHTML = `
+    <h1 style="margin-bottom:4px">Scan</h1>
+    <div class="small sec-muted" style="margin-bottom:12px">Point the camera at the barcode on a
+      serial or MAC label. Hold it steady and fill the width of the frame.</div>
+
+    <div class="card" style="padding:0;overflow:hidden">
+      <div id="scanStage" style="position:relative;background:#000;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center">
+        <video id="scanVideo" playsinline muted autoplay
+               style="width:100%;height:100%;object-fit:cover;display:none"></video>
+        <div id="scanIdle" style="text-align:center;padding:24px;color:#9aa6b2">
+          ${secure
+            ? `<div style="font-size:34px;margin-bottom:8px"><i class="ti ti-camera"></i></div>
+               <div class="small">The camera opens when you start scanning.</div>`
+            : `<div class="small">The camera needs a secure connection (https). Use manual entry below.</div>`}
+        </div>
+        <!-- A guide band, so people know where to aim rather than filling the whole frame. -->
+        <div id="scanGuide" style="display:none;position:absolute;left:8%;right:8%;top:35%;height:30%;
+             border:2px solid rgba(255,255,255,.85);border-radius:8px;box-shadow:0 0 0 9999px rgba(0,0,0,.35)"></div>
+      </div>
+      <div style="display:flex;gap:8px;padding:12px;flex-wrap:wrap;align-items:center">
+        ${secure ? `<button class="btn primary" id="scanBtn" onclick="toggleScanner()"><i class="ti ti-camera"></i> Start camera</button>` : ''}
+        <button class="btn" id="torchBtn" style="display:none" onclick="toggleTorch()"><i class="ti ti-bulb"></i> Light</button>
+        <span class="small sec-muted" id="scanState" style="flex:1;min-width:120px"></span>
+      </div>
+    </div>
+
+    <div class="card" style="padding:16px">
+      <div class="fld" style="margin:0"><label class="fl">Or type the serial / MAC</label>
+        <div style="display:flex;gap:8px">
+          <input id="scanManual" placeholder="e.g. 2CG5J1699600741 or 1C937CF4A003"
+                 autocapitalize="characters" autocomplete="off" spellcheck="false"
+                 onkeydown="if(event.key==='Enter')lookupCode(this.value)" style="flex:1"/>
+          <button class="btn" onclick="lookupCode($('#scanManual').value)"><i class="ti ti-search"></i> Look up</button>
+        </div>
+        <div class="help">A MAC works with or without colons.</div></div>
+    </div>
+
+    <div id="scanResult"></div>`;
+
+  if (q.code) lookupCode(q.code);
+}
+
+async function toggleScanner() {
+  if (_scan) { stopScanner(); paintScanState('idle'); return; }
+  const video = $('#scanVideo');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      // The rear camera, and a resolution high enough that thin bars survive. Asking for more than
+      // this costs frame rate for no extra reads.
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 960 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+
+    const canvas = document.createElement('canvas');
+    // Prefer the browser's own decoder where it exists (Android Chrome): it is faster and also
+    // reads QR, which ours does not. On iOS there is none, and our decoder is the whole story.
+    let detector = null;
+    if ('BarcodeDetector' in window) {
+      try {
+        detector = new window.BarcodeDetector({ formats: ['code_128', 'code_39', 'qr_code', 'ean_13', 'data_matrix'] });
+      } catch { detector = null; }
+    }
+    _scan = { stream, video, canvas, detector, confirmer: (window.Barcode ? window.Barcode.createConfirmer(2) : null), busy: false, timer: null };
+    _scan.timer = setInterval(tickScanner, 120);
+
+    paintScanState('running');
+    // Torch is Android-only in practice; Safari does not expose it. Show the button only if real.
+    const track = stream.getVideoTracks()[0];
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (caps && caps.torch) $('#torchBtn').style.display = '';
+  } catch (e) {
+    paintScanState('idle');
+    toast(e && e.name === 'NotAllowedError'
+      ? 'Camera permission was declined — you can still type the code below'
+      : 'Could not open the camera — type the code below');
+  }
+}
+
+function paintScanState(state) {
+  const v = $('#scanVideo'), idle = $('#scanIdle'), guide = $('#scanGuide'),
+        btn = $('#scanBtn'), st = $('#scanState');
+  if (!v) return;
+  const on = state === 'running';
+  v.style.display = on ? '' : 'none';
+  idle.style.display = on ? 'none' : '';
+  guide.style.display = on ? '' : 'none';
+  if (btn) btn.innerHTML = on ? '<i class="ti ti-player-stop"></i> Stop camera' : '<i class="ti ti-camera"></i> Start camera';
+  if (!on) { $('#torchBtn').style.display = 'none'; st.textContent = ''; }
+  else st.textContent = 'Looking for a barcode…';
+}
+
+async function toggleTorch() {
+  if (!_scan) return;
+  const track = _scan.stream.getVideoTracks()[0];
+  _scan.torch = !_scan.torch;
+  try { await track.applyConstraints({ advanced: [{ torch: _scan.torch }] }); }
+  catch { toast('This device will not let the browser control the light'); }
+}
+
+/** One pass over the current frame. Kept short — it runs eight times a second. */
+async function tickScanner() {
+  if (!_scan || _scan.busy) return;
+  const { video, canvas } = _scan;
+  if (!video.videoWidth) return;
+  _scan.busy = true;
+  try {
+    // Downscale: a 1280px frame costs three times the work of 640 and reads no better, because
+    // the limit is optics and focus rather than pixels.
+    const w = 640, h = Math.round(video.videoHeight * (w / video.videoWidth));
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(video, 0, 0, w, h);
+
+    let text = null;
+    if (_scan.detector) {
+      const found = await _scan.detector.detect(canvas).catch(() => []);
+      if (found && found.length) text = found[0].rawValue;
+    }
+    if (!text && window.Barcode) {
+      const band = ctx.getImageData(0, 0, w, h);
+      const hit = window.Barcode.scanFrame(band.data, w, h);
+      if (hit) text = hit.text;
+    }
+
+    // Two agreeing frames before we believe it — see the note in barcode.js. A single frame of
+    // noise can produce a checksum-valid read, and a wrong serial is worse than no serial.
+    const confirmed = _scan.confirmer ? _scan.confirmer.offer(text) : text;
+    if (confirmed) {
+      if (navigator.vibrate) navigator.vibrate(40);
+      stopScanner(); paintScanState('idle');
+      lookupCode(confirmed);
+    }
+  } finally { if (_scan) _scan.busy = false; }
+}
+
+/** Resolve a code against the server and show what it is. */
+async function lookupCode(code) {
+  code = String(code || '').trim();
+  if (!code) { toast('Nothing to look up'); return; }
+  const out = $('#scanResult');
+  out.innerHTML = '<div class="card" style="padding:16px" class="muted">Looking up…</div>';
+  try {
+    const r = await api('/m/scan?code=' + encodeURIComponent(code));
+    out.innerHTML = r.status === 'found' ? scanFoundHtml(r) : await scanUnknownHtml(r);
+  } catch (e) {
+    out.innerHTML = `<div class="card" style="padding:16px"><div class="err">${esc(e.message)}</div></div>`;
+  }
+}
+
+function scanFoundHtml(r) {
+  const link = m => m.type === 'device' ? `#/device/${m.id}` : m.type === 'site' ? `#/site/${m.id}` : `#/account/${m.id}`;
+  return `<div class="card">
+    <div class="hd"><h2>Found <span class="mono small sec-muted">${esc(r.code)}</span></h2></div>
+    ${r.matches.map(m => `<div class="row rowlink" onclick="location.hash='${link(m)}'">
+      <i class="ti ti-${m.type === 'device' ? 'router' : m.type === 'site' ? 'building' : 'file-invoice'} sec-muted"></i>
+      <div style="flex:1;min-width:0">
+        <div>${esc(m.label || '(unnamed)')}</div>
+        <div class="small sec-muted">${esc(m.detail || '')} · matched on ${esc(m.matched_on)}</div></div>
+      <i class="ti ti-chevron-right muted"></i></div>`).join('')}
+    <div class="row"><button class="btn" onclick="rescan()"><i class="ti ti-scan"></i> Scan another</button></div>
+  </div>`;
+}
+
+/**
+ * Nothing matched — which on a new install is the normal outcome, not a failure.
+ * Offer to create the device there and then, with the code already filled in.
+ */
+async function scanUnknownHtml(r) {
+  let sites = [];
+  try { sites = await api('/sites'); } catch {}
+  const i = r.interpreted || {};
+  return `<div class="card" style="padding:16px">
+    <h2 style="margin-bottom:4px">Not in the system yet</h2>
+    <div class="small sec-muted" style="margin-bottom:12px">
+      <span class="mono">${esc(r.code)}</span> was read as ${i.mac ? 'a MAC address' : 'a serial number'}.
+      Add it now, or scan a different label.</div>
+    <div class="grid2">
+      <div class="fld"><label class="fl">Name</label>
+        <input id="nsName" value="${esc(i.mac || i.serial || '')}" placeholder="what to call it"/></div>
+      <div class="fld"><label class="fl">${i.mac ? 'MAC address' : 'Serial number'}</label>
+        <input id="nsCode" class="mono" value="${esc(i.mac || i.serial || '')}" readonly style="background:var(--surface2)"/></div>
+    </div>
+    <div class="fld"><label class="fl">Put it at</label>
+      <select id="nsSite" onchange="scanSiteChanged()">
+        <option value="">Leave in stock for now</option>
+        ${sites.map(s => `<option value="${s.id}">${esc(s.name)}${s.service_address ? ' — ' + esc(s.service_address) : ''}</option>`).join('')}
+      </select></div>
+    <div class="fld" id="nsUnitWrap" style="display:none"><label class="fl">Unit</label>
+      <select id="nsUnit"><option value="">Whole building</option></select></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn primary" onclick="createScanned('${i.mac ? 'mac' : 'serial'}')"><i class="ti ti-plus"></i> Add this device</button>
+      <button class="btn" onclick="rescan()"><i class="ti ti-scan"></i> Scan another</button>
+    </div>
+  </div>`;
+}
+
+function rescan() {
+  $('#scanResult').innerHTML = '';
+  const m = $('#scanManual'); if (m) m.value = '';
+  if (window.isSecureContext || location.hostname === 'localhost') toggleScanner();
+}
+
+/** Load the units of the chosen site, so a tenant's hardware lands on the tenant. */
+async function scanSiteChanged() {
+  const id = $('#nsSite').value;
+  const wrap = $('#nsUnitWrap'), sel = $('#nsUnit');
+  if (!id) { wrap.style.display = 'none'; return; }
+  try {
+    const units = await api(`/sites/${id}/units`);
+    sel.innerHTML = '<option value="">Whole building</option>'
+      + units.map(u => `<option value="${u.id}">${esc(u.label)}${u.customer_name ? ' — ' + esc(u.customer_name) : ''}</option>`).join('');
+    wrap.style.display = units.length ? '' : 'none';
+  } catch { wrap.style.display = 'none'; }
+}
+
+async function createScanned(kind) {
+  const name = ($('#nsName').value || '').trim();
+  const code = ($('#nsCode').value || '').trim();
+  if (!name) { toast('Give it a name'); return; }
+  const siteId = $('#nsSite').value, unitId = $('#nsUnit') ? $('#nsUnit').value : '';
+  try {
+    const body = { name, status: 'Deployed' };
+    body[kind] = code;
+    if (siteId) { body.assigned_type = 'site'; body.assigned_site_id = Number(siteId); if (unitId) body.unit_id = Number(unitId); }
+    const r = await api('/devices', { method: 'POST', body: JSON.stringify(body) });
+    toast('Device added');
+    location.hash = '#/device/' + r.id;
   } catch (e) { toast(e.message); }
 }
