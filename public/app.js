@@ -119,6 +119,34 @@ async function init() {
 
 function setNav(name) { document.querySelectorAll('.sidebar a').forEach(a => a.classList.toggle('active', a.dataset.nav === name)); }
 
+/**
+ * Which build is running, and telling the user when a newer one is waiting.
+ *
+ * The service worker dispatches app-update-ready when a new version has installed, but nothing was
+ * listening to it — so an installed app could sit on old code indefinitely with no sign. This is
+ * the listener, plus a build id that makes "what are you actually running" answerable.
+ */
+window.APP_BUILD = null;
+(async () => {
+  try { window.APP_BUILD = (await (await fetch('/api/build')).json()).build; } catch {}
+})();
+
+window.addEventListener('app-update-ready', (e) => {
+  if (document.getElementById('updateBar')) return;
+  const bar = document.createElement('div');
+  bar.id = 'updateBar';
+  bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:60;background:var(--info);color:#fff;'
+    + 'padding:calc(12px + env(safe-area-inset-bottom)) 16px 12px;display:flex;gap:12px;align-items:center;font-size:14px';
+  bar.innerHTML = '<span style="flex:1">A newer version is ready.</span>'
+    + '<button class="btn sm" style="background:#fff;color:var(--info);border-color:#fff" id="updateNow">Reload</button>';
+  document.body.appendChild(bar);
+  document.getElementById('updateNow').onclick = () => {
+    // Ask the waiting worker to take over, then reload into it.
+    try { if (e.detail && e.detail.waiting) e.detail.waiting.postMessage('skip-waiting'); } catch {}
+    location.reload();
+  };
+});
+
 async function route() {
   if (!CURRENT_USER) return await renderLogin();
   const h = location.hash.replace(/^#/, '') || '/sites';
@@ -2003,6 +2031,9 @@ async function renderSettings() {
         phone can be shut off on its own without touching anyone else's. A key is shown once when
         it is created and never again — if it is lost, revoke it and issue another.</div>
       <div id="tokenList" class="muted small">Loading…</div>
+      <div class="help" style="margin-top:8px">This browser is running build
+        <span class="mono" id="buildId">${esc(window.APP_BUILD || '…')}</span>. If a device is
+        behaving differently from what you expect, check its build matches.</div>
       <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:flex-end">
         <div class="fld" style="margin:0;flex:1;min-width:180px"><label class="fl">Device name</label>
           <input id="tokName" placeholder="e.g. Jon's iPhone"/></div>
@@ -4931,6 +4962,7 @@ async function renderScan(q = {}) {
       <div style="display:flex;gap:8px;padding:12px;flex-wrap:wrap;align-items:center">
         ${secure ? `<button class="btn primary" id="scanBtn" onclick="toggleScanner()"><i class="ti ti-camera"></i> Start camera</button>` : ''}
         <button class="btn" id="torchBtn" style="display:none" onclick="toggleTorch()"><i class="ti ti-bulb"></i> Light</button>
+        <button class="btn" onclick="toggleScanDiag()"><i class="ti ti-stethoscope"></i> Diagnostics</button>
         <span class="small sec-muted" id="scanState" style="flex:1;min-width:120px"></span>
       </div>
     </div>
@@ -4946,6 +4978,19 @@ async function renderScan(q = {}) {
         <div class="help">A MAC works with or without colons.</div></div>
     </div>
 
+    <!-- Off by default. When a label will not read, this is the difference between guessing and
+         knowing: it shows the camera resolution actually granted, how many bar-widths the code
+         needs, and whether anything is being decoded at all. -->
+    <div class="card" id="scanDiag" style="display:none;padding:16px">
+      <h2 style="margin-bottom:4px">Diagnostics</h2>
+      <div class="small sec-muted" style="margin-bottom:10px">Leave the camera running on the label
+        that will not read for a few seconds, then send me this.</div>
+      <pre id="scanDiagOut" class="mono small" style="white-space:pre-wrap;margin:0;background:var(--surface2);padding:12px;border-radius:var(--radius);overflow-x:auto">Start the camera to collect readings.</pre>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn sm" onclick="copyScanDiag()"><i class="ti ti-copy"></i> Copy</button>
+        <span class="small sec-muted" id="scanDiagNote"></span></div>
+    </div>
+
     <div id="scanResult"></div>`;
 
   if (q.code) lookupCode(q.code);
@@ -4958,7 +5003,9 @@ async function toggleScanner() {
     const stream = await navigator.mediaDevices.getUserMedia({
       // The rear camera, and a resolution high enough that thin bars survive. Asking for more than
       // this costs frame rate for no extra reads.
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 960 } },
+      // Resolution is the binding constraint on reading a long serial, so ask for plenty. The
+      // browser gives the nearest it can, and only the middle strip is ever processed.
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
       audio: false
     });
     video.srcObject = stream;
@@ -4973,7 +5020,11 @@ async function toggleScanner() {
         detector = new window.BarcodeDetector({ formats: ['code_128', 'code_39', 'qr_code', 'ean_13', 'data_matrix'] });
       } catch { detector = null; }
     }
-    _scan = { stream, video, canvas, detector, confirmer: (window.Barcode ? window.Barcode.createConfirmer(2) : null), busy: false, timer: null };
+    _scan = { stream, video, canvas, detector,
+      confirmer: (window.Barcode ? window.Barcode.createConfirmer(2) : null),
+      busy: false, timer: null,
+      diag: { frames: 0, decoded: 0, lastText: null, lastAt: null, settings: null, started: Date.now() } };
+    try { _scan.diag.settings = stream.getVideoTracks()[0].getSettings(); } catch {}
     _scan.timer = setInterval(tickScanner, 120);
 
     paintScanState('running');
@@ -5010,30 +5061,52 @@ async function toggleTorch() {
   catch { toast('This device will not let the browser control the light'); }
 }
 
-/** One pass over the current frame. Kept short — it runs eight times a second. */
+/**
+ * One pass over the current frame.
+ *
+ * The first version downscaled the whole frame to 640px wide, which is where a real scan failed:
+ * a 15-character serial is ~156 modules, so filling 70% of a 640px frame gives it barely 2.2
+ * pixels per module. Measured, the decoder needs about 3 to be reliable — so the longer the code,
+ * the more likely it silently would not read, which is exactly the behaviour that showed up.
+ *
+ * Instead, only the guide band is read, at the camera's own resolution. A barcode carries no
+ * information vertically, so throwing away 70% of the HEIGHT costs nothing, while keeping full
+ * WIDTH roughly doubles the pixels per module for the same amount of work.
+ */
 async function tickScanner() {
   if (!_scan || _scan.busy) return;
   const { video, canvas } = _scan;
   if (!video.videoWidth) return;
   _scan.busy = true;
   try {
-    // Downscale: a 1280px frame costs three times the work of 640 and reads no better, because
-    // the limit is optics and focus rather than pixels.
-    const w = 640, h = Math.round(video.videoHeight * (w / video.videoWidth));
+    const vw = video.videoWidth, vh = video.videoHeight;
+    // The strip the guide box sits over, in source pixels.
+    const bandH = Math.max(48, Math.round(vh * 0.34));
+    const bandY = Math.round((vh - bandH) / 2);
+    // Keep full width up to a sane ceiling; only shrink the height, which carries no data.
+    const w = Math.min(vw, 1600);
+    const h = Math.min(bandH, 220);
+
     canvas.width = w; canvas.height = h;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(video, 0, 0, w, h);
+    ctx.drawImage(video, 0, bandY, vw, bandH, 0, 0, w, h);
 
-    let text = null;
+    let text = null, via = null;
     if (_scan.detector) {
       const found = await _scan.detector.detect(canvas).catch(() => []);
-      if (found && found.length) text = found[0].rawValue;
+      if (found && found.length) { text = found[0].rawValue; via = 'BarcodeDetector'; }
     }
     if (!text && window.Barcode) {
-      const band = ctx.getImageData(0, 0, w, h);
-      const hit = window.Barcode.scanFrame(band.data, w, h);
-      if (hit) text = hit.text;
+      const img = ctx.getImageData(0, 0, w, h);
+      // The whole strip is the region of interest now, so scan across all of it.
+      const hit = window.Barcode.scanFrame(img.data, w, h, { rows: 18, band: 1 });
+      if (hit) { text = hit.text; via = hit.format; }
     }
+
+    const d = _scan.diag;
+    d.frames++; d.procW = w; d.procH = h; d.videoW = vw; d.videoH = vh;
+    if (text) { d.decoded++; d.lastText = text; d.lastVia = via; d.lastAt = Date.now(); }
+    if (d.frames % 4 === 0) paintScanDiag();
 
     // Two agreeing frames before we believe it — see the note in barcode.js. A single frame of
     // noise can produce a checksum-valid read, and a wrong serial is worse than no serial.
@@ -5044,6 +5117,49 @@ async function tickScanner() {
       lookupCode(confirmed);
     }
   } finally { if (_scan) _scan.busy = false; }
+}
+
+function toggleScanDiag() {
+  const el = $('#scanDiag');
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+  if (el.style.display === '') paintScanDiag();
+}
+
+/**
+ * What the scanner can actually see.
+ *
+ * The number that matters is pixels per bar-width: below roughly 3 the decoder cannot resolve the
+ * thin bars, and everything else — focus, lighting, distance — shows up through it. Reporting it
+ * turns "it will not scan" into a measurement.
+ */
+function paintScanDiag() {
+  const out = $('#scanDiagOut');
+  if (!out) return;
+  if (!_scan) { out.textContent = 'Start the camera to collect readings.'; return; }
+  const d = _scan.diag, s = d.settings || {};
+  const secs = Math.max(1, Math.round((Date.now() - d.started) / 1000));
+  // A typical serial is ~160 bar-widths. If the label spans 70% of the frame, this is what each
+  // bar-width gets.
+  const ppm = d.procW ? (d.procW * 0.70 / 160) : 0;
+  out.textContent = [
+    `app build       ${window.APP_BUILD || 'unknown'}`,
+    `camera granted  ${d.videoW || '?'} x ${d.videoH || '?'}` + (s.frameRate ? ` @ ${Math.round(s.frameRate)}fps` : ''),
+    `facing          ${s.facingMode || 'unknown'}`,
+    `processing      ${d.procW || '?'} x ${d.procH || '?'} (guide band only)`,
+    `~px per bar     ${ppm ? ppm.toFixed(1) : '?'}   (needs about 3 to read a 15-char serial)`,
+    `native decoder  ${_scan.detector ? 'yes (BarcodeDetector)' : 'no — using the built-in decoder'}`,
+    `frames tried    ${d.frames} in ${secs}s  (${(d.frames / secs).toFixed(1)}/s)`,
+    `decoded         ${d.decoded}`,
+    `last read       ${d.lastText ? JSON.stringify(d.lastText) + ' via ' + d.lastVia : 'nothing yet'}`,
+    `barcode.js      ${window.Barcode ? 'loaded' : 'NOT LOADED — scanning cannot work'}`,
+    `standalone      ${window.matchMedia('(display-mode: standalone)').matches ? 'yes (installed)' : 'no (browser tab)'}`
+  ].join('\n');
+}
+
+async function copyScanDiag() {
+  const t = $('#scanDiagOut').textContent;
+  try { await navigator.clipboard.writeText(t); $('#scanDiagNote').textContent = 'Copied.'; }
+  catch { $('#scanDiagNote').textContent = 'Select the text above and copy it.'; }
 }
 
 /** Resolve a code against the server and show what it is. */

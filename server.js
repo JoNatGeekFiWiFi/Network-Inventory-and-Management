@@ -156,6 +156,27 @@ backfillCustomers();
 backfillAccountCustomers();
 { const n = importModelCatalog(db); if (n) console.log(`Model catalog: added ${n} device model(s).`); }
 
+/**
+ * A stamp identifying exactly which build is running.
+ *
+ * Without this there is no way to tell whether a device is running the code you just deployed or
+ * a cached copy from an hour ago — which turns every "it still does not work" into guesswork.
+ * Derived from the size and mtime of the files the browser actually loads, so it changes whenever
+ * they do and needs nothing added to the deploy.
+ */
+const APP_BUILD = (() => {
+  try {
+    const files = ['public/app.js', 'public/barcode.js', 'public/styles.css', 'public/sw.js', 'public/index.html'];
+    let h = 0;
+    for (const f of files) {
+      const st = statSync(join(__dirname, f));
+      const key = `${f}:${st.size}:${Math.floor(st.mtimeMs)}`;
+      for (let i = 0; i < key.length; i++) h = (Math.imul(31, h) + key.charCodeAt(i)) | 0;
+    }
+    return (h >>> 0).toString(36);
+  } catch { return 'dev'; }
+})();
+
 // ---- helpers ----
 const N = (v, d = null) => (v === undefined ? d : v); // null-coalesce for SQLite binding
 // Shared with the spreadsheet importer, so a due day typed into the form and one read out of
@@ -206,6 +227,10 @@ app.post('/api/logout', (req, res) => {
   clearSessionCookie(res);
   res.json({ ok: true });
 });
+
+// The build id, before the auth gate: the page shows it on the login screen too, and it is not
+// sensitive — it is a hash of file sizes.
+app.get('/api/build', (req, res) => res.json({ build: APP_BUILD }));
 
 // ---- require auth for everything else under /api ----
 //

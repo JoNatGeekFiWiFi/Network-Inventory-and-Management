@@ -5,7 +5,6 @@
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "orientation": "portrait-primary",
   "background_color": "#10161d",
   "theme_color": "#10161d",
   "categories": ["business", "utilities"],

@@ -12,7 +12,7 @@
 //      audited; a cached copy on a shared or lost device is a liability with no upside here.
 //   2. Only GET is ever cached. A cached POST would be a replayed write.
 
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL_CACHE = `netinv-shell-${VERSION}`;
 const ASSET_CACHE = `netinv-assets-${VERSION}`;
 
@@ -83,28 +83,42 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Everything else — our own static files, and the icon font and map library from the CDN.
-  // Stale-while-revalidate: instant from cache, refreshed in the background for next time. This
-  // is also what stops the Tabler icon font failing to paint on a slow connection, since after
-  // one successful load it is local.
+  // Our own code — app.js, barcode.js, styles.css — is network-first with a short timeout.
+  //
+  // Stale-while-revalidate was the first choice and it is wrong for these: it serves the OLD file
+  // and fetches the new one for NEXT time, so every deploy needs two launches before the fix is
+  // actually running. That turned a scanner fix into "it still does not work" for no reason. These
+  // files are small; wait briefly for the current one, and fall back to cache when there is no
+  // signal, which is the case the cache exists for.
   const sameOrigin = url.origin === self.location.origin;
   const cdn = url.hostname === 'cdnjs.cloudflare.com';
   if (!sameOrigin && !cdn) return;
 
+  const isOurCode = sameOrigin && /\.(js|css)$/.test(url.pathname);
+
   event.respondWith((async () => {
     const cacheName = sameOrigin ? SHELL_CACHE : ASSET_CACHE;
     const cache = await caches.open(cacheName);
-    const cached = await cache.match(req);
 
-    const network = fetch(req).then(res => {
-      // Only store real successes. An opaque cross-origin response has status 0 and caching it
-      // would pin a failure in place with no way to tell.
+    const fromNetwork = fetch(req).then(res => {
       if (res && res.status === 200 && res.type !== 'opaque') cache.put(req, res.clone()).catch(() => {});
       return res;
     }).catch(() => null);
 
-    if (cached) { event.waitUntil(network); return cached; }
-    const fresh = await network;
-    return fresh || new Response('', { status: 504, statusText: 'Offline' });
+    if (isOurCode) {
+      // Race the network against a timer rather than against the cache, so a slow connection
+      // degrades to the cached copy instead of hanging.
+      const timeout = new Promise(resolve => setTimeout(() => resolve(null), 2500));
+      const fresh = await Promise.race([fromNetwork, timeout]);
+      if (fresh) return fresh;
+      const cached = await cache.match(req);
+      if (cached) { event.waitUntil(fromNetwork); return cached; }
+      return (await fromNetwork) || new Response('', { status: 504, statusText: 'Offline' });
+    }
+
+    // Images, fonts and the CDN libraries: these do not change, so cache-first is right.
+    const cached = await cache.match(req);
+    if (cached) { event.waitUntil(fromNetwork); return cached; }
+    return (await fromNetwork) || new Response('', { status: 504, statusText: 'Offline' });
   })());
 });

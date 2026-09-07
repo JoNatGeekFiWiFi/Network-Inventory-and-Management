@@ -314,12 +314,46 @@ export function createConfirmer(needed = 2) {
 // ---- encoding, for tests and for printing labels later ----------------------------------
 
 /**
- * Render a Code 128 (subset B) string as element widths.
+ * Render a string as Code 128 element widths, switching to subset C for runs of digits.
  *
- * Exists so the decoder can be tested against barcodes this file did not itself imagine — encode
- * a known string, rasterise it, decode it back. It is also the groundwork for printing asset
- * labels from the platform, which is where this is heading anyway.
+ * Subset C packs two digits into one symbol. That is not a nicety: a serial like
+ * "2CG5J1699600741" is 200 modules in subset B alone but 156 with C, which is 22% narrower — and
+ * narrower is the difference between reading and not reading, because the limit on a phone is
+ * pixels per module. Real equipment labels are encoded this way too, so generating them this way
+ * also means the test card behaves like the thing it stands in for.
  */
+export function encode128(text) {
+  const str = String(text);
+  const digitsFrom = (i) => { let n = 0; while (i + n < str.length && str[i + n] >= '0' && str[i + n] <= '9') n++; return n; };
+
+  // Worth starting in C if the string opens with 4+ digits (2+ symbols saved), or is all digits.
+  const lead = digitsFrom(0);
+  let set = (lead >= 4 || (lead === str.length && lead >= 2 && lead % 2 === 0)) ? 'C' : 'B';
+  const values = [set === 'C' ? START_C : START_B];
+
+  let i = 0;
+  while (i < str.length) {
+    const run = digitsFrom(i);
+    if (set === 'B') {
+      // Switch into C when enough digits remain to pay for the switch symbol.
+      if (run >= 4 || (run >= 2 && i + run === str.length && run % 2 === 0)) { values.push(CODE_C); set = 'C'; continue; }
+      const v = str.charCodeAt(i) - 32;
+      if (v < 0 || v > 94) throw new Error(`"${str[i]}" cannot be encoded in Code 128 subset B`);
+      values.push(v); i++;
+    } else {
+      // In C, consume digit pairs; drop back to B for anything else or a lone trailing digit.
+      if (run >= 2) { values.push(Number(str.slice(i, i + 2))); i += 2; }
+      else { values.push(CODE_B); set = 'B'; }
+    }
+  }
+
+  let sum = values[0];
+  for (let k = 1; k < values.length; k++) sum += values[k] * k;
+  values.push(sum % 103, STOP);
+  return values.flatMap(v => CODE128_PATTERNS[v].split('').map(Number));
+}
+
+/** Subset B only. Kept so tests can exercise the B path directly. */
 export function encode128B(text) {
   const values = [START_B];
   for (const ch of String(text)) {

@@ -88,7 +88,7 @@
             if (!sw) return;
             sw.addEventListener('statechange', () => {
               if (sw.state === 'installed' && navigator.serviceWorker.controller)
-                window.dispatchEvent(new CustomEvent('app-update-ready', { detail: reg }));
+                window.dispatchEvent(new CustomEvent('app-update-ready', { detail: { reg, waiting: sw } }));
             });
           });
         }).catch(() => {});

@@ -7,7 +7,7 @@
 // against inputs that are NOT barcodes, because a confident wrong answer is the real danger.
 import {
   CODE128_PATTERNS, CODE39_PATTERNS, decodeRow, runsFromRow, scanFrame,
-  encode128B, encode39, widthsToRow, createConfirmer
+  encode128, encode128B, encode39, widthsToRow, createConfirmer
 } from '../public/barcode.js';
 import { readFileSync } from 'node:fs';
 
@@ -223,6 +223,131 @@ const REAL = [
     flipped[i] = flipped[i + 1] = flipped[i + 2] = v; flipped[i + 3] = 255;
   }
   ok(scanFrame(flipped, W, H)?.text === 'MOBSN-0001', 'a frame held upside down is decoded');
+}
+
+// ---- resolution: the bug a real scan found ----
+//
+// On an iPad, "2CG5J1699600741" would not read while "1C937CF4A003" read fine. The cause was not
+// the camera: the scanner downscaled every frame to 640px wide, and a longer code has more modules
+// to fit in the same pixels. Below about 3 pixels per module the decoder gives up, so the longer
+// code fell off the edge and the shorter one did not. These tests pin both halves of the fix —
+// keep the width, and stop generating needlessly wide barcodes.
+{
+  const resample = (src, outLen) => {
+    const o = new Uint8Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+      const a = Math.floor(i * src.length / outLen);
+      const b = Math.max(Math.floor((i + 1) * src.length / outLen), a + 1);
+      let sum = 0, n = 0;
+      for (let j = a; j < b; j++) { sum += src[j]; n++; }
+      o[i] = sum / n;
+    }
+    return o;
+  };
+  const blur = (r, k) => {
+    const o = new Uint8Array(r.length);
+    for (let i = 0; i < r.length; i++) {
+      let s = 0, n = 0;
+      for (let j = -k; j <= k; j++) { const x = i + j; if (x >= 0 && x < r.length) { s += r[x]; n++; } }
+      o[i] = s / n;
+    }
+    return o;
+  };
+  // Seeded, so a marginal case cannot make this suite flaky. Sensor noise is what separates
+  // "just about reads" from "does not": without it a 640px pipeline looks fine in simulation and
+  // still fails on a real iPad, which is precisely the trap this test exists to avoid.
+  const rng = (seed) => () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const noise = (row, amp, rand) => {
+    const o = new Uint8Array(row.length);
+    for (let i = 0; i < row.length; i++) o[i] = Math.max(0, Math.min(255, row[i] + (rand() * 2 - 1) * amp));
+    return o;
+  };
+
+  const CAM_W = 1920;
+  /** Simulate a camera frame where the label spans `fill` of the width, processed at `procW`. */
+  const trial = (code, fill, procW, encoder = encode128) => {
+    const widths = encoder(code);
+    const labelPx = Math.round(CAM_W * fill);
+    const inFrame = resample(widthsToRow(widths, 40, 400), labelPx);
+    const frame = new Uint8Array(CAM_W).fill(245);
+    frame.set(inFrame, Math.round((CAM_W - labelPx) / 2));
+    const proc = resample(frame, procW);
+    const rand = rng(12345);
+    let hits = 0;
+    for (let t = 0; t < 25; t++) if (decodeRow(noise(blur(proc, 1), 12, rand), proc.length)?.text === code) hits++;
+    return hits;
+  };
+
+  // The exact code that failed on the iPad, at a normal working distance.
+  ok(trial('2CG5J1699600741', 0.70, 1600) >= 24, 'the 15-character serial that failed on the iPad now reads');
+  ok(trial('1C937CF4A003', 0.70, 1600) >= 24, 'and the shorter one that always worked still does');
+  // Held further back, which is where the old pipeline failed for everything.
+  ok(trial('2CG5J1699600741', 0.45, 1600) >= 20, 'it still reads when the label is half the frame');
+  ok(trial('GEEKFI-TEST-001', 0.70, 1600) >= 24, 'a long alphanumeric code reads');
+
+  // The regression itself, reproduced exactly as it shipped: subset B encoding through a 640px
+  // pipeline. Both halves of the fix mattered, and this is what the iPad was actually doing.
+  ok(trial('2CG5J1699600741', 0.70, 640, encode128B) < 8,
+    'reproduces the original failure: subset B through a 640px pipeline could not read it');
+  ok(trial('1C937CF4A003', 0.70, 640, encode128B) > 15,
+    'while the shorter code did read, which is exactly the behaviour reported');
+  // Either fix alone helps; together they leave a wide margin.
+  ok(trial('2CG5J1699600741', 0.70, 640, encode128) > 15, 'narrower encoding alone rescues it at 640px');
+  ok(trial('2CG5J1699600741', 0.70, 1600, encode128B) > 20, 'and keeping the resolution alone rescues it too');
+
+  // Subset C: the other half of the fix. Digits pack two per symbol, so numeric serials get much
+  // narrower, and narrower is what makes them readable.
+  const b = encode128B('2CG5J1699600741').reduce((n, w) => n + w, 0);
+  const c = encode128('2CG5J1699600741').reduce((n, w) => n + w, 0);
+  ok(c < b * 0.85, `subset C makes a numeric-heavy serial materially narrower (${b} -> ${c} modules)`);
+  ok(encode128('8502065851706').reduce((n, w) => n + w, 0) < encode128B('8502065851706').reduce((n, w) => n + w, 0),
+    'an all-digit account number is narrower still');
+  // ...and everything it produces must still decode, including the awkward shapes.
+  for (const code of ['2CG5J1699600741', '8502065851706', '1C937CF4A003', 'GEEKFI-TEST-001',
+                      '12345', '1234', '123', 'A1', 'AB123456789C', '0000000000']) {
+    const row = widthsToRow(encode128(code), 3);
+    ok(decodeRow(row, row.length)?.text === code, `subset-C encoding round trips: ${code}`);
+  }
+}
+
+// ---- the scanner reads the guide band at full width ----
+{
+  const js = readFileSync('public/app.js', 'utf8');
+  ok(!/const w = 640/.test(js), 'the frame is no longer downscaled to a fixed 640px');
+  ok(/Math\.min\(vw, 1600\)/.test(js), 'width is kept up to 1600px, because width is what carries the code');
+  ok(/drawImage\(video, 0, bandY, vw, bandH/.test(js), 'and only the guide band is read, since height carries nothing');
+  ok(/rows: 18, band: 1/.test(js), 'every row of that band is scanned');
+}
+
+// ---- getting a fix onto a device ----
+//
+// Two rounds of "it still does not scan" turned out to be partly about not knowing WHICH build a
+// device was running, and a service worker that served yesterday's JavaScript on the first launch
+// after a deploy. Both are now tested, because a fix nobody can receive is not a fix.
+{
+  const b = await get('/api/build');
+  ok(b.status === 200, 'the running build can be identified without signing in');
+  let parsed = null; try { parsed = JSON.parse(b.text); } catch {}
+  ok(parsed && typeof parsed.build === 'string' && parsed.build.length > 0, 'and it reports a build id');
+
+  const sw = (await get('/sw.js')).text;
+  ok(/isOurCode/.test(sw), 'our own JavaScript is treated differently from static assets');
+  ok(/Promise\.race\(\[fromNetwork, timeout\]\)/.test(sw),
+    'it races the network against a timeout, so a deploy lands on the first launch, not the second');
+  ok(/const timeout = new Promise\(resolve => setTimeout\(\(\) => resolve\(null\), \d+\)\)/.test(sw),
+    'with a bounded wait, so no signal still falls back to cache');
+  ok(/VERSION = 'v2'/.test(sw), 'and the cache version was bumped, so old entries are discarded');
+
+  const js = readFileSync('public/app.js', 'utf8');
+  ok(js.includes("app-update-ready"), 'the page listens for a newer version');
+  ok(js.includes('updateBar') && js.includes('skip-waiting'),
+    'and offers a reload rather than leaving a device on stale code');
+  ok(js.includes('window.APP_BUILD'), 'the build id is available to the app');
+
+  // The diagnostics readout, which is how a field failure gets reported as numbers.
+  ok(js.includes('paintScanDiag') && js.includes('scanDiagOut'), 'the scanner has a diagnostics readout');
+  ok(js.includes('px per bar'), 'reporting pixels per bar-width, which is the number that decides a read');
+  ok(js.includes('barcode.js      '), 'and whether the decoder even loaded');
 }
 
 // ---- served as an installable app ----
