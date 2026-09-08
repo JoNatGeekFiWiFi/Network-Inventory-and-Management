@@ -5,6 +5,7 @@
 // the point of the test is the capability — if a refactor reintroduces the hole by another route,
 // this should still fail.
 import { clientIp, contentDisposition } from '../lib/core.js';
+import { readFileSync } from 'node:fs';
 
 const B = process.env.BASE ?? 'http://localhost:3000'; let cookie = '';
 async function call(p, { method = 'GET', body, headers = {} } = {}) { const h = { ...headers }; if (body !== undefined) { h['content-type'] = 'application/json'; if (method === 'GET') method = 'POST'; } if (cookie) h.cookie = cookie; const r = await fetch(B + p, { method, headers: h, body: body !== undefined ? JSON.stringify(body) : undefined }); const sc = r.headers.get('set-cookie'); if (sc) cookie = sc.split(';')[0]; const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch {} return { status: r.status, json: j, t, headers: r.headers }; }
@@ -149,6 +150,35 @@ ok(att.status === 200, 'an attachment exists to try to delete');
 await login('admin@geekitek.test', 'admin123');
 await call('/api/devices/' + dev.id, { method: 'DELETE' });
 await call('/api/sites/' + site.id, { method: 'DELETE' });
+
+// ---- the deploy script cannot fill the disk and then be unable to clean up ----
+//
+// This actually happened: 16 database copies at ~700 MB filled a 9.8 GB volume. Two causes, both
+// pinned here. The retention count was written when the database was small, and the prune ran
+// AFTER the copy — so once the disk filled, the copy failed, `set -e` exited, and the cleanup
+// could never run again. Every retry failed identically.
+{
+  const sh = readFileSync('deploy/deploy.sh', 'utf8');
+  const pruneAt = sh.indexOf('tail -n +"$KEEP"');
+  const copyAt = Math.min(
+    ...['sqlite3 "$DB_PATH" ".backup', 'cp "$DB_PATH" "$BAK_FILE"']
+      .map(t => { const i = sh.indexOf(t); return i === -1 ? Infinity : i; })
+  );
+  ok(pruneAt > -1, 'the deploy prunes old database backups');
+  ok(pruneAt < copyAt, 'and prunes BEFORE writing the new one, so a full disk can still recover');
+
+  ok(/KEEP="\$\{KEEP_BACKUPS:-([1-5])\}"/.test(sh), 'retention is a small number, not one sized for a tiny database');
+  ok(/-size 0 -delete/.test(sh), 'zero-length backups left by a previous failure are cleared');
+  ok(/FREE_KB/.test(sh) && /NEED_KB/.test(sh), 'free space is checked before anything is touched');
+  ok(sh.indexOf('FREE_KB') < sh.indexOf('systemctl stop'), 'and checked BEFORE the service is stopped');
+
+  // The outage: no sqlite3, so it stopped the service, the copy failed, and set -e exited with the
+  // service still down. A trap makes that impossible.
+  const noSqlite = sh.slice(sh.indexOf('No sqlite3'), sh.indexOf('No sqlite3') + 600);
+  ok(/trap .*systemctl start/.test(sh), 'a failure mid-backup always restarts the service');
+  ok(sh.indexOf('trap') < sh.indexOf('systemctl stop'), 'with the trap set before the service is stopped');
+  ok(/install .*sqlite3/.test(sh), 'and it suggests sqlite3, which avoids stopping the service at all');
+}
 
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail) process.exitCode = 1;

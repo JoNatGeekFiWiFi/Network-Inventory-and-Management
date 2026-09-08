@@ -32,18 +32,54 @@ echo ">> Service:  $SERVICE (user $RUN_USER, port $PORT)"
 echo ">> Database: $DB_PATH"
 
 # 1. Backup the database before touching anything
+#
+# Three things here were learned the hard way, when this filled a 9.8 GB volume and left the
+# service stopped:
+#
+#   * Prune BEFORE writing the new backup, not after. Pruning afterwards means that once the disk
+#     is full the copy fails, `set -e` exits, and the cleanup never runs again — every retry fails
+#     identically. The janitor was locked behind the door it was meant to open.
+#   * Keep far fewer copies. "Keep 14" was set when the database was a few megabytes; at 700 MB
+#     that policy needs 9.8 GB, which was the entire volume.
+#   * Refuse early if there is not enough room, rather than stopping the service and then failing.
 BAK_DIR="$(dirname "$DB_PATH")/deploy-backups"
+KEEP="${KEEP_BACKUPS:-3}"
 mkdir -p "$BAK_DIR"
 BAK_FILE="$BAK_DIR/data-$(date +%Y%m%d-%H%M%S).db"
+
 if [ -f "$DB_PATH" ]; then
+  # Drop anything beyond the retention count first, and any zero-length or partial file left by a
+  # previous failure — those are never useful and are exactly what a full disk produces.
+  find "$BAK_DIR" -maxdepth 1 -name 'data-*.db' -size 0 -delete 2>/dev/null || true
+  ls -1t "$BAK_DIR"/data-*.db 2>/dev/null | tail -n +"$KEEP" | xargs -r rm --
+
+  DB_KB=$(du -k "$DB_PATH" | cut -f1)
+  FREE_KB=$(df -Pk "$BAK_DIR" | awk 'NR==2{print $4}')
+  # 20% headroom: the WAL and the copy both need room, and filling a volume to the last byte is
+  # how the database itself ends up unable to write.
+  NEED_KB=$(( DB_KB * 12 / 10 ))
+  if [ "$FREE_KB" -lt "$NEED_KB" ]; then
+    echo "!! Not enough room to back up the database before deploying." >&2
+    echo "   Database $(( DB_KB / 1024 )) MB, need ~$(( NEED_KB / 1024 )) MB, free $(( FREE_KB / 1024 )) MB on $(dirname "$BAK_DIR")." >&2
+    echo "   Free some space, or run with KEEP_BACKUPS=1 to prune harder:" >&2
+    echo "     ls -1t $BAK_DIR/data-*.db | tail -n +2 | xargs -r rm --" >&2
+    echo "   Nothing was changed and the service was not stopped." >&2
+    exit 1
+  fi
+
   if command -v sqlite3 >/dev/null 2>&1; then
     sqlite3 "$DB_PATH" ".backup '$BAK_FILE'"      # safe while the app is running (WAL)
   else
-    systemctl stop "$SERVICE"                      # no sqlite3: stop first so the copy is consistent
+    # No sqlite3: the copy is only consistent with the app stopped. Guarantee it starts again even
+    # if the copy fails — otherwise a failed deploy becomes an outage, which is what happened.
+    trap 'systemctl start "$SERVICE" >/dev/null 2>&1 || true' EXIT
+    systemctl stop "$SERVICE"
     cp "$DB_PATH" "$BAK_FILE"
+    systemctl start "$SERVICE"
+    trap - EXIT
+    echo ">> (install sqlite3 to back up without stopping the service: apt-get install -y sqlite3)"
   fi
-  echo ">> DB backed up to $BAK_FILE"
-  ls -1t "$BAK_DIR"/data-*.db 2>/dev/null | tail -n +15 | xargs -r rm --   # keep the newest 14
+  echo ">> DB backed up to $BAK_FILE ($(du -h "$BAK_FILE" | cut -f1)), keeping $KEEP"
 else
   echo ">> No database at $DB_PATH yet — skipping backup."
 fi
