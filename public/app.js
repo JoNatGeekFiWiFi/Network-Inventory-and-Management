@@ -1045,7 +1045,7 @@ async function renderDevice(id) {
         <div class="kv"><span class="small sec-muted">ZeroTier node ID</span><span class="mono">${esc(d.zt_node_id || '—')}</span></div>
         ${isPriv() ? `<div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
           ${d.wg_provisioned
-            ? `<button class="btn sm" onclick="showWg(${d.id})" title="Show/download this device's WireGuard config (contains its private key — logged)"><i class="ti ti-shield-lock"></i> WireGuard config</button><button class="btn sm" onclick="provisionWg(${d.id})" title="Keep or re-assign this device's WireGuard key and management IP"><i class="ti ti-refresh"></i> Re-provision</button>`
+            ? `<button class="btn sm" onclick="wgPush(${d.id})" title="Configure WireGuard on the router itself over its API — no file to copy"><i class="ti ti-upload"></i> Push to router</button><button class="btn sm" onclick="showWg(${d.id})" title="Show/download this device's WireGuard config (contains its private key — logged)"><i class="ti ti-shield-lock"></i> WireGuard config</button><button class="btn sm" onclick="provisionWg(${d.id})" title="Keep or re-assign this device's WireGuard key and management IP"><i class="ti ti-refresh"></i> Re-provision</button>`
             : `<button class="btn sm" onclick="provisionWg(${d.id})" title="Generate a WireGuard key and assign a free management IP for this device"><i class="ti ti-shield-lock"></i> Provision on WireGuard</button>`}
           ${d.zt_node_id ? `<button class="btn sm" onclick="ztSyncDevice(${d.id})" title="Pull this device's assigned IP from ZeroTier Central"><i class="ti ti-refresh"></i> Sync ZeroTier</button>` : ''}
         </div><div id="wgout"></div>` : '<div class="help">Overlay provisioning is NOC/Admin only.</div>'}
@@ -2007,11 +2007,13 @@ async function renderSettings() {
         <input value="${esc(s.wg_server_pub || '(generated on save)')}" readonly style="font-family:var(--mono);background:var(--surface2)"/>
         <div class="help">Devices use this as the [Peer] PublicKey. Private key stays server-side. ${s.has_wg_server_priv ? '' : 'Save once to generate the hub keypair.'}</div></div>
       <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap"><button class="btn primary" onclick="saveSettings()"><i class="ti ti-check"></i> Save</button>
-      <button class="btn" onclick="dlHub()" title="Full hub config with all device peers — apply on the VPS (contains the hub private key; download is logged)"><i class="ti ti-download"></i> Download hub wg0.conf</button>
-      <button class="btn" onclick="regenWg()" title="Replace the hub keypair — every device's config must then be re-downloaded and re-applied"><i class="ti ti-refresh"></i> Regenerate hub key</button></div>
+      <button class="btn" onclick="wgPlan()" title="Read the ZeroTier range and propose a WireGuard range that cannot collide with it"><i class="ti ti-route"></i> Plan from ZeroTier</button>
+      <button class="btn" onclick="wgSync()" title="Apply the devices in this database to the running hub"><i class="ti ti-refresh"></i> Sync hub</button>
+      <button class="btn" onclick="dlHub()" title="Full hub config with all device peers (contains the hub private key; download is logged)"><i class="ti ti-download"></i> Download wg0.conf</button>
+      <button class="btn" onclick="regenWg()" title="Replace the hub keypair — every device must then be re-provisioned"><i class="ti ti-refresh"></i> Regenerate hub key</button></div>
+      <div id="wgStatus" class="small sec-muted" style="margin-top:12px">Checking the hub…</div>
       <div id="hubout"></div>
     </div>
-    <div class="help">After saving the WireGuard subnet, open a device → Management overlay → Provision on WireGuard to assign it a non-overlapping IP and download its config. Apply the device's <span class="mono">[Peer]</span> stanza to your hub.</div>
     <div class="card" style="padding:16px" id="bak">
       <h2 style="margin-bottom:12px"><i class="ti ti-archive"></i> Router backups</h2>
       ${field('Backup upload URL', 'backup_upload_base', s.backup_upload_base, { mono: true, ph: 'http://<server-overlay-ip>:3000' })}
@@ -2139,6 +2141,7 @@ async function renderSettings() {
       <div class="help">Each bench node uses its token to pull packages + the generic config and to enroll devices. The token is shown once when created.</div>
     </div>`;
   loadTokens();   // fills the phone & tablet card once the page is on screen
+  wgStatus();
 }
 async function saveSettings() {
   const z = collect('#zt'), w = collect('#wg'), bk = collect('#bak');
@@ -5326,5 +5329,109 @@ async function createScanned(kind) {
     const r = await api('/devices', { method: 'POST', body: JSON.stringify(body) });
     toast('Device added');
     location.hash = '#/device/' + r.id;
+  } catch (e) { toast(e.message); }
+}
+
+// ---------- WireGuard ----------
+//
+// The point of this section is that nobody should have to SSH into the server to add a router.
+// What it therefore has to make obvious is the one thing a person cannot otherwise see: whether
+// the hub is actually reachable, and whether what is running on it matches what is in here.
+// "Configured" and "applied" quietly drifting apart is the failure that wastes an afternoon.
+async function wgStatus() {
+  const el = $('#wgStatus');
+  if (!el) return;
+  try {
+    const s = await api('/wireguard/status');
+    if (!s.hub.available) {
+      el.innerHTML = `<div class="err" style="margin-bottom:8px"><b>Hub not reachable.</b> ${esc(s.hub.reason || '')}</div>
+        <div class="small sec-muted">Devices can still be provisioned — they just will not connect until the hub is set up.</div>`;
+      return;
+    }
+    const sync = s.sync || {};
+    const cap = s.capacity;
+    el.innerHTML = `
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <span class="pill s-up">hub up on ${esc(s.hub.iface)}</span>
+        ${sync.in_sync
+          ? '<span class="pill s-up">in sync</span>'
+          : `<span class="pill s-warn">${(sync.missing_on_hub || []).length} missing, ${(sync.stale_on_hub || []).length} stale — press Sync hub</span>`}
+        <span class="tag">${s.devices} device${s.devices === 1 ? '' : 's'}</span>
+        ${cap ? `<span class="tag">${cap.free} of ${cap.total} addresses free</span>` : ''}
+      </div>
+      <div class="small sec-muted">Hub ${esc(s.hub.address || '?')} on ${esc(s.subnet || 'no subnet yet')}${
+        s.supernet ? ` · both overlays route inside ${esc(s.supernet)}` : ''}</div>
+      ${(sync.missing_on_hub || []).length
+        ? `<div class="small" style="color:var(--warning);margin-top:4px">Not on the hub yet: ${esc((sync.missing_on_hub || []).join(', '))}</div>` : ''}`;
+  } catch (e) { el.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+
+/**
+ * Propose where WireGuard should live, given what ZeroTier already manages.
+ *
+ * Shown for approval rather than applied: this decides addressing for every device, and if it
+ * moves an existing range then everything already provisioned has to be re-provisioned. That is
+ * not something to do because someone pressed a button expecting a read-only action.
+ */
+async function wgPlan() {
+  const out = $('#hubout');
+  out.innerHTML = '<div class="box">Reading the ZeroTier network…</div>';
+  try {
+    const p = await api('/wireguard/plan');
+    if (!p.ok) { out.innerHTML = `<div class="box"><div class="err">${esc(p.notes.join(' '))}</div></div>`; return; }
+    out.innerHTML = `<div class="box">
+      <div style="font-weight:500;margin-bottom:6px">Proposed plan</div>
+      <div class="kv"><span>ZeroTier manages</span><span class="mono">${esc(p.zt_ranges.join(', ') || 'nothing found')}</span></div>
+      <div class="kv"><span>WireGuard would use</span><span class="mono">${esc(p.wg_range)}</span></div>
+      <div class="kv"><span>Both route inside</span><span class="mono">${esc(p.supernet)}</span></div>
+      <div class="kv"><span>Read from</span><span>${esc(p.source)}</span></div>
+      ${p.notes.map(n => `<div class="help">${esc(n)}</div>`).join('')}
+      ${p.would_renumber
+        ? `<div class="small" style="color:var(--danger);margin-top:8px"><b>This changes the existing range.</b>
+             ${p.devices_affected} device(s) already have an address and would need re-provisioning.</div>` : ''}
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn primary" onclick='wgApplyPlan(${JSON.stringify(JSON.stringify({ wg_range: p.wg_range, supernet: p.supernet, zt_ranges: p.zt_ranges }))})'>
+          <i class="ti ti-check"></i> Use this plan</button>
+        <button class="btn" onclick="$('#hubout').innerHTML=''">Cancel</button></div>
+    </div>`;
+  } catch (e) { out.innerHTML = `<div class="box"><div class="err">${esc(e.message)}</div></div>`; }
+}
+
+async function wgApplyPlan(json) {
+  try {
+    const body = typeof json === 'string' ? json : JSON.stringify(json);
+    const r = await api('/wireguard/plan/apply', { method: 'POST', body });
+    toast(`WireGuard will use ${r.wg_subnet}`);
+    $('#hubout').innerHTML = `<div class="box">Saved. The hub is <span class="mono">${esc(r.hub_address)}</span>.
+      Run <span class="mono">sudo bash /opt/netinv/deploy/wireguard-setup.sh</span> on the server once, then press Sync hub.</div>`;
+    renderSettings();
+  } catch (e) { toast(e.message); }
+}
+
+async function wgSync() {
+  try {
+    const r = await api('/wireguard/sync', { method: 'POST', body: '{}' });
+    if (!r.ok) { toast(r.reason || 'Sync failed'); }
+    else toast(`Hub updated: +${r.applied.added} ~${r.applied.updated} -${r.applied.removed}`);
+    wgStatus();
+  } catch (e) { toast(e.message); }
+}
+
+/**
+ * Configure WireGuard on the router itself.
+ *
+ * The alternative — download a .conf and paste it into a terminal — is what "fully managed" was
+ * meant to remove. Every step is reported, because a partial push leaves a router half-configured
+ * and the useful question is always "which step failed".
+ */
+async function wgPush(id) {
+  if (!confirm('Configure WireGuard on this router now?\n\nIt is reached over its current management address. RouterOS 7 or newer only.')) return;
+  toast('Pushing to the router…');
+  try {
+    const r = await api(`/wireguard/devices/${id}/push`, { method: 'POST', body: '{}' });
+    if (r.ok) { toast(`Configured ${r.iface} as ${r.address}`); renderDevice(id); return; }
+    const failed = (r.steps || []).filter(s => !s.ok);
+    alert(`The push did not complete.\n\n${r.error || ''}\n\n`
+      + failed.map(s => `${s.step} → HTTP ${s.status}${s.detail ? ': ' + s.detail : ''}`).join('\n'));
   } catch (e) { toast(e.message); }
 }

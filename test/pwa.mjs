@@ -336,7 +336,7 @@ const REAL = [
     'it races the network against a timeout, so a deploy lands on the first launch, not the second');
   ok(/const timeout = new Promise\(resolve => setTimeout\(\(\) => resolve\(null\), \d+\)\)/.test(sw),
     'with a bounded wait, so no signal still falls back to cache');
-  ok(/VERSION = 'v2'/.test(sw), 'and the cache version was bumped, so old entries are discarded');
+  ok(/VERSION = 'v\d+'/.test(sw), 'the cache name carries a version, so a change discards old entries');
 
   const js = readFileSync('public/app.js', 'utf8');
   ok(js.includes("app-update-ready"), 'the page listens for a newer version');
@@ -348,6 +348,44 @@ const REAL = [
   ok(js.includes('paintScanDiag') && js.includes('scanDiagOut'), 'the scanner has a diagnostics readout');
   ok(js.includes('px per bar'), 'reporting pixels per bar-width, which is the number that decides a read');
   ok(js.includes('barcode.js      '), 'and whether the decoder even loaded');
+}
+
+// ---- the shell is build-stamped, so a cache cannot serve stale code ----
+//
+// Three separate rounds of "the fix is deployed but it still does not work" traced back to a
+// browser running yesterday's app.js. Cache strategy only ever made that less likely; stamping the
+// build id into the asset URLs makes it impossible, because a new build asks for different URLs.
+{
+  const build = JSON.parse((await get('/api/build')).text).build;
+  const html = (await get('/')).text;
+
+  ok(new RegExp(`src="/app\\.js\\?v=${build}"`).test(html), 'app.js is requested with the current build id');
+  ok(new RegExp(`href="/styles\\.css\\?v=${build}"`).test(html), 'and so is the stylesheet');
+  ok(new RegExp(`from '/barcode\\.js\\?v=${build}'`).test(html), 'and the decoder module');
+  ok(html.includes(`window.APP_BUILD="${build}"`), 'the page knows its own build without a round trip');
+
+  // The shell must never be cached, or the versioned URLs inside it can never change.
+  const headers = await fetch(B + '/');
+  ok(/no-cache/.test(headers.headers.get('cache-control') || ''), 'the shell itself is not cached');
+
+  // The stamped URL has to actually serve.
+  const asset = await fetch(B + '/app.js?v=' + build);
+  ok(asset.status === 200, 'a build-stamped asset URL serves');
+  ok((await asset.text()).includes('renderScan'), 'and returns the real file');
+
+  // A bookmarked deep path gets the same stamped shell, not a stale one.
+  const deep = await get('/settings');
+  ok(deep.status === 200 && deep.text.includes(`app.js?v=${build}`), 'a deep path serves the stamped shell too');
+
+  // The stamp must move when the code does, or it proves nothing.
+  ok(/APP_BUILD = \(\(\) => \{/.test(readFileSync('server.js', 'utf8')), 'the build id is derived, not hand-maintained');
+  ok(/public\/app\.js/.test(readFileSync('server.js', 'utf8')), 'from the files the browser actually loads');
+
+  const sw = (await get('/sw.js')).text;
+  ok(/url\.searchParams\.has\('v'\)/.test(sw), 'the service worker recognises a build-stamped URL');
+  ok(/!versioned/.test(sw), 'and stops treating those as files that might go stale');
+  ok(!/'\/app\.js',/.test(sw), 'the precache list no longer names an unversioned app.js the page never requests');
+  ok(/VERSION = 'v3'/.test(sw), 'and the cache version moved, so older entries are dropped');
 }
 
 // ---- served as an installable app ----

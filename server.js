@@ -2,7 +2,7 @@
 import express from 'express';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, extname } from 'node:path';
-import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, createReadStream, existsSync, statSync, unlinkSync, copyFileSync } from 'node:fs';
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, backfillAccountCustomers, UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR } from './db.js';
 import { importModelCatalog } from './model-catalog.js';
@@ -24,6 +24,7 @@ import registerSearch from './domains/search.js';
 import registerLocate from './domains/locate.js';
 import registerImportWizard from './domains/importwiz.js';
 import registerMobile from './domains/mobile.js';
+import registerWireguard from './domains/wireguard.js';
 import { addressKey, unitFromAddress } from './lib/address.js';
 
 // HTTP(S) JSON request with a timeout; https tolerates self-signed certs (RouterOS). Returns {status, body}.
@@ -1736,6 +1737,7 @@ registerSearch(app, ctx);
 registerLocate(app, ctx);
 registerImportWizard(app, ctx);
 registerMobile(app, ctx);
+registerWireguard(app, ctx);
 registerSupport(app, ctx);   // messaging helpers first: billing has no dependency, but portal/pubBase are shared
 registerBilling(app, ctx);
 
@@ -2004,7 +2006,40 @@ app.delete('/api/access/:id', requireNoc, (req, res) => {
 });
 
 // ---- static frontend ----
-app.use(express.static(join(__dirname, 'public')));
+//
+// index.html is rendered rather than served flat, so the asset URLs carry the build id:
+// /app.js?v=14poh0d. This is the only reliable cure for "the fix is deployed but the browser is
+// running yesterday's code" — a new build means new URLs, so no cache, service worker or CDN can
+// hand back the old file. Cache strategy is a mitigation; versioned URLs are a guarantee.
+//
+// Read from disk each time rather than cached in memory: the file is small, and a stale copy here
+// would recreate the very problem this exists to solve.
+function renderIndex(res) {
+  try {
+    const html = readFileSync(join(__dirname, 'public', 'index.html'), 'utf8')
+      .replace(/(src|href)="\/(app|barcode|styles)\.(js|css)"/g, `$1="/$2.$3?v=${APP_BUILD}"`)
+      .replace(/from '\/barcode\.js'/g, `from '/barcode.js?v=${APP_BUILD}'`)
+      // So the running page can report its own build without an extra request.
+      .replace('</head>', `<script>window.APP_BUILD=${JSON.stringify(APP_BUILD)};</script></head>`);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    // The shell itself must never be cached, or the versioned URLs inside it never change.
+    res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    res.send(html);
+  } catch {
+    // If the file cannot be read or rewritten, serve it untouched rather than failing the whole
+    // page. Recursing here — which the first version did — turns a missing file into a stack
+    // overflow and a 500 on the app's front door.
+    res.sendFile(join(__dirname, 'public', 'index.html'));
+  }
+}
+app.get(['/', '/index.html'], (req, res) => renderIndex(res));
+
+app.use(express.static(join(__dirname, 'public'), {
+  // Versioned URLs can be cached hard; anything unversioned must be revalidated.
+  setHeaders(res, path) {
+    if (/\.(js|css)$/.test(path)) res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  }
+}));
 
 // An unmatched /api path is a bug or a typo — answer JSON so callers see a real error
 // instead of silently receiving the SPA's HTML (which looks like an empty page).
@@ -2018,7 +2053,7 @@ app.get('*', (req, res) => {
   const segments = req.path.split('/').filter(Boolean);
   const looksLikeFile = !!extname(req.path) || segments.some(s => s.startsWith('.'));
   if (looksLikeFile) return res.status(404).type('text/plain').send('Not found');
-  res.sendFile(join(__dirname, 'public', 'index.html'));
+  renderIndex(res);      // same versioned shell, so a bookmarked path is not served stale assets
 });
 
 const PORT = process.env.PORT || 3000;

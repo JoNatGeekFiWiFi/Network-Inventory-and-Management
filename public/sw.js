@@ -12,17 +12,17 @@
 //      audited; a cached copy on a shared or lost device is a liability with no upside here.
 //   2. Only GET is ever cached. A cached POST would be a replayed write.
 
-const VERSION = 'v2';
+const VERSION = 'v3';
 const SHELL_CACHE = `netinv-shell-${VERSION}`;
 const ASSET_CACHE = `netinv-assets-${VERSION}`;
 
 // The minimum needed to render something useful. Kept short on purpose: a long precache list makes
 // installs slow and fail atomically, and everything else is picked up as it is used.
+// Only things whose URL never changes. app.js, styles.css and barcode.js are deliberately absent:
+// the server now stamps a build id into their URLs, so precaching a bare '/app.js' would cache a
+// file the page never actually asks for.
 const SHELL = [
   '/',
-  '/app.js',
-  '/styles.css',
-  '/barcode.js',
   '/manifest.webmanifest',
   '/icon-192.png',
   '/apple-touch-icon.png'
@@ -94,7 +94,11 @@ self.addEventListener('fetch', (event) => {
   const cdn = url.hostname === 'cdnjs.cloudflare.com';
   if (!sameOrigin && !cdn) return;
 
-  const isOurCode = sameOrigin && /\.(js|css)$/.test(url.pathname);
+  // A build-stamped URL identifies exactly one version of a file, so it can be cached forever:
+  // the next deploy asks for a different URL. That is what makes "deployed but running old code"
+  // impossible rather than merely unlikely.
+  const versioned = url.searchParams.has('v');
+  const isOurCode = sameOrigin && !versioned && /\.(js|css)$/.test(url.pathname);
 
   event.respondWith((async () => {
     const cacheName = sameOrigin ? SHELL_CACHE : ASSET_CACHE;
