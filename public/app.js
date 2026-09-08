@@ -1285,23 +1285,7 @@ async function formSite(q) {
   view().innerHTML = `<div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${q.id ? 'Edit' : 'Add'} site</h1>
     <div class="card" style="margin-top:14px;padding:16px;overflow:visible" id="f">
-      <div class="fld">
-        <label class="fl" style="display:flex;justify-content:space-between;align-items:center">Customer
-          ${isPriv() && !q.id ? `<label class="small sec-muted" style="font-weight:400;cursor:pointer"><input type="checkbox" id="newCust" onchange="toggleNewCust()" style="width:auto"> New customer</label>` : ''}</label>
-        <div id="ss-customer"></div>
-        <div id="newCustBox" style="display:none;margin-top:10px;padding:12px;border:.5px solid var(--border);border-radius:8px;background:var(--surface)">
-          ${field('Customer name', 'nc_name', '', { ph: 'e.g. Riverside Logistics' })}
-          <div class="fld">
-            <label class="fl" style="display:flex;justify-content:space-between;align-items:center">Account
-              <label class="small sec-muted" style="font-weight:400;cursor:pointer"><input type="checkbox" id="newAcct" onchange="toggleNewAccount()" style="width:auto"> New account</label></label>
-            <div id="ss-account"></div>
-            <div id="newAcctBox" style="display:none">
-              ${field('Account name', 'na_name', '', { ph: 'e.g. Acme Brokerage' })}
-              <div class="grid2">${field('Account number', 'na_account_number', '', { mono: true })}${field('Status', 'na_status', 'Active', { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}</div>
-            </div>
-          </div>
-        </div>
-      </div>
+      ${custChainHtml({ allowNew: isPriv() && !q.id })}
       <div class="fld"><label class="fl">Served by account <span class="small sec-muted" style="font-weight:400">· optional, defaults to the customer's primary</span></label><div id="ss-siteacct"></div></div>
       <div class="fld"><label class="fl">Sub-account <span class="small sec-muted" style="font-weight:400">· optional</span></label><select id="ss-subacct" name="subaccount_id"><option value="">— none —</option></select></div>
       ${field('Site name', 'name', s.name, { ph: 'e.g. Riverside Office' })}
@@ -1312,8 +1296,7 @@ async function formSite(q) {
       ${field('Current management IP', 'current_mgmt_ip', s.current_mgmt_ip, { mono: true })}
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
       <button class="btn primary" onclick="saveSite(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
-  attachSearch($('#ss-customer'), custOpts, 'customer_id', preCust, 'Search customer…', onSiteCustomerPick);
-  attachSearch($('#ss-account'), accOpts, 'account_id', '', 'Search account…');
+  attachCustChain(custOpts, accOpts, preCust, onSiteCustomerPick);
   attachSearch($('#ss-siteacct'), accOpts, 'site_account_id', (s.account && s.account.id) || '', 'Search account…', () => loadSiteSubaccounts());
   attachAddressSearch($('#ss-saddr'), { name: 'service_address', value: s.service_address || '', latName: 'lat', lngName: 'lng', placeholder: 'Street, city, state (optional if GPS)' });
   // Warn about an existing site at this address before a duplicate is created, not after.
@@ -1342,6 +1325,80 @@ async function loadSiteSubaccounts() {
   const pre = window._sitePreSub;
   sel.innerHTML = '<option value="">— none —</option>' + subs.map(s => `<option value="${s.id}" ${String(pre) === String(s.id) ? 'selected' : ''}>${esc(s.name)}${s.status && s.status !== 'active' ? ' (' + esc(s.status) + ')' : ''}</option>`).join('');
 }
+/**
+ * The "pick a customer, or make one" control, shared by the site form and the device form.
+ *
+ * A site cannot exist without a customer, and a customer cannot exist without an account — so
+ * anyone creating a site for someone new has to walk three levels back. The site form grew that
+ * chain; the device form did not, which left a dead end: adding a router straight from ZeroTier
+ * to a brand-new customer was impossible without abandoning the form and starting elsewhere.
+ *
+ * One implementation, used by both, so they cannot drift apart again. The ids are fixed rather
+ * than prefixed because only one form is ever on screen at a time.
+ */
+function custChainHtml({ label = 'Customer', allowNew = true } = {}) {
+  return `<div class="fld">
+    <label class="fl" style="display:flex;justify-content:space-between;align-items:center">${label}
+      ${allowNew
+        ? `<label class="small sec-muted" style="font-weight:400;cursor:pointer"><input type="checkbox" id="newCust" onchange="toggleNewCust()" style="width:auto"> New customer</label>`
+        : ''}</label>
+    <div id="ss-customer"></div>
+    ${allowNew ? '' : '<div class="help">Only NOC and admin can create a customer.</div>'}
+    <div id="newCustBox" style="display:none;margin-top:10px;padding:12px;border:.5px solid var(--border);border-radius:8px;background:var(--surface)">
+      ${field('Customer name', 'nc_name', '', { ph: 'e.g. Riverside Logistics' })}
+      <div class="fld">
+        <label class="fl" style="display:flex;justify-content:space-between;align-items:center">Account
+          <label class="small sec-muted" style="font-weight:400;cursor:pointer"><input type="checkbox" id="newAcct" onchange="toggleNewAccount()" style="width:auto"> New account</label></label>
+        <div id="ss-account"></div>
+        <div id="newAcctBox" style="display:none">
+          ${field('Account name', 'na_name', '', { ph: 'e.g. Acme Brokerage' })}
+          <div class="grid2">${field('Account number', 'na_account_number', '', { mono: true })}${field('Status', 'na_status', 'Active', { type: 'select', options: ['Active', 'Prospect', 'Suspended', 'Closed'] })}</div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/** Wire the two pickers inside custChainHtml. Call after the markup is in the DOM. */
+function attachCustChain(custOpts, accOpts, preCust = '', onPick = null) {
+  attachSearch($('#ss-customer'), custOpts, 'customer_id', preCust, 'Search customer…', onPick);
+  attachSearch($('#ss-account'), accOpts, 'account_id', '', 'Search account…');
+}
+
+/**
+ * Turn whatever the chain control holds into a customer id, creating what is missing.
+ *
+ * Returns the id, or throws with a message meant for a toast. Creates the account first, because
+ * a customer with no account cannot own a site and the server will refuse it.
+ */
+async function resolveCustomerChain(d) {
+  const newCust = $('#newCust') && $('#newCust').checked;
+  if (!newCust) {
+    if (!d.customer_id) throw new Error('Pick a customer');
+    return d.customer_id;
+  }
+  if (!d.nc_name) throw new Error('Enter the new customer name');
+
+  let accountId = d.account_id;
+  if ($('#newAcct') && $('#newAcct').checked) {
+    if (!d.na_name) throw new Error('Enter the new account name');
+    try {
+      const a = await api('/accounts', { method: 'POST', body: JSON.stringify({ name: d.na_name, account_number: d.na_account_number, status: d.na_status }) });
+      accountId = a.id;
+    } catch (e) { throw new Error('Account: ' + e.message); }
+  }
+  if (!accountId) throw new Error('Pick an account for the new customer, or tick "New account"');
+
+  try {
+    const c = await api('/customers', { method: 'POST', body: JSON.stringify({ account_ids: [accountId], name: d.nc_name }) });
+    await refreshMeta();     // the new account must appear in pickers built later in this session
+    return c.id;
+  } catch (e) { throw new Error('Customer: ' + e.message); }
+}
+
+/** Field names the chain uses internally; strip them before the payload goes to the server. */
+const CUST_CHAIN_FIELDS = ['nc_name', 'na_name', 'na_account_number', 'na_status'];
+
 function toggleNewCust() {
   const on = $('#newCust').checked;
   $('#newCustBox').style.display = on ? 'block' : 'none';
@@ -1355,25 +1412,13 @@ function toggleNewAccount() {
 async function saveSite(id) {
   const d = collect('#f');
   const newCust = $('#newCust') && $('#newCust').checked;
-  if (newCust) {
-    if (!d.nc_name) { toast('Enter the new customer name'); return; }
-    let accountId = d.account_id;
-    const newAcct = $('#newAcct') && $('#newAcct').checked;
-    if (newAcct) {
-      if (!d.na_name) { toast('Enter the new account name'); return; }
-      try { const a = await api('/accounts', { method: 'POST', body: JSON.stringify({ name: d.na_name, account_number: d.na_account_number, status: d.na_status }) }); accountId = a.id; }
-      catch (e) { toast('Account: ' + e.message); return; }
-    }
-    if (!accountId) { toast('Pick an account for the new customer'); return; }
-    try { const c = await api('/customers', { method: 'POST', body: JSON.stringify({ account_ids: [accountId], name: d.nc_name }) }); d.customer_id = c.id; }
-    catch (e) { toast('Customer: ' + e.message); return; }
-  }
-  if (!d.customer_id) { toast('Pick a customer'); return; }
+  try { d.customer_id = await resolveCustomerChain(d); } catch (e) { toast(e.message); return; }
   if (!d.name) { toast('Enter a site name'); return; }
-  // serving account: new-customer flow already set d.account_id; otherwise use the optional override (server defaults to the customer's primary)
+  // serving account: the new-customer flow already set d.account_id; otherwise use the optional
+  // override (the server defaults to the customer's primary account).
   if (!newCust) d.account_id = d.site_account_id || '';
   if (!d.account_id) delete d.account_id;
-  ['nc_name', 'na_name', 'na_account_number', 'na_status', 'site_account_id'].forEach(k => delete d[k]);
+  [...CUST_CHAIN_FIELDS, 'site_account_id'].forEach(k => delete d[k]);
   try {
     if (id) { await api('/sites/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/site/' + id; }
     else { const r = await api('/sites', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/site/' + r.id; }
@@ -1394,6 +1439,8 @@ async function formDevice(q) {
   const siteOpts = (await api('/sites')).map(s => ({ v: s.id, l: s.name }));
   const popOpts = (await api('/pops')).map(p => ({ v: p.id, l: 'POP · ' + p.name }));
   const custOpts = (await api('/customers')).map(c => ({ v: c.id, l: c.name + (c.account_names ? ' · ' + c.account_names : '') }));
+  await refreshMeta();          // a picker must never be built from a list cached at sign-in
+  const accOpts = META.accounts.map(a => ({ v: a.id, l: a.name }));
   const subAll = await api('/subaccounts').catch(() => []);
   const subGroups = {}; subAll.forEach(s => { (subGroups[s.account_name] = subGroups[s.account_name] || []).push(s); });
   const subOptsHtml = '<option value="">— none —</option>' + Object.keys(subGroups).map(acc => `<optgroup label="${esc(acc)}">${subGroups[acc].map(s => `<option value="${s.id}" ${String(d.owner_subaccount_id) === String(s.id) ? 'selected' : ''}>${esc(s.name)}${s.status && s.status !== 'active' ? ' (' + esc(s.status) + ')' : ''}</option>`).join('')}</optgroup>`).join('');
@@ -1463,7 +1510,11 @@ async function formDevice(q) {
           <div id="ss-site"></div>
           <div id="newSiteBox" style="display:none;margin-top:8px;padding:12px;border:.5px solid var(--border);border-radius:8px;background:var(--surface)">
             ${field('Site name', 'ns_name', '', { ph: 'e.g. Riverside Office' })}
-            <div class="fld"><label class="fl">Customer</label><div id="ss-newcust"></div></div>
+            <!-- An address, not just a name. A site created without one never appears on the map,
+                 never matches an existing building when a second tenant is added, and cannot be
+                 found by address search — which quietly undoes the MDU handling everywhere else. -->
+            <div class="fld"><label class="fl">Service address</label><div id="ss-nsaddr"></div><div id="ss-nsmatch"></div></div>
+            ${custChainHtml({ allowNew: isPriv() })}
           </div>
         </div>
         <div id="destPop" style="display:${d.assigned_type === 'pop' ? 'block' : 'none'}"><label class="fl">POP site</label><div id="ss-pop"></div></div>
@@ -1476,7 +1527,17 @@ async function formDevice(q) {
   attachSearch($('#ss-model'), modelOpts, 'model_id', d.model_id, 'Search manufacturer / model…');
   attachSearch($('#ss-site'), siteOpts, 'assigned_site_id', d.assigned_site_id, 'Search client site…');
   attachSearch($('#ss-pop'), popOpts, 'assigned_pop_id', d.assigned_pop_id, 'Search POP…');
-  attachSearch($('#ss-newcust'), custOpts, 'ns_customer_id', '', 'Search customer…');
+  attachCustChain(custOpts, accOpts, '');
+  attachAddressSearch($('#ss-nsaddr'), { name: 'ns_service_address', latName: 'ns_lat', lngName: 'ns_lng',
+    placeholder: 'Street, city, state' });
+  {
+    // Same duplicate warning the site form gives: catching "this building already exists" before
+    // the second tenant creates a second site is the whole point of address matching.
+    const addrInput = $('#ss-nsaddr').querySelector('input');
+    const check = debounce(() => siteAddrCheck(addrInput.value, 'ss-nsmatch'), 400);
+    addrInput.addEventListener('input', check);
+    addrInput.addEventListener('change', check);
+  }
 }
 function toggleNewSite() {
   const on = $('#newSite').checked;
@@ -1502,11 +1563,22 @@ async function saveDevice(id) {
   const newSite = $('#newSite') && $('#newSite').checked;
   if (d.status === 'Deployed' && d.assigned_type === 'site' && newSite) {
     if (!d.ns_name) { toast('Enter the new site name'); return; }
-    if (!d.ns_customer_id) { toast('Pick a customer for the new site'); return; }
-    try { const s = await api('/sites', { method: 'POST', body: JSON.stringify({ name: d.ns_name, customer_id: d.ns_customer_id }) }); d.assigned_site_id = s.id; }
-    catch (e) { toast('Site: ' + e.message); return; }
+    // The whole chain, in dependency order: account, then customer, then site. Any of the three
+    // can be brand new — which is the case that used to dead-end when adding a router straight
+    // from ZeroTier for someone not yet in the system.
+    let customerId;
+    try { customerId = await resolveCustomerChain(d); } catch (e) { toast(e.message); return; }
+    try {
+      const site = await api('/sites', { method: 'POST', body: JSON.stringify({
+        name: d.ns_name, customer_id: customerId,
+        service_address: d.ns_service_address || null,
+        lat: d.ns_lat || null, lng: d.ns_lng || null
+      }) });
+      d.assigned_site_id = site.id;
+    } catch (e) { toast('Site: ' + e.message); return; }
   }
-  delete d.ns_name; delete d.ns_customer_id;
+  ['ns_name', 'ns_service_address', 'ns_lat', 'ns_lng', 'customer_id', 'account_id', ...CUST_CHAIN_FIELDS]
+    .forEach(k => delete d[k]);
   // Normalize empty optional/FK fields so SQLite doesn't choke
   ['model_id', 'assigned_site_id', 'assigned_pop_id', 'controller_id'].forEach(k => { if (d[k] === '') d[k] = null; });
   if (d.status !== 'Deployed') { d.assigned_type = null; d.assigned_site_id = null; d.assigned_pop_id = null; }

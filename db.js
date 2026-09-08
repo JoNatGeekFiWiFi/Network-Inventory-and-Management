@@ -1,5 +1,6 @@
 // Database bootstrap + seed for the Network Inventory & Management Platform
 // Uses Node's built-in SQLite (node:sqlite) — no native build step required.
+import { addressKey } from './lib/address.js';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -298,6 +299,23 @@ export function migrate() {
   // site instead of quietly creating a second one. Maintained by the API on write.
   ensure('sites', 'addr_key', 'TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS idx_sites_addrkey ON sites(addr_key)');
+
+  // Recompute every site's address key whenever the keying rules change.
+  //
+  // The key is a cached derivation, so a change to how it is built silently orphans every row
+  // computed under the old rules — two records for one building, which is the failure this whole
+  // mechanism exists to stop. Cheap to redo (one pass, a few thousand rows), and always correct,
+  // so it runs on every start rather than being versioned and forgotten.
+  {
+    const rows = db.prepare("SELECT id, service_address, addr_key FROM sites WHERE service_address IS NOT NULL AND TRIM(service_address) <> ''").all();
+    const upd = db.prepare('UPDATE sites SET addr_key=? WHERE id=?');
+    let changed = 0;
+    for (const r of rows) {
+      const key = addressKey(r.service_address) || null;
+      if (key !== r.addr_key) { upd.run(key, r.id); changed++; }
+    }
+    if (changed) console.log(`Recomputed address keys for ${changed} site(s).`);
+  }
   // Devices can belong to a unit rather than just the building.
   ensure('devices', 'unit_id', 'INTEGER');
 
