@@ -26,6 +26,9 @@ import registerImportWizard from './domains/importwiz.js';
 import registerMobile from './domains/mobile.js';
 import registerWireguard from './domains/wireguard.js';
 import { addressKey, unitFromAddress } from './lib/address.js';
+import { PLATFORMS, platformOf, capMap, capsFor, driverFor, guessPlatform } from './lib/drivers/index.js';
+import { sshExec } from './lib/sshexec.js';
+import { probeDevice } from './lib/probe.js';
 
 // HTTP(S) JSON request with a timeout; https tolerates self-signed certs (RouterOS). Returns {status, body}.
 function reqJson(mod, urlStr, opts = {}) {
@@ -555,8 +558,141 @@ app.put('/api/devices/:id/iface-role', requireNoc, (req, res) => {
   res.json({ ok: true });
 });
 
-// Poll a MikroTik RouterOS device over the overlay — reusable core (throws on error; updates DB)
+/**
+ * Poll a device, whatever it runs.
+ *
+ * Dispatches on the device's platform. RouterOS keeps the original, battle-tested path below
+ * untouched; everything else goes through a driver and lands in the same columns, so one device
+ * page, one dashboard and one telemetry sampler serve the whole mixed fleet.
+ */
 async function pollDeviceCore(d) {
+  const key = platformOf(d);
+  if (key === 'routeros') return pollRouterOS(d);
+  if (key === 'unknown') {
+    throw Object.assign(
+      new Error(`${d.name} is set to "Not managed from here", so there is nothing to poll. Set its Platform to poll it.`),
+      { http: 400 }
+    );
+  }
+  return pollViaDriver(d, key);
+}
+
+/**
+ * The non-RouterOS path.
+ *
+ * Writes exactly the columns pollRouterOS writes, and nothing else. The temptation is to store
+ * extra fields a driver happens to return (OpenWrt's load average, say) in a new column — but then
+ * the device page has to know which platform it is looking at to know which fields exist, and the
+ * whole point of the driver layer evaporates.
+ */
+async function pollViaDriver(d, key) {
+  if (!d.mgmt_address) throw Object.assign(new Error('No management IP — assign/provision the overlay first'), { http: 400 });
+  if (!d.admin_password) throw Object.assign(new Error('Add an admin password (and username) for this device first'), { http: 400 });
+
+  const driver = await driverFor(d, { sshExec });
+  const out = await driver.poll();
+  const ifaces = out.interfaces || [];
+
+  // Same derivation as RouterOS: the first address that is routable on the internet is the device's
+  // public IP, and it is what the site record shows.
+  const publicIp = ifaces.flatMap(i => i.ips || []).find(isPublicV4) || null;
+  const firstMac = (ifaces.find(i => i.mac) || {}).mac || null;
+  const polled = new Date().toISOString();
+
+  const wifiSummary = out.wifi && out.wifi.system
+    ? { system: out.wifi.system, radios: out.wifi.radios.map(r => ({ iface: r.iface, ssid: r.ssid, disabled: r.disabled, band: r.band, hasPassword: !!r.password })) }
+    : null;
+
+  const sets = ['interfaces_json=?', 'wifi_json=?', 'last_polled=?'];
+  const vals = [JSON.stringify(ifaces), wifiSummary ? JSON.stringify(wifiSummary) : null, polled];
+  // Only overwrite what the device actually reported. A driver returning null for the serial must
+  // not erase one a technician scanned off the label — that barcode is often the only record.
+  if (firstMac) { sets.push('mac=?'); vals.push(firstMac); }
+  if (out.serial) { sets.push('serial=?'); vals.push(out.serial); }
+  if (out.osVersion) { sets.push('ros_version=?'); vals.push(out.osVersion); }
+  if (out.firmware && out.firmware.current) { sets.push('fw_version=?'); vals.push(out.firmware.current); }
+  if (out.firmware && out.firmware.upgrade) { sets.push('fw_upgrade=?'); vals.push(out.firmware.upgrade); }
+  vals.push(d.id);
+  db.prepare(`UPDATE devices SET ${sets.join(', ')} WHERE id=?`).run(...vals);
+
+  // Cellular signal: store every sample the device offered, not just the newest.
+  //
+  // The modem keeps half an hour at ten-second resolution. Recording only the latest value on each
+  // one-minute poll would throw away five sixths of it — and the discarded part is exactly where a
+  // brief, sharp drop lives, which is the thing worth seeing.
+  let signalStored = 0;
+  if (out.signal && out.signal.available && out.signal.samples.length) {
+    const ins = db.prepare(`INSERT INTO cell_signal (device_id, ts, rsrp, rsrq, sinr, rssi, bars, network_type, slot)
+      VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(device_id, ts) DO NOTHING`);
+    const many = db.transaction((rows) => {
+      for (const s of rows) { const r = ins.run(d.id, s.ts, s.rsrp, s.rsrq, s.sinr, s.rssi, s.bars, s.networkType, s.slot); signalStored += r.changes; }
+    });
+    try { many(out.signal.samples); } catch (e) { console.warn('cell signal store:', e.message); }
+  }
+
+  let setPublic = null, setMgmt = null, target = null;
+  if (d.assigned_site_id) {
+    db.prepare('UPDATE sites SET current_mgmt_ip=? WHERE id=?').run(d.mgmt_address, d.assigned_site_id); setMgmt = d.mgmt_address;
+    if (publicIp) { db.prepare('UPDATE sites SET current_public_ip=? WHERE id=?').run(publicIp, d.assigned_site_id); setPublic = publicIp; }
+    target = 'site';
+  } else if (d.assigned_pop_id) {
+    db.prepare('UPDATE pops SET current_mgmt_ip=? WHERE id=?').run(d.mgmt_address, d.assigned_pop_id); setMgmt = d.mgmt_address;
+    if (publicIp) { db.prepare('UPDATE pops SET current_public_ip=? WHERE id=?').run(publicIp, d.assigned_pop_id); setPublic = publicIp; }
+    target = 'pop';
+  }
+
+  return {
+    count: ifaces.length, interfaces: ifaces, polled_at: polled, public_ip: publicIp,
+    set_public: setPublic, set_mgmt: setMgmt, target,
+    // Threat harvesting is RouterOS-only for now: the log formats differ and a regex that half-works
+    // would feed wrong addresses into a blocklist that gets pushed to the whole fleet.
+    harvested: 0,
+    wifi: wifiSummary ? wifiSummary.radios.length : 0,
+    ros_version: out.osVersion || null,
+    fw_version: (out.firmware && out.firmware.current) || null,
+    fw_upgrade: (out.firmware && out.firmware.upgrade) || null,
+    platform: key, transport: driver.transport,
+    signal: out.signal && out.signal.available
+      ? { ...out.signal.summary, latest: out.signal.latest, stored: signalStored }
+      : null
+  };
+}
+
+/**
+ * Cellular signal history.
+ *
+ * Read from what has been ingested rather than from the device, so the window can be far longer
+ * than the half hour the modem itself remembers — which is the whole point of storing it.
+ */
+app.get('/api/devices/:id/signal', requireNoc, (req, res) => {
+  const RANGES = { '1h': 3600, '24h': 86400, '7d': 604800, '30d': 2592000 };
+  const secs = RANGES[req.query.range] || 3600;
+  const since = new Date(Date.now() - secs * 1000).toISOString();
+  const rows = db.prepare(`SELECT ts, rsrp, rsrq, sinr, rssi, bars, network_type, slot
+    FROM cell_signal WHERE device_id=? AND ts>=? ORDER BY ts`).all(req.params.id, since);
+
+  // Downsample for the chart rather than sending 30 days of ten-second samples to a browser:
+  // 259,200 points would be a 15 MB response to draw a 600-pixel-wide graph.
+  const MAX = 1000;
+  const step = Math.max(1, Math.ceil(rows.length / MAX));
+  const points = step === 1 ? rows : rows.filter((_, i) => i % step === 0);
+
+  const stat = (k) => {
+    const v = rows.map(r => r[k]).filter(x => x != null);
+    if (!v.length) return null;
+    return { min: Math.min(...v), max: Math.max(...v), avg: +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(1) };
+  };
+  res.json({
+    range: req.query.range || '1h',
+    total: rows.length, returned: points.length, downsampled: step > 1,
+    points,
+    stats: { rsrp: stat('rsrp'), sinr: stat('sinr'), rsrq: stat('rsrq'), rssi: stat('rssi') },
+    latest: rows.length ? rows[rows.length - 1] : null
+  });
+});
+
+// Poll a MikroTik RouterOS device over the overlay — reusable core (throws on error; updates DB)
+async function pollRouterOS(d) {
   if (!d.mgmt_address) throw Object.assign(new Error('No management IP — assign/provision the overlay first'), { http: 400 });
   if (!d.admin_password) throw Object.assign(new Error('Add an admin password (and username) for this device first'), { http: 400 });
   const H = rosHeaders(d);
@@ -638,18 +774,88 @@ async function pollDeviceCore(d) {
 app.post('/api/devices/:id/poll', requireNoc, async (req, res) => {
   const d = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
   if (!d) return res.status(404).json({ error: 'not found' });
-  try { const out = await pollDeviceCore(d); audit(req, 'poll', 'device#' + d.id, `RouterOS poll: ${out.count} interfaces${out.public_ip ? ', public ' + out.public_ip : ''}`); res.json(out); }
-  catch (e) { res.status(e.http === 400 ? 400 : 502).json({ error: e.http ? e.message : rosErr(e) }); }
+  try {
+    const out = await pollDeviceCore(d);
+    audit(req, 'poll', 'device#' + d.id, `${PLATFORMS[platformOf(d)].short} poll: ${out.count} interfaces${out.public_ip ? ', public ' + out.public_ip : ''}`);
+    res.json(out);
+  }
+  // rosErr's wording is about the RouterOS web service, so it only applies to RouterOS. The other
+  // drivers already produce their own actionable messages.
+  catch (e) { res.status(e.http === 400 ? 400 : 502).json({ error: e.http ? e.message : (platformOf(d) === 'routeros' ? rosErr(e) : e.message) }); }
 });
 // Poll every reachable platform router (refresh versions/info) — limited concurrency
 app.post('/api/devices/poll-all', requireNoc, async (req, res) => {
-  const devs = db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
+  // Devices explicitly marked as not managed from here are skipped rather than attempted and failed
+  // — otherwise every run reports failures for hardware nobody expects it to reach.
+  const devs = db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND COALESCE(platform,'routeros')<>'unknown' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
   let ok = 0, fail = 0, idx = 0;
   const worker = async () => { while (idx < devs.length) { const d = devs[idx++]; try { await pollDeviceCore(d); ok++; } catch { fail++; } } };
   await Promise.all(Array.from({ length: Math.min(5, devs.length) }, worker));
   audit(req, 'poll', 'devices', `poll-all: ${ok} ok, ${fail} fail of ${devs.length}`);
   res.json({ total: devs.length, ok, fail });
 });
+
+/**
+ * Ask a device what it is.
+ *
+ * NOC-only, and rate-limited by nothing but the fact that it takes several seconds — it opens a
+ * handful of connections to one address on the management overlay. It writes nothing to the device
+ * and nothing to the database; the suggestion comes back for a person to accept.
+ */
+app.post('/api/devices/:id/probe', requireNoc, async (req, res) => {
+  const d = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
+  if (!d) return res.status(404).json({ error: 'not found' });
+  if (!d.mgmt_address) return res.status(400).json({ error: 'This device has no management address to probe' });
+
+  // Probing only ever targets an address already recorded against a device by a NOC user, never one
+  // supplied in the request — otherwise this endpoint becomes a port scanner pointed at anything.
+  const result = await probeDevice(
+    { host: d.mgmt_address, username: d.admin_username || 'admin', password: d.admin_password || '' },
+    { tcpProbe, httpRequest: probeHttp, sshExec }
+  );
+  audit(req, 'poll', 'device#' + d.id, `probed ${d.mgmt_address}: ${result.suggested || 'no platform identified'}`);
+  res.json({ ...result, current_platform: platformOf(d), current_transport: d.mgmt_transport || 'auto' });
+});
+
+/** Is anything listening? Short timeout: the prober knocks on six ports at once. */
+function tcpProbe(host, port, timeoutMs = 2500) {
+  return new Promise((resolve) => {
+    const s = new net.Socket();
+    let settled = false;
+    const done = (open, reason) => { if (settled) return; settled = true; s.destroy(); resolve({ open, reason }); };
+    s.setTimeout(timeoutMs);
+    s.once('connect', () => done(true));
+    s.once('timeout', () => done(false, 'no answer (filtered or down)'));
+    s.once('error', (e) => done(false, e.code === 'ECONNREFUSED' ? 'refused (nothing listening)' : (e.code || e.message)));
+    s.connect(port, host);
+  });
+}
+
+/** One request for the prober. Resolves on failure rather than throwing, so one dead port does not
+ *  abort the whole probe. TLS verification is off for the same reason it is off in restReq: every
+ *  one of these devices presents a self-signed certificate for its own private address. */
+function probeHttp({ url, method = 'GET', headers = {}, body = null, timeoutMs = 8000 }) {
+  return new Promise((resolve) => {
+    let u; try { u = new URL(url); } catch { return resolve({ status: 0, body: '', error: 'bad url' }); }
+    const mod = u.protocol === 'https:' ? https : http;
+    const opts = {
+      method, headers: { ...headers },
+      host: u.hostname, port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: u.pathname + u.search, timeout: timeoutMs,
+      ...(u.protocol === 'https:' ? { rejectUnauthorized: false } : {})
+    };
+    if (body) opts.headers['content-length'] = Buffer.byteLength(body);
+    const rq = mod.request(opts, (rs) => {
+      let data = '';
+      rs.on('data', c => { if (data.length < 512 * 1024) data += c; });
+      rs.on('end', () => resolve({ status: rs.statusCode, body: data, headers: rs.headers }));
+    });
+    rq.on('timeout', () => { rq.destroy(); resolve({ status: 0, body: '', error: 'timed out' }); });
+    rq.on('error', (e) => resolve({ status: 0, body: '', error: e.code || e.message }));
+    if (body) rq.write(body);
+    rq.end();
+  });
+}
 
 // ---- RouterOS DHCP lease management (NOC/Admin) ----
 function rosHeaders(d) {
@@ -676,6 +882,12 @@ function publicDevice(d) {
     const sa = db.prepare('SELECT sa.name, a.name AS account_name FROM account_subaccounts sa JOIN accounts a ON a.id=sa.account_id WHERE sa.id=?').get(out.owner_subaccount_id);
     if (sa) { out.owner_subaccount_name = sa.name; out.owner_subaccount_account = sa.account_name; }
   }
+  // What this device's operating system can actually do. Sent with every device so the page can
+  // omit an action rather than offer one that will fail — a DD-WRT box has no WiFi editor, and a
+  // greyed-out button that returns 502 teaches a technician to distrust the whole screen.
+  out.platform = platformOf(out);
+  out.platform_label = PLATFORMS[out.platform].label;
+  out.caps = capMap(out);
   return out;
 }
 
@@ -687,6 +899,11 @@ app.get('/api/meta', (req, res) => {
     models: db.prepare('SELECT * FROM device_models ORDER BY manufacturer, model').all(),
     controllers: db.prepare('SELECT * FROM controllers ORDER BY name').all(),
     accounts: db.prepare('SELECT id, name FROM accounts ORDER BY name').all(),
+    // The device form's Platform picker, built from the registry rather than hardcoded in the page,
+    // so adding a driver later does not need a matching edit in the front end.
+    platforms: Object.entries(PLATFORMS).map(([key, p]) => ({
+      key, label: p.label, short: p.short, transport: p.transport, caps: capsFor(key)
+    })),
     role: role(req), privileged: isPriv(req)
   });
 });

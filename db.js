@@ -57,6 +57,29 @@ export function migrate() {
   ensure('devices', 'enroll_pending', 'INTEGER DEFAULT 0');
   ensure('devices', 'enrolled_at', 'TEXT');
   ensure('devices', 'last_polled', 'TEXT');
+  // Which operating system a device runs, which decides how the platform talks to it. The default
+  // is deliberately routeros: every device that existed before this column was a MikroTik, and a
+  // NULL here must not stop any of them being polled.
+  ensure('devices', 'platform', "TEXT DEFAULT 'routeros'");
+  db.exec("UPDATE devices SET platform='routeros' WHERE platform IS NULL OR platform=''");
+  // How to reach it: auto | http | ssh. Only meaningful for OpenWrt, which has two ways in. Stored
+  // rather than rediscovered because a device that only answers over SSH would otherwise sit
+  // through an HTTP timeout on every poll — once a minute, for as long as it is deployed.
+  ensure('devices', 'mgmt_transport', "TEXT DEFAULT 'auto'");
+  // Cellular signal history for 5G/LTE CPE.
+  //
+  // The device keeps its own ring buffer at ten-second resolution — finer than this platform polls —
+  // so samples are ingested wholesale rather than reduced to one reading per poll. The PRIMARY KEY
+  // on (device_id, ts) is what makes that safe: successive polls overlap heavily, and the conflict
+  // clause turns a re-read of the same half hour into a no-op instead of thirty duplicate rows.
+  db.exec(`CREATE TABLE IF NOT EXISTS cell_signal (
+    device_id INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    rsrp REAL, rsrq REAL, sinr REAL, rssi REAL,
+    bars INTEGER, network_type TEXT, slot INTEGER,
+    PRIMARY KEY (device_id, ts)
+  )`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_cellsig ON cell_signal(device_id, ts)');
   ensure('pops', 'current_mgmt_ip', 'TEXT');
   ensure('pops', 'current_public_ip', 'TEXT');
   db.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)');

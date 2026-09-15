@@ -209,6 +209,8 @@ CREATE TABLE IF NOT EXISTS devices (
   assigned_pop_id INTEGER REFERENCES pops(id),
   -- management
   management_mode TEXT NOT NULL DEFAULT 'platform',  -- platform | provider
+  platform TEXT DEFAULT 'routeros',                   -- routeros | openwrt | ddwrt | unknown
+  mgmt_transport TEXT DEFAULT 'auto',                 -- auto | http | ssh (OpenWrt has two ways in)
   mgmt_overlay TEXT,                                  -- WireGuard | ZeroTier
   mgmt_address TEXT,
   controller_id INTEGER REFERENCES controllers(id),

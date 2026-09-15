@@ -1004,6 +1004,10 @@ async function renderDevice(id) {
   info.push(['Status', d.status]);
   info.push(['Assigned to', d.assigned_label || '—']);
   info.push(['Management', d.management_mode === 'provider' ? 'Provider-managed (carrier provisions)' : 'Platform-managed']);
+  // Shown for every device, not only the non-MikroTik ones. In a mixed fleet "which OS is this?" is
+  // the first question behind half the others, and leaving it implicit for RouterOS would mean the
+  // field only appears on the devices someone is already unsure about.
+  if (d.management_mode !== 'provider') info.push(['Operating system', d.platform_label || 'MikroTik RouterOS']);
   if (d.mgmt_overlay) info.push(['Overlay', d.mgmt_overlay]);
   if (d.mgmt_address) info.push(['Mgmt IP', `<a class="iplink" href="https://${esc(d.mgmt_address)}" target="_blank">${esc(d.mgmt_address)}</a>`]);
   info.push(['Serial', d.serial || '—']);
@@ -1019,8 +1023,14 @@ async function renderDevice(id) {
   try { ifaces = d.interfaces_json ? JSON.parse(d.interfaces_json) : []; } catch {}
   let roles = {};
   try { roles = d.iface_roles_json ? JSON.parse(d.iface_roles_json) : {}; } catch {}
-  const portsCard = (d.management_mode === 'provider') ? '' : `
-    <div class="card"><div class="hd"><h2><i class="ti ti-plug"></i> Ports / interfaces${ifaces.length ? ` · ${ifaces.length}` : ''} <span class="small muted" style="font-weight:400">· tap to graph</span></h2>${isPriv() ? `<button class="btn sm" onclick="pollDevice(${d.id})" title="Contact the router and refresh its live ports, IPs and version info"><i class="ti ti-refresh"></i> Poll now</button>` : ''}</div>
+  // What this device's OS actually supports. Absent on older cached responses, so it falls back to
+  // the full RouterOS set rather than hiding every card.
+  const caps = d.caps || {};
+  const capable = (c) => caps[c] !== false;
+
+  const portsCard = (d.management_mode === 'provider' || !capable('interfaces')) ? '' : `
+    <div class="card"><div class="hd"><h2><i class="ti ti-plug"></i> Ports / interfaces${ifaces.length ? ` · ${ifaces.length}` : ''} <span class="small muted" style="font-weight:400">· tap to graph</span></h2>${isPriv() ? `<button class="btn sm" onclick="pollDevice(${d.id})" title="Contact the router and refresh its live ports, IPs and version info"><i class="ti ti-refresh"></i> Poll now</button><button class="btn sm" onclick="probeDevice(${d.id})" title="Ask this device what it is and which management interfaces it exposes"><i class="ti ti-search"></i> Identify</button>` : ''}</div>
+      <div id="probeOut"></div>
       ${ifaces.length ? ifaces.map((i, idx) => { const role = roles[i.name] || ''; return `
         <div class="row rowlink" onclick="togglePort(${idx})">
           <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${i.running ? 'var(--success)' : 'var(--text3)'};flex:none"></span>
@@ -1034,7 +1044,7 @@ async function renderDevice(id) {
             <button class="segbtn" data-r="24h" onclick="setPortRange(${idx},'24h')">24h</button>
             <button class="segbtn" data-r="7d" onclick="setPortRange(${idx},'7d')">7d</button></div>
           <div style="position:relative;height:160px"><canvas id="pc${idx}"></canvas></div></div>`; }).join('')
-        : '<div class="row muted">Not polled yet. Add admin login + management IP, then Poll now. (MikroTik RouterOS)</div>'}
+        : `<div class="row muted">Not polled yet. Add an admin login and a management IP, then press Poll now.${d.platform && d.platform !== 'routeros' ? ` This device is set to ${esc(d.platform_label || d.platform)} — press Identify first if you are not sure that is right.` : ''}</div>`}
       ${d.last_polled ? `<div class="help" style="padding:8px 14px">Last polled ${esc(d.last_polled)} · traffic sampled every minute</div>` : ''}
     </div>`;
 
@@ -1045,26 +1055,39 @@ async function renderDevice(id) {
         <div class="kv"><span class="small sec-muted">ZeroTier node ID</span><span class="mono">${esc(d.zt_node_id || '—')}</span></div>
         ${isPriv() ? `<div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
           ${d.wg_provisioned
-            ? `<button class="btn sm" onclick="wgPush(${d.id})" title="Configure WireGuard on the router itself over its API — no file to copy"><i class="ti ti-upload"></i> Push to router</button><button class="btn sm" onclick="showWg(${d.id})" title="Show/download this device's WireGuard config (contains its private key — logged)"><i class="ti ti-shield-lock"></i> WireGuard config</button><button class="btn sm" onclick="provisionWg(${d.id})" title="Keep or re-assign this device's WireGuard key and management IP"><i class="ti ti-refresh"></i> Re-provision</button>`
+            ? `${capable('wireguardPush') ? `<button class="btn sm" onclick="wgPush(${d.id})" title="Configure WireGuard on the router itself over its API — no file to copy"><i class="ti ti-upload"></i> Push to router</button>` : ''}<button class="btn sm" onclick="showWg(${d.id})" title="Show/download this device's WireGuard config (contains its private key — logged)"><i class="ti ti-shield-lock"></i> WireGuard config</button><button class="btn sm" onclick="provisionWg(${d.id})" title="Keep or re-assign this device's WireGuard key and management IP"><i class="ti ti-refresh"></i> Re-provision</button>`
             : `<button class="btn sm" onclick="provisionWg(${d.id})" title="Generate a WireGuard key and assign a free management IP for this device"><i class="ti ti-shield-lock"></i> Provision on WireGuard</button>`}
           ${d.zt_node_id ? `<button class="btn sm" onclick="ztSyncDevice(${d.id})" title="Pull this device's assigned IP from ZeroTier Central"><i class="ti ti-refresh"></i> Sync ZeroTier</button>` : ''}
         </div><div id="wgout"></div>` : '<div class="help">Overlay provisioning is NOC/Admin only.</div>'}
       </div></div>`;
 
-  const dhcpCard = (d.management_mode === 'provider' || !isPriv()) ? '' : `
+  const dhcpCard = (d.management_mode === 'provider' || !isPriv() || !capable('dhcpRead')) ? '' : `
     <div class="card"><a class="row rowlink" href="#/device/${d.id}/dhcp">
       <i class="ti ti-address-book sec-muted"></i>
       <div style="flex:1;min-width:0"><div>DHCP leases</div><div class="small sec-muted">View and manage live DHCP leases on this router</div></div>
       <i class="ti ti-chevron-right muted"></i></a></div>`;
 
-  const backupCard = (d.management_mode === 'provider' || !isPriv()) ? '' : `
+  const backupCard = (d.management_mode === 'provider' || !isPriv() || !capable('configBackup')) ? '' : `
     <div class="card"><a class="row rowlink" href="#/device/${d.id}/backups">
       <i class="ti ti-archive sec-muted"></i>
       <div style="flex:1;min-width:0"><div>Config backups</div><div class="small sec-muted">Weekly auto-backups (kept 6 months) · download or back up now</div></div>
       <i class="ti ti-chevron-right muted"></i></a></div>`;
 
+  // Cellular signal, for 5G/LTE CPE. Drawn from stored history rather than a live read, so it still
+  // says something useful about a device that is currently unreachable — which is exactly when
+  // somebody is looking at this page.
+  const signalCard = (d.management_mode === 'provider' || !isPriv() || !ifaces.some(i => i.type === 'cellular')) ? '' : `
+    <div class="card"><div class="hd"><h2><i class="ti ti-antenna-bars-5"></i> Cellular signal</h2>
+      <div class="seg" id="sigrng" style="max-width:220px">
+        <button class="segbtn on" data-r="1h" onclick="setSignalRange(${d.id},'1h')">1h</button>
+        <button class="segbtn" data-r="24h" onclick="setSignalRange(${d.id},'24h')">24h</button>
+        <button class="segbtn" data-r="7d" onclick="setSignalRange(${d.id},'7d')">7d</button>
+      </div></div>
+      <div id="sigbody"><div class="row muted">Loading…</div></div>
+    </div>`;
+
   let wifi = null; try { wifi = d.wifi_json ? JSON.parse(d.wifi_json) : null; } catch {}
-  const wifiCard = (d.management_mode === 'provider' || !isPriv() || !wifi || !wifi.radios || !wifi.radios.length) ? '' : `
+  const wifiCard = (d.management_mode === 'provider' || !isPriv() || !capable('wifiRead') || !wifi || !wifi.radios || !wifi.radios.length) ? '' : `
     <div class="card"><a class="row rowlink" href="#/device/${d.id}/wifi">
       <i class="ti ti-wifi sec-muted"></i>
       <div style="flex:1;min-width:0"><div>WiFi${wifi.radios.length > 1 ? ' · ' + wifi.radios.length + ' SSIDs' : ''}</div>
@@ -1092,6 +1115,8 @@ async function renderDevice(id) {
 
     ${portsCard}
 
+    ${signalCard}
+
     ${wifiCard}
 
     ${dhcpCard}
@@ -1104,6 +1129,82 @@ async function renderDevice(id) {
 
   window._devId = d.id; window._devPorts = ifaces.map(i => i.name);
   if (d.management_mode !== 'provider') { setWanRange('1h'); setLatRange('1h'); }
+  if (signalCard) setSignalRange(d.id, '1h');
+}
+
+/**
+ * Cellular signal history.
+ *
+ * Numbers first, chart second. A technician deciding whether to reposition an antenna needs the
+ * RSRP value and whether it is trending down; the graph is for seeing WHEN it changed, which is the
+ * second question, not the first.
+ */
+async function setSignalRange(id, range) {
+  const box = $('#sigbody'); if (!box) return;
+  const seg = $('#sigrng');
+  if (seg) seg.querySelectorAll('.segbtn').forEach(b => b.classList.toggle('on', b.dataset.r === range));
+  try {
+    const r = await api(`/devices/${id}/signal?range=${encodeURIComponent(range)}`);
+    if (!r.total) {
+      box.innerHTML = '<div class="row muted">No signal history yet. It is recorded on each poll — press Poll now on the ports card.</div>';
+      return;
+    }
+    const L = r.latest || {};
+    // Thresholds mirror lib/drivers/openwrt.js. Kept in sync by the test that checks both agree.
+    const grade = (m, v) => {
+      if (v == null) return ['—', 'var(--text3)'];
+      const t = m === 'rsrp' ? [[-80,'excellent'],[-90,'good'],[-100,'fair'],[-110,'poor'],[-1e9,'very poor']]
+              : m === 'sinr' ? [[20,'excellent'],[13,'good'],[0,'fair'],[-1e9,'poor']]
+                             : [[-10,'excellent'],[-15,'good'],[-20,'fair'],[-1e9,'poor']];
+      const label = (t.find(([x]) => v >= x) || [,'—'])[1];
+      const colour = { excellent: 'var(--success)', good: 'var(--success)', fair: 'var(--warn)', poor: 'var(--danger)', 'very poor': 'var(--danger)' }[label] || 'var(--text3)';
+      return [label, colour];
+    };
+    const metric = (name, key, unit) => {
+      const v = L[key], [label, colour] = grade(key, v);
+      const st = r.stats[key];
+      return `<div style="flex:1;min-width:110px">
+        <div class="small sec-muted">${name}</div>
+        <div class="mono" style="font-size:19px;color:${colour}">${v == null ? '—' : v + unit}</div>
+        <div class="small sec-muted">${label}${st ? ` · ${st.min}–${st.max}` : ''}</div></div>`;
+    };
+    box.innerHTML = `<div style="padding:12px 14px;display:flex;gap:14px;flex-wrap:wrap">
+        ${metric('RSRP', 'rsrp', ' dBm')}${metric('SINR', 'sinr', ' dB')}${metric('RSRQ', 'rsrq', ' dB')}${metric('RSSI', 'rssi', ' dBm')}
+        <div style="flex:1;min-width:110px"><div class="small sec-muted">Network</div>
+          <div class="mono" style="font-size:19px">${esc(L.network_type || '—')}</div>
+          <div class="small sec-muted">${L.bars != null ? L.bars + ' of 5 bars' : ''}</div></div>
+      </div>
+      <div style="position:relative;height:170px;padding:0 14px 12px"><canvas id="sigchart"></canvas></div>
+      <div class="help" style="padding:0 14px 10px">${r.total.toLocaleString()} samples${r.downsampled ? ` (showing ${r.returned})` : ''} · the modem is read at 10-second resolution on every poll</div>`;
+    drawSignalChart(r.points);
+  } catch (e) { box.innerHTML = `<div class="row muted">Could not load signal history: ${esc(e.message)}</div>`; }
+}
+
+let _sigChart = null;
+function drawSignalChart(points) {
+  const el = $('#sigchart'); if (!el || typeof Chart === 'undefined') return;
+  if (_sigChart) { _sigChart.destroy(); _sigChart = null; }
+  const labels = points.map(p => new Date(p.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+  _sigChart = new Chart(el, {
+    type: 'line',
+    data: { labels, datasets: [
+      // Two y-axes on purpose: RSRP sits around -100 dBm and SINR around +10 dB, so a shared scale
+      // flattens SINR into a straight line at the bottom and hides the metric that explains most
+      // slow-speed complaints.
+      { label: 'RSRP (dBm)', data: points.map(p => p.rsrp), borderColor: '#4f8ef7', pointRadius: 0, borderWidth: 2, tension: 0.2, yAxisID: 'y' },
+      { label: 'SINR (dB)', data: points.map(p => p.sinr), borderColor: '#f7a84f', pointRadius: 0, borderWidth: 2, tension: 0.2, yAxisID: 'y1' }
+    ] },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: { ticks: { maxTicksLimit: 8, font: { size: 10 } }, grid: { display: false } },
+        y: { position: 'left', title: { display: true, text: 'RSRP dBm' }, ticks: { font: { size: 10 } } },
+        y1: { position: 'right', title: { display: true, text: 'SINR dB' }, grid: { drawOnChartArea: false }, ticks: { font: { size: 10 } } }
+      },
+      plugins: { legend: { labels: { boxWidth: 12, font: { size: 11 } } } }
+    }
+  });
 }
 let _wanChart = null;
 async function setWanRange(range) {
@@ -1484,6 +1585,12 @@ async function formDevice(q) {
       </div>
 
       <div id="platExtra" style="display:${d.management_mode === 'provider' ? 'none' : 'block'}">
+        <div class="fld"><label class="fl">Operating system</label>
+          <select class="inp" name="platform" id="platformSel" onchange="platformChanged()">
+            ${(META.platforms || []).map(p => `<option value="${esc(p.key)}" ${(d.platform || 'routeros') === p.key ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}
+          </select>
+          <div class="help" id="platformHelp"></div>
+        </div>
         <div class="fld"><label class="fl">Management overlay</label><div class="seg" style="max-width:360px">
           <button type="button" class="segbtn ${d.mgmt_overlay !== 'ZeroTier' ? 'on' : ''}" id="ov-WireGuard" onclick="setOv('WireGuard')"><i class="ti ti-shield-lock"></i> WireGuard</button>
           <button type="button" class="segbtn ${d.mgmt_overlay === 'ZeroTier' ? 'on' : ''}" id="ov-ZeroTier" onclick="setOv('ZeroTier')"><i class="ti ti-network"></i> ZeroTier</button>
@@ -1494,7 +1601,7 @@ async function formDevice(q) {
         <div class="grid2">${field('Admin username', 'admin_username', d.admin_username || 'admin', { mono: true })}${isPriv() ? field('Admin password', 'admin_password', '', { ph: q.id ? 'unchanged' : '' }) : ''}</div>
         <div class="grid2">${field('Tech username', 'tech_username', d.tech_username)}${field('Tech password', 'tech_password', '', { ph: q.id ? 'unchanged' : '' })}</div>
         ${field('Factory password', 'factory_password', '', { ph: q.id ? 'unchanged' : '' })}
-        <div class="help">Admin login is used to poll the device for its live ports (MikroTik RouterOS).</div></div>
+        <div class="help" id="credHelp">The admin login is what polls the device for its live ports.</div></div>
       </div>
 
       <div id="deployBox" class="box" style="display:${d.status === 'Deployed' ? 'block' : 'none'}">
@@ -1524,6 +1631,7 @@ async function formDevice(q) {
       <button class="btn primary" onclick="saveDevice(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div>
     </div>`;
   $('select[name=status]').addEventListener('change', e => { $('#deployBox').style.display = e.target.value === 'Deployed' ? 'block' : 'none'; });
+  platformChanged();   // describe the selected OS straight away, not only after it is changed
   attachSearch($('#ss-model'), modelOpts, 'model_id', d.model_id, 'Search manufacturer / model…');
   attachSearch($('#ss-site'), siteOpts, 'assigned_site_id', d.assigned_site_id, 'Search client site…');
   attachSearch($('#ss-pop'), popOpts, 'assigned_pop_id', d.assigned_pop_id, 'Search POP…');
@@ -1547,6 +1655,39 @@ function toggleNewSite() {
 function setMM(m) { $('input[name=management_mode]').value = m; $('#mm-plat').classList.toggle('on', m === 'platform'); $('#mm-prov').classList.toggle('on', m === 'provider'); $('#provExtra').style.display = m === 'provider' ? 'block' : 'none'; $('#platExtra').style.display = m === 'provider' ? 'none' : 'block'; }
 function setOwn(o) { $('input[name=ownership]').value = o; ['us', 'carrier', 'distributor'].forEach(x => $('#ow-' + x).classList.toggle('on', x === o)); }
 function setOv(o) { $('input[name=mgmt_overlay]').value = o; ['WireGuard', 'ZeroTier'].forEach(x => $('#ov-' + x).classList.toggle('on', x === o)); }
+
+/**
+ * Say, on the form itself, what choosing this operating system will mean.
+ *
+ * The alternative is that someone picks DD-WRT, saves, and only then discovers the WiFi card has
+ * vanished from the device page — with nothing to explain why. Stating it here turns a surprise
+ * into a decision.
+ */
+function platformChanged() {
+  const sel = $('#platformSel'); if (!sel) return;
+  const p = (META.platforms || []).find(x => x.key === sel.value);
+  const help = $('#platformHelp'), cred = $('#credHelp');
+  if (!p) return;
+  const nice = {
+    identity: 'model and version', interfaces: 'ports and addresses', traffic: 'traffic graphs',
+    dhcpRead: 'DHCP leases', dhcpWrite: 'lease editing', wifiRead: 'WiFi status',
+    wifiWrite: 'WiFi editing', wifiClients: 'WiFi clients', logRead: 'system log',
+    blocklistPush: 'threat blocklist', configBackup: 'config backups', firmware: 'firmware upgrades',
+    reboot: 'reboot', wireguardPush: 'WireGuard provisioning'
+  };
+  if (!p.caps.length) {
+    help.innerHTML = `<span class="sec-muted">Inventory only — this device will not be polled, and none of the live cards will appear on its page.</span>`;
+  } else {
+    help.innerHTML = `Reached over <b>${esc(p.transport)}</b>. Available: ${p.caps.map(c => esc(nice[c] || c)).join(', ')}.`;
+  }
+  if (cred) {
+    cred.textContent = p.key === 'openwrt'
+      ? 'OpenWrt logs in as root. The admin username and password are what the ubus or SSH session uses.'
+      : p.key === 'ddwrt'
+        ? 'DD-WRT is reached over SSH, which is off by default — enable it under Services → Secure Shell before this will work.'
+        : 'The admin login is what polls the device for its live ports.';
+  }
+}
 function setDest(t) { $('input[name=assigned_type]').value = t; $('#dt-site').classList.toggle('on', t === 'site'); $('#dt-pop').classList.toggle('on', t === 'pop'); $('#destSite').style.display = t === 'site' ? 'block' : 'none'; $('#destPop').style.display = t === 'pop' ? 'block' : 'none'; }
 async function saveDevice(id) {
   const d = collect('#f');
@@ -2386,6 +2527,58 @@ async function pollDevice(id) {
     toast(msg); renderDevice(id);
   } catch (e) { toast(e.message); }
 }
+
+/**
+ * Ask a device what it is.
+ *
+ * Shows the evidence, not just the verdict. Somebody reading this is usually trying to work out why
+ * a device will not poll, and "port 22 refused, ubus returned permission denied" tells them where
+ * to go; "could not identify" does not.
+ */
+async function probeDevice(id) {
+  const out = $('#probeOut');
+  if (out) out.innerHTML = '<div class="row muted">Asking the device… this takes a few seconds.</div>';
+  try {
+    const r = await api('/devices/' + id + '/probe', { method: 'POST' });
+    const rows = (r.findings || []).map(f =>
+      `<div class="row"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${f.ok ? 'var(--success)' : 'var(--text3)'};flex:none"></span>
+       <div style="flex:1;min-width:0"><div class="mono small">${esc(f.check)}</div>
+       <div class="small sec-muted">${esc(f.detail)}</div></div></div>`).join('');
+
+    // Offered rather than applied. Changing a device's platform changes how it is managed, and
+    // that is a decision, not a side effect of asking a question.
+    const ap = r.apply || {};
+    const needsChange = r.suggested && (r.suggested !== r.current_platform || ap.mgmt_transport !== r.current_transport);
+    const action = needsChange
+      ? `<div style="padding:10px 14px"><button class="btn sm primary" onclick="applyProbe(${id},'${esc(r.suggested)}','${esc(ap.mgmt_transport || 'auto')}')">
+           <i class="ti ti-check"></i> Set to ${esc(r.suggested)}${ap.mgmt_transport && ap.mgmt_transport !== 'auto' ? ` over ${esc(ap.mgmt_transport.toUpperCase())}` : ''}</button></div>`
+      : r.suggested
+        ? `<div class="help" style="padding:10px 14px">Already set to ${esc(r.suggested)} — nothing to change.</div>`
+        : '';
+
+    if (out) out.innerHTML = `<div style="background:var(--surface2)">${rows}
+      <div style="padding:10px 14px"><div class="small">${esc(r.summary || '')}</div></div>${action}</div>`;
+  } catch (e) {
+    if (out) out.innerHTML = `<div class="row muted">Could not probe: ${esc(e.message)}</div>`;
+    else toast(e.message);
+  }
+}
+
+/**
+ * Accept what the probe found.
+ *
+ * Saves the transport as well as the platform. That is not a detail: a device reachable only over
+ * SSH, left on 'auto', waits out an HTTP timeout before every single poll — once a minute, forever.
+ */
+async function applyProbe(id, platform, mgmt_transport) {
+  try {
+    const d = await api('/devices/' + id);
+    await api('/devices/' + id, { method: 'PUT', body: { ...d, platform, mgmt_transport } });
+    toast(`Set to ${platform}${mgmt_transport && mgmt_transport !== 'auto' ? ' over ' + mgmt_transport.toUpperCase() : ''}`);
+    renderDevice(id);
+  } catch (e) { toast(e.message); }
+}
+
 function fmtSize(n) { n = +n || 0; if (n < 1024) return n + ' B'; if (n < 1048576) return (n / 1024).toFixed(1) + ' KB'; return (n / 1048576).toFixed(1) + ' MB'; }
 async function renderDeviceBackups(id) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }

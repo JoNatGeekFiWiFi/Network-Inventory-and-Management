@@ -60,6 +60,69 @@ Then in ZeroTier Central, **authorize** the server (check its box) so it gets an
 
 On a platform-managed MikroTik device, set the **admin username/password** and a **management IP** (on the overlay), then open the device → **Ports / interfaces → Poll now**. The platform calls the device's RouterOS REST API (`/rest/interface`) over the overlay and lists its live interfaces. Requirements on the device: RouterOS v7 with the `www-ssl` service enabled (REST API), reachable at its management IP. (UniFi/UISP polling via controller is not built yet.)
 
+### Mixed fleets: OpenWrt and DD-WRT alongside MikroTik
+
+Every device has an **Operating system** setting (device form → Platform-managed section). It decides how the platform talks to that device, and what the device page offers:
+
+| Platform | Reached over | Can do |
+|---|---|---|
+| MikroTik RouterOS | REST API (`www-ssl` / `www`) | everything — polling, DHCP, WiFi read+write, blocklist push, backups, firmware, WireGuard |
+| OpenWrt *(incl. vendor builds like the Katalyst Spark)* | ubus over HTTP, or SSH | monitoring — identity, ports, addresses, traffic, DHCP leases, WiFi status and clients, system log |
+| DD-WRT | SSH only (no API) | identity, ports, addresses, DHCP leases |
+| Not managed from here | — | inventory only; never polled |
+
+The capability list is not cosmetic: cards and buttons a platform cannot support are **absent** from its device page rather than present and failing.
+
+#### Identify an unknown device
+
+Vendor firmware varies — two units of the same model can differ in whether the manufacturer left the ubus HTTP endpoint or SSH reachable. Rather than guessing, ask the device:
+
+* **From the UI:** device → Ports / interfaces → **Identify**. Reports every management interface it found, which ubus objects the login is actually permitted to call, and offers to set the platform.
+* **From the command line**, which is the one to use when adding a model for the first time:
+
+```bash
+node tools/probe-device.mjs 10.147.21.14 --user root --pass 'thepassword'
+node tools/probe-device.mjs 10.147.21.14 --user root --pass '...' --json > katalyst.json
+```
+
+Both are read-only — they connect, log in and read, and never write to the device. Keep the `--json` output when a new model behaves differently: the drivers' parsers are tested against captured device output, so a vendor quirk becomes a test case instead of a recurring surprise.
+
+**OpenWrt requirements:** `rpcd` plus `uhttpd-mod-ubus` for the HTTP path (LuCI pulls both in), or SSH with `ubus` present. If a vendor skin has removed the HTTP endpoint, the SSH path reaches the same objects and monitoring works unchanged.
+
+Which one a device uses is stored on it (`mgmt_transport`: `auto` / `http` / `ssh`) and set for you when you accept an Identify result. Leaving an SSH-only device on `auto` works, but costs an HTTP timeout before every poll — so accept the suggestion.
+
+*Known in the field:* the **Katalyst Spark K500A** is OpenWrt 21.02 on GL.iNet XE3000 hardware. Its web interface answers every unknown path with HTML, so there is no ubus HTTP endpoint — it is SSH-only, as `root`.
+
+#### Capture a new model's real output
+
+Before trusting the parsers against a build nobody has seen, dump what it actually returns:
+
+```bash
+node tools/capture-device.mjs 10.241.80.78 --user root --pass '...' > capture-k500a.json
+```
+
+Read-only. It reads each object's method signatures off the device with `ubus -v list` rather than guessing names, and only calls methods whose names contain no mutating verb — so a vendor object exposing `reboot` or `factory_reset` next to its getters is safe to explore on live hardware.
+
+Vendor builds on older releases differ from the documentation in ways that are not predictable — a missing field, a string where a number was expected — and capturing the real payloads turns each of those into a test case instead of a production surprise.
+
+**A raw capture must never be committed.** It contains the customer's SSID, every client MAC and the public IP their carrier assigned; `capture-*.json` and friends are gitignored. To turn one into a committable fixture:
+
+```bash
+node tools/make-fixture.mjs capture-k500a.json test/fixtures/katalyst-k500a.json
+```
+
+That anonymises by category — anything publicly routable, anything MAC-shaped, the SSIDs — then audits the result and **refuses to write** if something identifying survived. (The first version of this was an ad-hoc command pinned to one IP prefix. The carrier re-assigned the device, and the next capture's real public IP went in unnoticed. Hence the audit.)
+
+**DD-WRT requirement:** SSH is off by default — enable it under Services → Secure Shell → SSHd.
+
+#### Cellular signal (5G/LTE CPE)
+
+Hardware with a modem gets a **Cellular signal** card on its device page: RSRP, SINR, RSRQ and RSSI with a quality grade each, plus a trend chart over 1h / 24h / 7d.
+
+The modem keeps its own ring buffer — on the Katalyst Spark, 181 samples at ten-second intervals, about half an hour — which is *finer* resolution than this platform polls at. So every poll ingests the whole buffer rather than the newest reading, and the overlap is de-duplicated by primary key. The result is a continuous ten-second trace, which is where a brief sharp drop lives; recording one value per minute would average it away.
+
+The overall grade is the **worst** component, not an average: a good RSRP with poor SINR is a connection that does not work, and averaging reports it as fine.
+
 ### WireGuard (platform assigns IPs, you apply configs)
 
 1. In **Settings → WireGuard**, set the **Hub endpoint** (`your-vps-host:51820`) and a **managed subnet** (e.g. `10.200.0.0/16`), then Save — this generates the hub keypair.

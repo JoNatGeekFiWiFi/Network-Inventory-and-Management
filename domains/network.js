@@ -1015,7 +1015,7 @@ export default function registerNetwork(app, ctx) {
     const b = req.body || {};
     if (!isPriv(req)) for (const c of ['factory_password','admin_password','tech_password','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase']) delete b[c];
     if (!b.name || !String(b.name).trim()) return res.status(400).json({ error: 'A device needs a name' });
-    const ALLOWED = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','carrier_id','account_number','owner_account','owner_sub_account','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_password','admin_password','tech_username','tech_password','factory_wifi_ssid','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase','zt_node_id','admin_username'];
+    const ALLOWED = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','platform','mgmt_transport','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','carrier_id','account_number','owner_account','owner_sub_account','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_password','admin_password','tech_username','tech_password','factory_wifi_ssid','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase','zt_node_id','admin_username'];
     // Only name the columns the caller actually supplied. Listing them all and binding null for
     // the rest overrides the schema defaults — which made `status`, `management_mode` and their
     // NOT NULL constraints fail, so any create that omitted them came back as a 500.
@@ -1030,7 +1030,7 @@ export default function registerNetwork(app, ctx) {
     const b = req.body || {};
     const existing = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
     if (!existing) return res.status(404).json({ error: 'not found' });
-    const cols = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','carrier_id','account_number','owner_account','owner_sub_account','owner_subaccount_id','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_wifi_ssid','tech_username','zt_node_id','admin_username'];
+    const cols = ['name','model_id','serial','mac','status','online','assigned_type','assigned_site_id','assigned_pop_id','management_mode','platform','mgmt_transport','mgmt_overlay','mgmt_address','controller_id','ownership','owner_org','carrier_id','account_number','owner_account','owner_sub_account','owner_subaccount_id','account_status','hfc_mac','purchased_from','associated_connection_id','cell_carrier','cell_phone','cell_imei','cell_sim','cell_sku','factory_wifi_ssid','tech_username','zt_node_id','admin_username'];
     // credentials only overwritten if provided (non-empty)
     const credCols = ['factory_password','admin_password','tech_password','factory_wifi_password','acct_pin','acct_portal_username','acct_portal_password','acct_passphrase'];
     const sets = [], vals = [];

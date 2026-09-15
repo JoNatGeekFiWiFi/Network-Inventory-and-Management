@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+#
+# Push the Network Inventory & Management Platform repo to GitHub over SSH.
+#
+# TEMPLATE. The working copy (push-to-github.sh) is gitignored so each machine keeps its own, so
+# this is what a fresh clone starts from:
+#
+#   cp push-to-github.sh.example push-to-github.sh && chmod +x push-to-github.sh
+#
+# Prerequisite (one-time): an SSH key added to your GitHub account.
+#   ssh-keygen -t ed25519 -C "jon.fernandez.tech@gmail.com"
+#   ssh-add --apple-use-keychain ~/.ssh/id_ed25519
+#   pbcopy < ~/.ssh/id_ed25519.pub   # then add it at GitHub > Settings > SSH and GPG keys
+#
+# Then just run this script from inside the project folder:
+#
+#   ./push-to-github.sh
+#
+# It defaults to this repo's SSH URL; pass a different one as an argument to override:
+#   ./push-to-github.sh git@github.com:<user>/<repo>.git
+#
+set -euo pipefail
+
+# Default remote (SSH)
+DEFAULT_REPO_URL="git@github.com:JoNatGeekFiWiFi/Network-Inventory-and-Management.git"
+
+# Always operate from the folder this script lives in
+cd "$(dirname "$0")"
+
+# 1. Clear any stale git lock files (left over from the sandbox)
+rm -f .git/HEAD.lock .git/index.lock .git/objects/maintenance.lock 2>/dev/null || true
+
+# 2. Ensure a git repo exists and has at least one commit
+if [ ! -d .git ]; then
+  echo "Initializing git repo..."
+  git init -q
+  git add -A
+  git commit -q -m "Initial commit: platform spec and README"
+fi
+
+# 3. Use 'main' as the branch name (GitHub default)
+git branch -M main
+
+# 3a. Commit any pending changes — ask for a message so each deploy is identifiable in history
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Changes to commit:"
+  git status --short
+  echo
+  read -r -p "Commit message (describe what changed): " MSG
+  MSG="${MSG:-Update project files}"
+  git add -A
+  git commit -q -m "$MSG" || true
+fi
+
+# 4. Determine the remote URL (argument, else the default SSH URL above)
+REPO_URL="${1:-$DEFAULT_REPO_URL}"
+
+# 5. Add or update the 'origin' remote
+if git remote get-url origin >/dev/null 2>&1; then
+  git remote set-url origin "$REPO_URL"
+else
+  git remote add origin "$REPO_URL"
+fi
+
+# 6. Push (uses your SSH key — no password prompt once the key is added)
+echo "Pushing to $REPO_URL ..."
+git push -u origin main
+
+echo ""
+echo "Done. Your repo: ${REPO_URL%.git}"

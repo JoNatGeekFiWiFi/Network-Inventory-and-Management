@@ -1,0 +1,4988 @@
+{
+ "device": "KAT-K500A",
+ "release": "OpenWrt 21.02-SNAPSHOT ",
+ "note": "Captured from a live unit. SSIDs, MACs and public IPs are anonymised by tools/make-fixture.mjs — do not hand-edit real values back in.",
+ "ubus_list": [
+  "AT",
+  "dnsmasq",
+  "file",
+  "gl-clients",
+  "gl-cloud",
+  "gl-session",
+  "hotplug.block",
+  "hotplug.carrier",
+  "hotplug.dhcp",
+  "hotplug.dhcpv6",
+  "hotplug.gl-tertf",
+  "hotplug.iface",
+  "hotplug.kmwan",
+  "hotplug.neigh",
+  "hotplug.net",
+  "hotplug.ntp",
+  "hotplug.openvpn",
+  "hotplug.tftp",
+  "hotplug.tty",
+  "hotplug.usb",
+  "hotplug.usbmisc",
+  "hotplug.wireguard",
+  "iwinfo",
+  "log",
+  "luci",
+  "luci-rpc",
+  "mcu",
+  "modem.signal",
+  "mtk-wifi",
+  "network",
+  "network.device",
+  "network.interface",
+  "network.interface.lan",
+  "network.interface.loopback",
+  "network.interface.modem_0001",
+  "network.interface.modem_0001_4",
+  "network.interface.secondwan",
+  "network.interface.wan",
+  "network.interface.wwan",
+  "network.interface.zerotier",
+  "network.rrdns",
+  "network.wireless",
+  "rc",
+  "repeater",
+  "service",
+  "session",
+  "system",
+  "uci"
+ ],
+ "ubus_methods": {
+  "AT": {
+   "get_result": {
+    "cmd": "String",
+    "sp": "String",
+    "length": "Integer",
+    "timeout": "Integer"
+   }
+  },
+  "dnsmasq": {
+   "metrics": {}
+  },
+  "file": {
+   "read": {
+    "path": "String",
+    "base64": "Boolean",
+    "ubus_rpc_session": "String"
+   },
+   "write": {
+    "path": "String",
+    "data": "String",
+    "append": "Boolean",
+    "mode": "Integer",
+    "base64": "Boolean",
+    "ubus_rpc_session": "String"
+   },
+   "list": {
+    "path": "String",
+    "ubus_rpc_session": "String"
+   },
+   "stat": {
+    "path": "String",
+    "ubus_rpc_session": "String"
+   },
+   "md5": {
+    "path": "String",
+    "ubus_rpc_session": "String"
+   },
+   "remove": {
+    "path": "String",
+    "ubus_rpc_session": "String"
+   },
+   "exec": {
+    "command": "String",
+    "params": "Array",
+    "env": "Table",
+    "ubus_rpc_session": "String"
+   }
+  },
+  "gl-clients": {
+   "remove_offline": {},
+   "sync": {},
+   "notify": {},
+   "status": {},
+   "list": {},
+   "get_speed": {},
+   "clean_traffic": {}
+  },
+  "gl-cloud": {
+   "rebind": {
+    "token": "String",
+    "url": "String"
+   },
+   "alive": {},
+   "dump_features": {},
+   "subscribe_events_notify": {},
+   "set_log_level": {
+    "level": "Integer"
+   },
+   "notify-network-info": {},
+   "unbind": {},
+   "notify": {},
+   "bind": {
+    "token": "String",
+    "url": "String",
+    "id": "String"
+   },
+   "status": {},
+   "dump_subscribe_attributes": {}
+  },
+  "gl-session": {
+   "logout": {
+    "sid": "String"
+   },
+   "touch": {
+    "sid": "String"
+   },
+   "login": {
+    "hash": "String",
+    "username": "String"
+   },
+   "console": {
+    "enable": "Boolean"
+   },
+   "challenge": {
+    "username": "String"
+   },
+   "status": {},
+   "clear_session": {},
+   "notify": {
+    "data": "Table",
+    "name": "String"
+   },
+   "session": {
+    "sid": "String"
+   },
+   "call": {
+    "module": "String",
+    "params": "Table",
+    "func": "String"
+   }
+  },
+  "hotplug.block": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.carrier": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.dhcp": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.dhcpv6": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.gl-tertf": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.iface": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.kmwan": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.neigh": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.net": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.ntp": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.openvpn": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.tftp": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.tty": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.usb": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.usbmisc": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "hotplug.wireguard": {
+   "call": {
+    "env": "Array"
+   }
+  },
+  "iwinfo": {
+   "devices": {},
+   "info": {
+    "device": "String"
+   },
+   "scan": {
+    "device": "String"
+   },
+   "assoclist": {
+    "device": "String",
+    "mac": "String"
+   },
+   "freqlist": {
+    "device": "String"
+   },
+   "txpowerlist": {
+    "device": "String"
+   },
+   "countrylist": {
+    "device": "String"
+   },
+   "survey": {
+    "device": "String"
+   },
+   "phyname": {
+    "section": "String"
+   }
+  },
+  "log": {
+   "read": {
+    "lines": "Integer",
+    "stream": "Boolean",
+    "oneshot": "Boolean"
+   },
+   "write": {
+    "event": "String"
+   }
+  },
+  "luci": {
+   "getMountPoints": {},
+   "getFeatures": {},
+   "setBlockDetect": {},
+   "getSwconfigFeatures": {
+    "switch": "String"
+   },
+   "setPassword": {
+    "username": "String",
+    "password": "String"
+   },
+   "getConntrackHelpers": {},
+   "getUSBDevices": {},
+   "getInitList": {
+    "name": "String"
+   },
+   "getProcessList": {},
+   "getBlockDevices": {},
+   "getRealtimeStats": {
+    "device": "String",
+    "mode": "String"
+   },
+   "getSwconfigPortState": {
+    "switch": "String"
+   },
+   "getLEDs": {},
+   "getConntrackList": {},
+   "setLocaltime": {
+    "localtime": "Integer"
+   },
+   "getTimezones": {},
+   "setInitAction": {
+    "name": "String",
+    "action": "String"
+   },
+   "getLocaltime": {}
+  },
+  "luci-rpc": {
+   "getNetworkDevices": {},
+   "getWirelessDevices": {},
+   "getHostHints": {},
+   "getDUIDHints": {},
+   "getBoardJSON": {},
+   "getDHCPLeases": {
+    "family": "Integer"
+   }
+  },
+  "mcu": {
+   "cmd_json": {
+    "cmd": "String"
+   },
+   "cmd_string": {
+    "cmd": "String"
+   },
+   "version": {},
+   "get_warning": {},
+   "reload": {},
+   "system_update": {},
+   "send_custom_msg": {},
+   "system_reft": {},
+   "set_product_flag": {},
+   "reset_button": {},
+   "system_renw": {},
+   "status": {},
+   "system_reboot": {},
+   "set_warning": {
+    "capacity": "Table",
+    "temp_high": "Table",
+    "temp_low": "Table"
+   }
+  },
+  "modem.signal": {
+   "get_signals": {
+    "time": "Integer"
+   },
+   "upload_cloud_signals": {
+    "action": "String"
+   }
+  },
+  "mtk-wifi": {
+   "status": {},
+   "setup": {},
+   "teardown": {}
+  },
+  "network": {
+   "restart": {},
+   "reload": {},
+   "add_host_route": {
+    "target": "String",
+    "v6": "Boolean",
+    "interface": "String"
+   },
+   "get_proto_handlers": {},
+   "add_dynamic": {
+    "name": "String"
+   },
+   "netns_updown": {
+    "jail": "String",
+    "start": "Boolean"
+   }
+  },
+  "network.device": {
+   "status": {
+    "name": "String"
+   },
+   "set_alias": {
+    "alias": "Array",
+    "device": "String"
+   },
+   "set_state": {
+    "name": "String",
+    "defer": "Boolean",
+    "auth_status": "Boolean"
+   },
+   "stp_init": {}
+  },
+  "network.interface": {
+   "up": {},
+   "down": {},
+   "renew": {},
+   "status": {},
+   "prepare": {},
+   "dump": {},
+   "add_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "remove_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "notify_proto": {},
+   "remove": {},
+   "set_data": {}
+  },
+  "network.interface.lan": {
+   "up": {},
+   "down": {},
+   "renew": {},
+   "status": {},
+   "prepare": {},
+   "dump": {},
+   "add_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "remove_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "notify_proto": {},
+   "remove": {},
+   "set_data": {}
+  },
+  "network.interface.loopback": {
+   "up": {},
+   "down": {},
+   "renew": {},
+   "status": {},
+   "prepare": {},
+   "dump": {},
+   "add_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "remove_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "notify_proto": {},
+   "remove": {},
+   "set_data": {}
+  },
+  "network.interface.modem_0001": {
+   "up": {},
+   "down": {},
+   "renew": {},
+   "status": {},
+   "prepare": {},
+   "dump": {},
+   "add_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "remove_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "notify_proto": {},
+   "remove": {},
+   "set_data": {}
+  },
+  "network.interface.modem_0001_4": {
+   "up": {},
+   "down": {},
+   "renew": {},
+   "status": {},
+   "prepare": {},
+   "dump": {},
+   "add_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "remove_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "notify_proto": {},
+   "remove": {},
+   "set_data": {}
+  },
+  "network.interface.secondwan": {
+   "up": {},
+   "down": {},
+   "renew": {},
+   "status": {},
+   "prepare": {},
+   "dump": {},
+   "add_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "remove_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "notify_proto": {},
+   "remove": {},
+   "set_data": {}
+  },
+  "network.interface.wan": {
+   "up": {},
+   "down": {},
+   "renew": {},
+   "status": {},
+   "prepare": {},
+   "dump": {},
+   "add_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "remove_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "notify_proto": {},
+   "remove": {},
+   "set_data": {}
+  },
+  "network.interface.wwan": {
+   "up": {},
+   "down": {},
+   "renew": {},
+   "status": {},
+   "prepare": {},
+   "dump": {},
+   "add_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "remove_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "notify_proto": {},
+   "remove": {},
+   "set_data": {}
+  },
+  "network.interface.zerotier": {
+   "up": {},
+   "down": {},
+   "renew": {},
+   "status": {},
+   "prepare": {},
+   "dump": {},
+   "add_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "remove_device": {
+    "name": "String",
+    "link-ext": "Boolean",
+    "vlan": "Array"
+   },
+   "notify_proto": {},
+   "remove": {},
+   "set_data": {}
+  },
+  "network.rrdns": {
+   "lookup": {
+    "addrs": "Array",
+    "timeout": "Integer",
+    "server": "String",
+    "port": "(unknown)",
+    "limit": "Integer"
+   }
+  },
+  "network.wireless": {
+   "up": {},
+   "down": {},
+   "reconf": {},
+   "status": {},
+   "notify": {},
+   "get_validate": {}
+  },
+  "rc": {
+   "list": {},
+   "init": {
+    "name": "String",
+    "action": "String"
+   }
+  },
+  "repeater": {
+   "reload": {},
+   "surveys": {},
+   "set_exit": {
+    "exit": "Boolean"
+   },
+   "devices": {},
+   "exit_bare_mode": {},
+   "enter_bare_mode": {
+    "client_macaddr": "String"
+   },
+   "save_config": {},
+   "scan": {
+    "cached": "Boolean"
+   },
+   "disconnect": {},
+   "connect": {
+    "key": "String",
+    "ip": "String",
+    "gateway": "String",
+    "hl": "Integer",
+    "disguise": "Boolean",
+    "dns": "Array",
+    "bssid": "String",
+    "identity": "String",
+    "wds": "Boolean",
+    "protocol": "String",
+    "ssid": "String",
+    "network": "String",
+    "auto_portal": "Boolean",
+    "netmask": "String",
+    "macaddr": "String",
+    "manual": "Boolean",
+    "remember": "Boolean",
+    "hostname": "String",
+    "mtu": "Integer",
+    "ttl": "Integer"
+   },
+   "log": {
+    "level": "String"
+   },
+   "status": {}
+  },
+  "service": {
+   "set": {
+    "name": "String",
+    "script": "String",
+    "instances": "Table",
+    "triggers": "Array",
+    "validate": "Array",
+    "autostart": "Boolean",
+    "data": "Table"
+   },
+   "add": {
+    "name": "String",
+    "script": "String",
+    "instances": "Table",
+    "triggers": "Array",
+    "validate": "Array",
+    "autostart": "Boolean",
+    "data": "Table"
+   },
+   "list": {
+    "name": "String",
+    "verbose": "Boolean"
+   },
+   "delete": {
+    "name": "String",
+    "instance": "String"
+   },
+   "signal": {
+    "name": "String",
+    "instance": "String",
+    "signal": "Integer"
+   },
+   "update_start": {
+    "name": "String"
+   },
+   "update_complete": {
+    "name": "String"
+   },
+   "event": {
+    "type": "String",
+    "data": "Table"
+   },
+   "validate": {
+    "package": "String",
+    "type": "String",
+    "service": "String"
+   },
+   "get_data": {
+    "name": "String",
+    "instance": "String",
+    "type": "String"
+   },
+   "state": {
+    "spawn": "Boolean",
+    "name": "String"
+   },
+   "watchdog": {
+    "mode": "Integer",
+    "timeout": "Integer",
+    "name": "String",
+    "instance": "String"
+   }
+  },
+  "session": {
+   "create": {
+    "timeout": "Integer"
+   },
+   "list": {
+    "ubus_rpc_session": "String"
+   },
+   "grant": {
+    "ubus_rpc_session": "String",
+    "scope": "String",
+    "objects": "Array"
+   },
+   "revoke": {
+    "ubus_rpc_session": "String",
+    "scope": "String",
+    "objects": "Array"
+   },
+   "access": {
+    "ubus_rpc_session": "String",
+    "scope": "String",
+    "object": "String",
+    "function": "String"
+   },
+   "set": {
+    "ubus_rpc_session": "String",
+    "values": "Table"
+   },
+   "get": {
+    "ubus_rpc_session": "String",
+    "keys": "Array"
+   },
+   "unset": {
+    "ubus_rpc_session": "String",
+    "keys": "Array"
+   },
+   "destroy": {
+    "ubus_rpc_session": "String"
+   },
+   "login": {
+    "username": "String",
+    "password": "String",
+    "timeout": "Integer"
+   }
+  },
+  "system": {
+   "board": {},
+   "info": {},
+   "reboot": {},
+   "watchdog": {
+    "frequency": "Integer",
+    "timeout": "Integer",
+    "magicclose": "Boolean",
+    "stop": "Boolean"
+   },
+   "signal": {
+    "pid": "Integer",
+    "signum": "Integer"
+   },
+   "validate_firmware_image": {
+    "path": "String"
+   },
+   "sysupgrade": {
+    "path": "String",
+    "force": "Boolean",
+    "backup": "String",
+    "prefix": "String",
+    "command": "String",
+    "options": "Table"
+   }
+  },
+  "uci": {
+   "configs": {},
+   "get": {
+    "config": "String",
+    "section": "String",
+    "option": "String",
+    "type": "String",
+    "match": "Table",
+    "ubus_rpc_session": "String"
+   },
+   "state": {
+    "config": "String",
+    "section": "String",
+    "option": "String",
+    "type": "String",
+    "match": "Table",
+    "ubus_rpc_session": "String"
+   },
+   "add": {
+    "config": "String",
+    "type": "String",
+    "name": "String",
+    "values": "Table",
+    "ubus_rpc_session": "String"
+   },
+   "set": {
+    "config": "String",
+    "section": "String",
+    "type": "String",
+    "match": "Table",
+    "values": "Table",
+    "ubus_rpc_session": "String"
+   },
+   "delete": {
+    "config": "String",
+    "section": "String",
+    "type": "String",
+    "match": "Table",
+    "option": "String",
+    "options": "Array",
+    "ubus_rpc_session": "String"
+   },
+   "rename": {
+    "config": "String",
+    "section": "String",
+    "option": "String",
+    "name": "String",
+    "ubus_rpc_session": "String"
+   },
+   "order": {
+    "config": "String",
+    "sections": "Array",
+    "ubus_rpc_session": "String"
+   },
+   "changes": {
+    "config": "String",
+    "ubus_rpc_session": "String"
+   },
+   "revert": {
+    "config": "String",
+    "ubus_rpc_session": "String"
+   },
+   "commit": {
+    "config": "String",
+    "ubus_rpc_session": "String"
+   },
+   "apply": {
+    "rollback": "Boolean",
+    "timeout": "Integer",
+    "ubus_rpc_session": "String"
+   },
+   "confirm": {
+    "ubus_rpc_session": "String"
+   },
+   "rollback": {
+    "ubus_rpc_session": "String"
+   },
+   "reload_config": {}
+  }
+ },
+ "board": {
+  "kernel": "5.4.211",
+  "hostname": "Spark",
+  "system": "ARMv8 Processor rev 4",
+  "model": "KAT-K500A",
+  "board_name": "glinet,xe3000-emmc",
+  "release": {
+   "distribution": "OpenWrt",
+   "version": "21.02-SNAPSHOT",
+   "revision": "",
+   "target": "mediatek/mt7981",
+   "description": "OpenWrt 21.02-SNAPSHOT "
+  }
+ },
+ "info": {
+  "localtime": 1789489177,
+  "uptime": 1891557,
+  "load": [
+   3680,
+   6912,
+   5760
+  ],
+  "memory": {
+   "total": 503259136,
+   "free": 133492736,
+   "shared": 6090752,
+   "buffered": 33284096,
+   "available": 276537344,
+   "cached": 113352704
+  },
+  "swap": {
+   "total": 0,
+   "free": 0
+  }
+ },
+ "device_status": {
+  "br-lan": {
+   "external": false,
+   "present": true,
+   "type": "bridge",
+   "up": true,
+   "carrier": true,
+   "auth_status": false,
+   "bridge-members": [
+    "eth0",
+    "eth1",
+    "ra0",
+    "rax0"
+   ],
+   "mtu": 1500,
+   "mtu6": 1500,
+   "macaddr": "02:00:00:00:00:01",
+   "txqueuelen": 1000,
+   "ipv6": false,
+   "ip6segmentrouting": false,
+   "promisc": false,
+   "rpfilter": 0,
+   "acceptlocal": false,
+   "igmpversion": 0,
+   "mldversion": 0,
+   "neigh4reachabletime": 30000,
+   "neigh6reachabletime": 30000,
+   "neigh4gcstaletime": 60,
+   "neigh6gcstaletime": 60,
+   "neigh4locktime": 100,
+   "dadtransmits": 1,
+   "multicast": true,
+   "sendredirects": true,
+   "drop_v4_unicast_in_l2_multicast": false,
+   "drop_v6_unicast_in_l2_multicast": false,
+   "drop_gratuitous_arp": false,
+   "drop_unsolicited_na": false,
+   "arp_accept": false,
+   "statistics": {
+    "collisions": 0,
+    "rx_frame_errors": 0,
+    "tx_compressed": 0,
+    "multicast": 257431,
+    "rx_length_errors": 0,
+    "tx_dropped": 0,
+    "rx_bytes": 52321418008,
+    "rx_missed_errors": 0,
+    "tx_errors": 0,
+    "rx_compressed": 0,
+    "rx_over_errors": 0,
+    "tx_fifo_errors": 0,
+    "rx_crc_errors": 0,
+    "rx_packets": 126174266,
+    "tx_heartbeat_errors": 0,
+    "rx_dropped": 0,
+    "tx_aborted_errors": 0,
+    "tx_packets": 347880395,
+    "rx_errors": 0,
+    "tx_bytes": 433478248447,
+    "tx_window_errors": 0,
+    "rx_fifo_errors": 0,
+    "tx_carrier_errors": 0
+   }
+  },
+  "eth0": {
+   "external": false,
+   "present": true,
+   "type": "Network device",
+   "up": true,
+   "carrier": false,
+   "auth_status": false,
+   "link-advertising": [],
+   "link-partner-advertising": [],
+   "link-supported": [],
+   "speed": "-1F",
+   "autoneg": true,
+   "mtu": 1500,
+   "mtu6": 1500,
+   "macaddr": "02:00:00:00:00:02",
+   "txqueuelen": 1000,
+   "ipv6": false,
+   "ip6segmentrouting": false,
+   "promisc": false,
+   "rpfilter": 0,
+   "acceptlocal": false,
+   "igmpversion": 0,
+   "mldversion": 0,
+   "neigh4reachabletime": 30000,
+   "neigh6reachabletime": 30000,
+   "neigh4gcstaletime": 60,
+   "neigh6gcstaletime": 60,
+   "neigh4locktime": 100,
+   "dadtransmits": 1,
+   "multicast": true,
+   "sendredirects": true,
+   "drop_v4_unicast_in_l2_multicast": false,
+   "drop_v6_unicast_in_l2_multicast": false,
+   "drop_gratuitous_arp": false,
+   "drop_unsolicited_na": false,
+   "arp_accept": false,
+   "statistics": {
+    "collisions": 0,
+    "rx_frame_errors": 0,
+    "tx_compressed": 0,
+    "multicast": 0,
+    "rx_length_errors": 0,
+    "tx_dropped": 0,
+    "rx_bytes": 2614,
+    "rx_missed_errors": 0,
+    "tx_errors": 0,
+    "rx_compressed": 0,
+    "rx_over_errors": 0,
+    "tx_fifo_errors": 0,
+    "rx_crc_errors": 0,
+    "rx_packets": 17,
+    "tx_heartbeat_errors": 0,
+    "rx_dropped": 1,
+    "tx_aborted_errors": 0,
+    "tx_packets": 27,
+    "rx_errors": 0,
+    "tx_bytes": 3492,
+    "tx_window_errors": 0,
+    "rx_fifo_errors": 0,
+    "tx_carrier_errors": 0
+   }
+  },
+  "eth1": {
+   "external": false,
+   "present": true,
+   "type": "Network device",
+   "up": true,
+   "carrier": false,
+   "auth_status": false,
+   "link-advertising": [
+    "10baseT-H",
+    "10baseT-F",
+    "100baseT-H",
+    "100baseT-F",
+    "1000baseT-F"
+   ],
+   "link-partner-advertising": [],
+   "link-supported": [
+    "10baseT-H",
+    "10baseT-F",
+    "100baseT-H",
+    "100baseT-F",
+    "1000baseT-F"
+   ],
+   "speed": "-1F",
+   "autoneg": true,
+   "mtu": 1500,
+   "mtu6": 1500,
+   "macaddr": "02:00:00:00:00:01",
+   "txqueuelen": 1000,
+   "ipv6": false,
+   "ip6segmentrouting": false,
+   "promisc": false,
+   "rpfilter": 0,
+   "acceptlocal": false,
+   "igmpversion": 0,
+   "mldversion": 0,
+   "neigh4reachabletime": 30000,
+   "neigh6reachabletime": 30000,
+   "neigh4gcstaletime": 60,
+   "neigh6gcstaletime": 60,
+   "neigh4locktime": 100,
+   "dadtransmits": 1,
+   "multicast": true,
+   "sendredirects": true,
+   "drop_v4_unicast_in_l2_multicast": false,
+   "drop_v6_unicast_in_l2_multicast": false,
+   "drop_gratuitous_arp": false,
+   "drop_unsolicited_na": false,
+   "arp_accept": false,
+   "statistics": {
+    "collisions": 0,
+    "rx_frame_errors": 0,
+    "tx_compressed": 0,
+    "multicast": 0,
+    "rx_length_errors": 0,
+    "tx_dropped": 0,
+    "rx_bytes": 8140,
+    "rx_missed_errors": 0,
+    "tx_errors": 0,
+    "rx_compressed": 0,
+    "rx_over_errors": 0,
+    "tx_fifo_errors": 0,
+    "rx_crc_errors": 0,
+    "rx_packets": 69,
+    "tx_heartbeat_errors": 0,
+    "rx_dropped": 6,
+    "tx_aborted_errors": 0,
+    "tx_packets": 120,
+    "rx_errors": 0,
+    "tx_bytes": 11595,
+    "tx_window_errors": 0,
+    "rx_fifo_errors": 0,
+    "tx_carrier_errors": 0
+   }
+  },
+  "lo": {
+   "external": false,
+   "present": true,
+   "type": "Network device",
+   "up": true,
+   "carrier": true,
+   "auth_status": false,
+   "mtu": 65536,
+   "mtu6": 65536,
+   "macaddr": "02:00:00:00:00:03",
+   "txqueuelen": 1000,
+   "ipv6": true,
+   "ip6segmentrouting": false,
+   "promisc": false,
+   "rpfilter": 0,
+   "acceptlocal": false,
+   "igmpversion": 0,
+   "mldversion": 0,
+   "neigh4reachabletime": 30000,
+   "neigh6reachabletime": 30000,
+   "neigh4gcstaletime": 60,
+   "neigh6gcstaletime": 60,
+   "neigh4locktime": 100,
+   "dadtransmits": 1,
+   "multicast": false,
+   "sendredirects": true,
+   "drop_v4_unicast_in_l2_multicast": false,
+   "drop_v6_unicast_in_l2_multicast": false,
+   "drop_gratuitous_arp": false,
+   "drop_unsolicited_na": false,
+   "arp_accept": false,
+   "statistics": {
+    "collisions": 0,
+    "rx_frame_errors": 0,
+    "tx_compressed": 0,
+    "multicast": 0,
+    "rx_length_errors": 0,
+    "tx_dropped": 0,
+    "rx_bytes": 1144774363,
+    "rx_missed_errors": 0,
+    "tx_errors": 0,
+    "rx_compressed": 0,
+    "rx_over_errors": 0,
+    "tx_fifo_errors": 0,
+    "rx_crc_errors": 0,
+    "rx_packets": 12051235,
+    "tx_heartbeat_errors": 0,
+    "rx_dropped": 0,
+    "tx_aborted_errors": 0,
+    "tx_packets": 12051235,
+    "rx_errors": 0,
+    "tx_bytes": 1144774363,
+    "tx_window_errors": 0,
+    "rx_fifo_errors": 0,
+    "tx_carrier_errors": 0
+   }
+  },
+  "ra0": {
+   "external": true,
+   "present": true,
+   "type": "Network device",
+   "up": true,
+   "carrier": true,
+   "auth_status": false,
+   "mtu": 1500,
+   "mtu6": 1500,
+   "macaddr": "02:00:00:00:00:04",
+   "txqueuelen": 1000,
+   "ipv6": false,
+   "ip6segmentrouting": false,
+   "promisc": false,
+   "rpfilter": 0,
+   "acceptlocal": false,
+   "igmpversion": 0,
+   "mldversion": 0,
+   "neigh4reachabletime": 30000,
+   "neigh6reachabletime": 30000,
+   "neigh4gcstaletime": 60,
+   "neigh6gcstaletime": 60,
+   "neigh4locktime": 100,
+   "dadtransmits": 1,
+   "multicast": true,
+   "sendredirects": true,
+   "drop_v4_unicast_in_l2_multicast": false,
+   "drop_v6_unicast_in_l2_multicast": false,
+   "drop_gratuitous_arp": false,
+   "drop_unsolicited_na": false,
+   "arp_accept": false,
+   "statistics": {
+    "collisions": 0,
+    "rx_frame_errors": 0,
+    "tx_compressed": 0,
+    "multicast": 59371,
+    "rx_length_errors": 0,
+    "tx_dropped": 0,
+    "rx_bytes": 18193027949,
+    "rx_missed_errors": 0,
+    "tx_errors": 0,
+    "rx_compressed": 0,
+    "rx_over_errors": 0,
+    "tx_fifo_errors": 0,
+    "rx_crc_errors": 0,
+    "rx_packets": 112367788,
+    "tx_heartbeat_errors": 0,
+    "rx_dropped": 0,
+    "tx_aborted_errors": 0,
+    "tx_packets": 96847275,
+    "rx_errors": 10195269,
+    "tx_bytes": 128647598288,
+    "tx_window_errors": 0,
+    "rx_fifo_errors": 0,
+    "tx_carrier_errors": 0
+   }
+  },
+  "rax0": {
+   "external": true,
+   "present": true,
+   "type": "Network device",
+   "up": true,
+   "carrier": true,
+   "auth_status": false,
+   "mtu": 1500,
+   "mtu6": 1500,
+   "macaddr": "02:00:00:00:00:05",
+   "txqueuelen": 1000,
+   "ipv6": false,
+   "ip6segmentrouting": false,
+   "promisc": false,
+   "rpfilter": 0,
+   "acceptlocal": false,
+   "igmpversion": 0,
+   "mldversion": 0,
+   "neigh4reachabletime": 30000,
+   "neigh6reachabletime": 30000,
+   "neigh4gcstaletime": 60,
+   "neigh6gcstaletime": 60,
+   "neigh4locktime": 100,
+   "dadtransmits": 1,
+   "multicast": true,
+   "sendredirects": true,
+   "drop_v4_unicast_in_l2_multicast": false,
+   "drop_v6_unicast_in_l2_multicast": false,
+   "drop_gratuitous_arp": false,
+   "drop_unsolicited_na": false,
+   "arp_accept": false,
+   "statistics": {
+    "collisions": 0,
+    "rx_frame_errors": 0,
+    "tx_compressed": 0,
+    "multicast": 198113,
+    "rx_length_errors": 0,
+    "tx_dropped": 0,
+    "rx_bytes": 91973405097,
+    "rx_missed_errors": 0,
+    "tx_errors": 0,
+    "rx_compressed": 0,
+    "rx_over_errors": 0,
+    "tx_fifo_errors": 0,
+    "rx_crc_errors": 0,
+    "rx_packets": 160814915,
+    "tx_heartbeat_errors": 0,
+    "rx_dropped": 0,
+    "tx_aborted_errors": 0,
+    "tx_packets": 249921112,
+    "rx_errors": 0,
+    "tx_bytes": 302729787993,
+    "tx_window_errors": 0,
+    "rx_fifo_errors": 0,
+    "tx_carrier_errors": 0
+   }
+  },
+  "rmnet_mhi0": {
+   "external": false,
+   "present": true,
+   "type": "Network device",
+   "up": true,
+   "carrier": true,
+   "auth_status": false,
+   "mtu": 1500,
+   "mtu6": 1500,
+   "macaddr": "02:00:00:00:00:03",
+   "txqueuelen": 1000,
+   "ipv6": true,
+   "ip6segmentrouting": false,
+   "promisc": false,
+   "rpfilter": 0,
+   "acceptlocal": false,
+   "igmpversion": 0,
+   "mldversion": 0,
+   "neigh4reachabletime": 30000,
+   "neigh6reachabletime": 30000,
+   "neigh4gcstaletime": 60,
+   "neigh6gcstaletime": 60,
+   "neigh4locktime": 100,
+   "dadtransmits": 1,
+   "multicast": false,
+   "sendredirects": true,
+   "drop_v4_unicast_in_l2_multicast": false,
+   "drop_v6_unicast_in_l2_multicast": false,
+   "drop_gratuitous_arp": false,
+   "drop_unsolicited_na": false,
+   "arp_accept": false,
+   "statistics": {
+    "collisions": 0,
+    "rx_frame_errors": 0,
+    "tx_compressed": 0,
+    "multicast": 0,
+    "rx_length_errors": 0,
+    "tx_dropped": 0,
+    "rx_bytes": 433859141656,
+    "rx_missed_errors": 0,
+    "tx_errors": 0,
+    "rx_compressed": 0,
+    "rx_over_errors": 0,
+    "tx_fifo_errors": 0,
+    "rx_crc_errors": 0,
+    "rx_packets": 68834270,
+    "tx_heartbeat_errors": 0,
+    "rx_dropped": 0,
+    "tx_aborted_errors": 0,
+    "tx_packets": 145342321,
+    "rx_errors": 0,
+    "tx_bytes": 53820283989,
+    "tx_window_errors": 0,
+    "rx_fifo_errors": 0,
+    "tx_carrier_errors": 0
+   }
+  },
+  "zt44xiyxyh": {
+   "external": false,
+   "present": true,
+   "type": "Network device",
+   "up": true,
+   "carrier": true,
+   "auth_status": false,
+   "link-advertising": [],
+   "link-partner-advertising": [],
+   "link-supported": [],
+   "speed": "10F",
+   "autoneg": true,
+   "mtu": 1500,
+   "mtu6": 1500,
+   "macaddr": "02:00:00:00:00:06",
+   "txqueuelen": 1000,
+   "ipv6": false,
+   "ip6segmentrouting": false,
+   "promisc": false,
+   "rpfilter": 0,
+   "acceptlocal": false,
+   "igmpversion": 0,
+   "mldversion": 0,
+   "neigh4reachabletime": 30000,
+   "neigh6reachabletime": 30000,
+   "neigh4gcstaletime": 60,
+   "neigh6gcstaletime": 60,
+   "neigh4locktime": 100,
+   "dadtransmits": 1,
+   "multicast": true,
+   "sendredirects": true,
+   "drop_v4_unicast_in_l2_multicast": false,
+   "drop_v6_unicast_in_l2_multicast": false,
+   "drop_gratuitous_arp": false,
+   "drop_unsolicited_na": false,
+   "arp_accept": false,
+   "statistics": {
+    "collisions": 0,
+    "rx_frame_errors": 0,
+    "tx_compressed": 0,
+    "multicast": 0,
+    "rx_length_errors": 0,
+    "tx_dropped": 0,
+    "rx_bytes": 395183021,
+    "rx_missed_errors": 0,
+    "tx_errors": 0,
+    "rx_compressed": 0,
+    "rx_over_errors": 0,
+    "tx_fifo_errors": 0,
+    "rx_crc_errors": 0,
+    "rx_packets": 1467070,
+    "tx_heartbeat_errors": 0,
+    "rx_dropped": 0,
+    "tx_aborted_errors": 0,
+    "tx_packets": 550970,
+    "rx_errors": 0,
+    "tx_bytes": 221405009,
+    "tx_window_errors": 0,
+    "rx_fifo_errors": 0,
+    "tx_carrier_errors": 0
+   }
+  }
+ },
+ "interface_dump": {
+  "interface": [
+   {
+    "interface": "lan",
+    "up": true,
+    "pending": false,
+    "available": true,
+    "autostart": true,
+    "dynamic": false,
+    "uptime": 1891541,
+    "l3_device": "br-lan",
+    "proto": "static",
+    "device": "br-lan",
+    "updated": [
+     "addresses"
+    ],
+    "metric": 0,
+    "dns_metric": 0,
+    "delegation": true,
+    "ipv4-address": [
+     {
+      "address": "192.168.8.1",
+      "mask": 24
+     }
+    ],
+    "ipv6-address": [],
+    "ipv6-prefix": [],
+    "ipv6-prefix-assignment": [
+     {
+      "address": "fd5d:adb7:428f::",
+      "mask": 60,
+      "local-address": {}
+     }
+    ],
+    "route": [],
+    "dns-server": [],
+    "dns-search": [],
+    "neighbors": [],
+    "inactive": {
+     "ipv4-address": [],
+     "ipv6-address": [],
+     "route": [],
+     "dns-server": [],
+     "dns-search": [],
+     "neighbors": []
+    },
+    "data": {}
+   },
+   {
+    "interface": "loopback",
+    "up": true,
+    "pending": false,
+    "available": true,
+    "autostart": true,
+    "dynamic": false,
+    "uptime": 1891541,
+    "l3_device": "lo",
+    "proto": "static",
+    "device": "lo",
+    "updated": [
+     "addresses"
+    ],
+    "metric": 0,
+    "dns_metric": 0,
+    "delegation": true,
+    "ipv4-address": [
+     {
+      "address": "127.0.0.1",
+      "mask": 8
+     }
+    ],
+    "ipv6-address": [],
+    "ipv6-prefix": [],
+    "ipv6-prefix-assignment": [],
+    "route": [],
+    "dns-server": [],
+    "dns-search": [],
+    "neighbors": [],
+    "inactive": {
+     "ipv4-address": [],
+     "ipv6-address": [],
+     "route": [],
+     "dns-server": [],
+     "dns-search": [],
+     "neighbors": []
+    },
+    "data": {}
+   },
+   {
+    "interface": "modem_0001",
+    "up": true,
+    "pending": false,
+    "available": true,
+    "autostart": true,
+    "dynamic": false,
+    "uptime": 1891496,
+    "l3_device": "rmnet_mhi0",
+    "proto": "qcm",
+    "metric": 40,
+    "dns_metric": 0,
+    "delegation": true,
+    "ipv4-address": [],
+    "ipv6-address": [],
+    "ipv6-prefix": [],
+    "ipv6-prefix-assignment": [],
+    "route": [],
+    "dns-server": [],
+    "dns-search": [],
+    "neighbors": [],
+    "inactive": {
+     "ipv4-address": [],
+     "ipv6-address": [],
+     "route": [],
+     "dns-server": [],
+     "dns-search": [],
+     "neighbors": []
+    },
+    "data": {}
+   },
+   {
+    "interface": "modem_0001_4",
+    "up": true,
+    "pending": false,
+    "available": true,
+    "autostart": true,
+    "dynamic": true,
+    "uptime": 59035,
+    "l3_device": "rmnet_mhi0",
+    "proto": "dhcp",
+    "device": "rmnet_mhi0",
+    "metric": 40,
+    "dns_metric": 0,
+    "delegation": true,
+    "ipv4-address": [
+     {
+      "address": "203.0.113.1",
+      "mask": 30
+     }
+    ],
+    "ipv6-address": [],
+    "ipv6-prefix": [],
+    "ipv6-prefix-assignment": [],
+    "route": [
+     {
+      "target": "0.0.0.0",
+      "mask": 0,
+      "nexthop": "203.0.113.2",
+      "source": "203.0.113.1/32"
+     }
+    ],
+    "dns-server": [
+     "203.0.113.3",
+     "203.0.113.4"
+    ],
+    "dns-search": [],
+    "neighbors": [],
+    "inactive": {
+     "ipv4-address": [],
+     "ipv6-address": [],
+     "route": [],
+     "dns-server": [],
+     "dns-search": [],
+     "neighbors": []
+    },
+    "data": {
+     "hostname": "Spark",
+     "leasetime": 7200
+    }
+   },
+   {
+    "interface": "secondwan",
+    "up": false,
+    "pending": false,
+    "available": false,
+    "autostart": true,
+    "dynamic": false,
+    "proto": "dhcp",
+    "data": {},
+    "errors": [
+     {
+      "subsystem": "interface",
+      "code": "NO_DEVICE"
+     }
+    ]
+   },
+   {
+    "interface": "wan",
+    "up": false,
+    "pending": false,
+    "available": false,
+    "autostart": true,
+    "dynamic": false,
+    "proto": "dhcp",
+    "data": {},
+    "errors": [
+     {
+      "subsystem": "interface",
+      "code": "NO_DEVICE"
+     }
+    ]
+   },
+   {
+    "interface": "wwan",
+    "up": false,
+    "pending": false,
+    "available": false,
+    "autostart": true,
+    "dynamic": false,
+    "proto": "dhcp",
+    "data": {},
+    "errors": [
+     {
+      "subsystem": "interface",
+      "code": "NO_DEVICE"
+     }
+    ]
+   },
+   {
+    "interface": "zerotier",
+    "up": true,
+    "pending": false,
+    "available": true,
+    "autostart": true,
+    "dynamic": false,
+    "uptime": 1891523,
+    "l3_device": "zt44xiyxyh",
+    "proto": "none",
+    "device": "zt44xiyxyh",
+    "metric": 0,
+    "dns_metric": 0,
+    "delegation": true,
+    "ipv4-address": [],
+    "ipv6-address": [],
+    "ipv6-prefix": [],
+    "ipv6-prefix-assignment": [],
+    "route": [],
+    "dns-server": [],
+    "dns-search": [],
+    "neighbors": [],
+    "inactive": {
+     "ipv4-address": [],
+     "ipv6-address": [],
+     "route": [],
+     "dns-server": [],
+     "dns-search": [],
+     "neighbors": []
+    },
+    "data": {}
+   }
+  ]
+ },
+ "iwinfo_devices": {
+  "devices": [
+   "apcli0",
+   "ra1",
+   "rax1",
+   "apclix0",
+   "ra0",
+   "rax0"
+  ]
+ },
+ "iwinfo": {
+  "apcli0.info": {
+   "phy": "ra0",
+   "ssid": "",
+   "country": "00",
+   "mode": "Client",
+   "channel": 5,
+   "frequency": 2432,
+   "txpower": 20,
+   "quality": 10,
+   "quality_max": 100,
+   "signal": -256,
+   "noise": -72,
+   "bitrate": 286000,
+   "htmodes": [
+    "HT20",
+    "HT40",
+    "HE20",
+    "HE40"
+   ],
+   "hwmodes": [
+    "ax",
+    "b",
+    "g",
+    "n"
+   ],
+   "hwmode": "ax",
+   "htmode": "HE20",
+   "hardware": {
+    "name": "MediaTek"
+   }
+  },
+  "apcli0.assoclist": {
+   "results": []
+  },
+  "ra1.info": {
+   "phy": "ra0",
+   "ssid": "TestNet",
+   "bssid": "02:00:00:00:00:07",
+   "country": "US",
+   "mode": "Master",
+   "channel": 5,
+   "frequency": 2432,
+   "quality": 10,
+   "quality_max": 100,
+   "signal": 0,
+   "noise": -72,
+   "bitrate": 0,
+   "htmodes": [
+    "HT20",
+    "HT40",
+    "HE20",
+    "HE40"
+   ],
+   "hwmodes": [
+    "ax",
+    "b",
+    "g",
+    "n"
+   ],
+   "hwmode": "ax",
+   "htmode": "HE20",
+   "hardware": {
+    "name": "MediaTek"
+   }
+  },
+  "ra1.assoclist": {
+   "results": []
+  },
+  "rax1.info": {
+   "phy": "rax0",
+   "ssid": "TestNet-2",
+   "bssid": "02:00:00:00:00:08",
+   "country": "US",
+   "mode": "Master",
+   "channel": 36,
+   "frequency": 5180,
+   "quality": 10,
+   "quality_max": 100,
+   "signal": 0,
+   "noise": -72,
+   "bitrate": 0,
+   "htmodes": [
+    "HT20",
+    "HT40",
+    "VHT20",
+    "VHT40",
+    "VHT80",
+    "VHT160",
+    "HE20",
+    "HE40",
+    "HE80",
+    "HE160"
+   ],
+   "hwmodes": [
+    "ac",
+    "ax",
+    "a",
+    "n"
+   ],
+   "hwmode": "ax",
+   "htmode": "HE80",
+   "hardware": {
+    "name": "MediaTek"
+   }
+  },
+  "rax1.assoclist": {
+   "results": []
+  },
+  "apclix0.info": {
+   "phy": "rax0",
+   "ssid": "",
+   "country": "00",
+   "mode": "Client",
+   "channel": 36,
+   "frequency": 5180,
+   "txpower": 20,
+   "quality": 10,
+   "quality_max": 100,
+   "signal": -256,
+   "noise": -72,
+   "bitrate": 1201000,
+   "htmodes": [
+    "HT20",
+    "HT40",
+    "VHT20",
+    "VHT40",
+    "VHT80",
+    "VHT160",
+    "HE20",
+    "HE40",
+    "HE80",
+    "HE160"
+   ],
+   "hwmodes": [
+    "ac",
+    "ax",
+    "a",
+    "n"
+   ],
+   "hwmode": "ax",
+   "htmode": "HE80",
+   "hardware": {
+    "name": "MediaTek"
+   }
+  },
+  "apclix0.assoclist": {
+   "results": []
+  },
+  "ra0.info": {
+   "phy": "ra0",
+   "ssid": "TestNet-3",
+   "bssid": "02:00:00:00:00:04",
+   "country": "US",
+   "mode": "Master",
+   "channel": 5,
+   "frequency": 2432,
+   "txpower": 20,
+   "quality": 10,
+   "quality_max": 100,
+   "signal": -33,
+   "noise": -72,
+   "bitrate": 286000,
+   "htmodes": [
+    "HT20",
+    "HT40",
+    "HE20",
+    "HE40"
+   ],
+   "hwmodes": [
+    "ax",
+    "b",
+    "g",
+    "n"
+   ],
+   "hwmode": "ax",
+   "htmode": "HE20",
+   "hardware": {
+    "name": "MediaTek"
+   }
+  },
+  "ra0.assoclist": {
+   "results": [
+    {
+     "mac": "02:00:00:00:00:09",
+     "signal": -34,
+     "signal_avg": 0,
+     "noise": 0,
+     "inactive": 0,
+     "connected_time": 117292,
+     "thr": 0,
+     "authorized": false,
+     "authenticated": false,
+     "preamble": "long",
+     "wme": false,
+     "mfp": false,
+     "tdls": false,
+     "mesh llid": 0,
+     "mesh plid": 0,
+     "mesh plink": "",
+     "mesh local PS": "",
+     "mesh peer PS": "",
+     "mesh non-peer PS": "",
+     "rx": {
+      "drop_misc": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": false,
+      "vht": false,
+      "he": false,
+      "mhz": 20,
+      "rate": 12000
+     },
+     "tx": {
+      "failed": 0,
+      "retries": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": false,
+      "vht": false,
+      "he": false,
+      "mhz": 20,
+      "rate": 1000
+     }
+    },
+    {
+     "mac": "02:00:00:00:00:0A",
+     "signal": -39,
+     "signal_avg": 0,
+     "noise": 0,
+     "inactive": 0,
+     "connected_time": 994242,
+     "thr": 0,
+     "authorized": false,
+     "authenticated": false,
+     "preamble": "long",
+     "wme": false,
+     "mfp": false,
+     "tdls": false,
+     "mesh llid": 0,
+     "mesh plid": 0,
+     "mesh plink": "",
+     "mesh local PS": "",
+     "mesh peer PS": "",
+     "mesh non-peer PS": "",
+     "rx": {
+      "drop_misc": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": false,
+      "vht": false,
+      "he": false,
+      "mhz": 20,
+      "rate": 1000
+     },
+     "tx": {
+      "failed": 0,
+      "retries": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": true,
+      "vht": false,
+      "he": false,
+      "mhz": 20,
+      "rate": 7000,
+      "mcs": 0,
+      "40mhz": false,
+      "short_gi": true
+     }
+    },
+    {
+     "mac": "02:00:00:00:00:0B",
+     "signal": -37,
+     "signal_avg": 0,
+     "noise": 0,
+     "inactive": 0,
+     "connected_time": 164444,
+     "thr": 0,
+     "authorized": false,
+     "authenticated": false,
+     "preamble": "long",
+     "wme": false,
+     "mfp": false,
+     "tdls": false,
+     "mesh llid": 0,
+     "mesh plid": 0,
+     "mesh plink": "",
+     "mesh local PS": "",
+     "mesh peer PS": "",
+     "mesh non-peer PS": "",
+     "rx": {
+      "drop_misc": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": false,
+      "vht": false,
+      "he": false,
+      "mhz": 20,
+      "rate": 1000
+     },
+     "tx": {
+      "failed": 0,
+      "retries": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": true,
+      "vht": false,
+      "he": false,
+      "mhz": 20,
+      "rate": 28000,
+      "mcs": 3,
+      "40mhz": false,
+      "short_gi": true
+     }
+    },
+    {
+     "mac": "02:00:00:00:00:0C",
+     "signal": -21,
+     "signal_avg": 0,
+     "noise": 0,
+     "inactive": 0,
+     "connected_time": 166039,
+     "thr": 0,
+     "authorized": false,
+     "authenticated": false,
+     "preamble": "long",
+     "wme": false,
+     "mfp": false,
+     "tdls": false,
+     "mesh llid": 0,
+     "mesh plid": 0,
+     "mesh plink": "",
+     "mesh local PS": "",
+     "mesh peer PS": "",
+     "mesh non-peer PS": "",
+     "rx": {
+      "drop_misc": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": false,
+      "vht": false,
+      "he": false,
+      "mhz": 20,
+      "rate": 1000
+     },
+     "tx": {
+      "failed": 0,
+      "retries": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": false,
+      "vht": true,
+      "he": false,
+      "mhz": 20,
+      "rate": 200000,
+      "mcs": 9,
+      "nss": 2,
+      "short_gi": true
+     }
+    },
+    {
+     "mac": "02:00:00:00:00:0D",
+     "signal": -41,
+     "signal_avg": 0,
+     "noise": 0,
+     "inactive": 0,
+     "connected_time": 1816431,
+     "thr": 0,
+     "authorized": false,
+     "authenticated": false,
+     "preamble": "long",
+     "wme": false,
+     "mfp": false,
+     "tdls": false,
+     "mesh llid": 0,
+     "mesh plid": 0,
+     "mesh plink": "",
+     "mesh local PS": "",
+     "mesh peer PS": "",
+     "mesh non-peer PS": "",
+     "rx": {
+      "drop_misc": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": false,
+      "vht": false,
+      "he": false,
+      "mhz": 20,
+      "rate": 1000
+     },
+     "tx": {
+      "failed": 0,
+      "retries": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": true,
+      "vht": false,
+      "he": false,
+      "mhz": 20,
+      "rate": 7000,
+      "mcs": 0,
+      "40mhz": false,
+      "short_gi": true
+     }
+    },
+    {
+     "mac": "02:00:00:00:00:0E",
+     "signal": -34,
+     "signal_avg": 0,
+     "noise": 0,
+     "inactive": 0,
+     "connected_time": 251,
+     "thr": 0,
+     "authorized": false,
+     "authenticated": false,
+     "preamble": "long",
+     "wme": false,
+     "mfp": false,
+     "tdls": false,
+     "mesh llid": 0,
+     "mesh plid": 0,
+     "mesh plink": "",
+     "mesh local PS": "",
+     "mesh peer PS": "",
+     "mesh non-peer PS": "",
+     "rx": {
+      "drop_misc": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": false,
+      "vht": false,
+      "he": true,
+      "mhz": 20,
+      "rate": 97000,
+      "mcs": 4,
+      "nss": 2,
+      "he_gi": 1,
+      "he_dcm": 0
+     },
+     "tx": {
+      "failed": 0,
+      "retries": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": false,
+      "vht": false,
+      "he": true,
+      "mhz": 20,
+      "rate": 103000,
+      "mcs": 8,
+      "nss": 1,
+      "he_gi": 0,
+      "he_dcm": 0
+     }
+    },
+    {
+     "mac": "02:00:00:00:00:0F",
+     "signal": -37,
+     "signal_avg": 0,
+     "noise": 0,
+     "inactive": 0,
+     "connected_time": 3427,
+     "thr": 0,
+     "authorized": false,
+     "authenticated": false,
+     "preamble": "long",
+     "wme": false,
+     "mfp": false,
+     "tdls": false,
+     "mesh llid": 0,
+     "mesh plid": 0,
+     "mesh plink": "",
+     "mesh local PS": "",
+     "mesh peer PS": "",
+     "mesh non-peer PS": "",
+     "rx": {
+      "drop_misc": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": true,
+      "vht": false,
+      "he": false,
+      "mhz": 20,
+      "rate": 58000,
+      "mcs": 6,
+      "40mhz": false,
+      "short_gi": false
+     },
+     "tx": {
+      "failed": 0,
+      "retries": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": false,
+      "vht": false,
+      "he": false,
+      "mhz": 20,
+      "rate": 1000
+     }
+    }
+   ]
+  },
+  "rax0.info": {
+   "phy": "rax0",
+   "ssid": "TestNet-3",
+   "bssid": "02:00:00:00:00:05",
+   "country": "US",
+   "mode": "Master",
+   "channel": 36,
+   "frequency": 5180,
+   "txpower": 20,
+   "quality": 10,
+   "quality_max": 100,
+   "signal": -42,
+   "noise": -72,
+   "bitrate": 1201000,
+   "htmodes": [
+    "HT20",
+    "HT40",
+    "VHT20",
+    "VHT40",
+    "VHT80",
+    "VHT160",
+    "HE20",
+    "HE40",
+    "HE80",
+    "HE160"
+   ],
+   "hwmodes": [
+    "ac",
+    "ax",
+    "a",
+    "n"
+   ],
+   "hwmode": "ax",
+   "htmode": "HE80",
+   "hardware": {
+    "name": "MediaTek"
+   }
+  },
+  "rax0.assoclist": {
+   "results": [
+    {
+     "mac": "02:00:00:00:00:10",
+     "signal": -42,
+     "signal_avg": 0,
+     "noise": 0,
+     "inactive": 0,
+     "connected_time": 543356,
+     "thr": 0,
+     "authorized": false,
+     "authenticated": false,
+     "preamble": "long",
+     "wme": false,
+     "mfp": false,
+     "tdls": false,
+     "mesh llid": 0,
+     "mesh plid": 0,
+     "mesh plink": "",
+     "mesh local PS": "",
+     "mesh peer PS": "",
+     "mesh non-peer PS": "",
+     "rx": {
+      "drop_misc": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": false,
+      "vht": false,
+      "he": false,
+      "mhz": 20,
+      "rate": 6000
+     },
+     "tx": {
+      "failed": 0,
+      "retries": 0,
+      "packets": 0,
+      "bytes": 0,
+      "ht": false,
+      "vht": true,
+      "he": false,
+      "mhz": 80,
+      "rate": 130000,
+      "mcs": 3,
+      "nss": 1,
+      "short_gi": true
+     }
+    }
+   ]
+  }
+ },
+ "wireless_status": {
+  "mt798111": {
+   "up": true,
+   "pending": false,
+   "autostart": true,
+   "disabled": false,
+   "retry_setup_failed": false,
+   "config": {
+    "band": "2g",
+    "htmode": "HE40",
+    "channel": "auto",
+    "txpower": 100,
+    "country": "US",
+    "noscan": "0",
+    "hwmode": "11g",
+    "disabled": false
+   },
+   "interfaces": [
+    {
+     "section": "wifi2g",
+     "ifname": "ra0",
+     "config": {
+      "mode": "ap",
+      "ifname": "ra0",
+      "encryption": "psk2",
+      "isolate": false,
+      "hidden": false,
+      "ieee80211k": true,
+      "ssid": "TestNet-3",
+      "key": "[removed]",
+      "macaddr": "02:00:00:00:00:04",
+      "network": [
+       "lan"
+      ]
+     },
+     "vlans": [],
+     "stations": []
+    }
+   ]
+  },
+  "mt798112": {
+   "up": true,
+   "pending": false,
+   "autostart": true,
+   "disabled": false,
+   "retry_setup_failed": false,
+   "config": {
+    "band": "5g",
+    "channel": "auto",
+    "htmode": "HE80",
+    "txpower": 100,
+    "country": "US",
+    "hwmode": "11a",
+    "disabled": false
+   },
+   "interfaces": [
+    {
+     "section": "wifi5g",
+     "ifname": "rax0",
+     "config": {
+      "mode": "ap",
+      "ifname": "rax0",
+      "encryption": "psk2",
+      "isolate": false,
+      "hidden": false,
+      "ieee80211k": true,
+      "ssid": "TestNet-3",
+      "key": "[removed]",
+      "macaddr": "02:00:00:00:00:05",
+      "network": [
+       "lan"
+      ]
+     },
+     "vlans": [],
+     "stations": []
+    }
+   ]
+  }
+ },
+ "gl_clients": {
+  "clients": {
+   "02:00:00:00:00:09": {
+    "ip": "192.168.8.129",
+    "online_time": 1785028000,
+    "total_tx_init": 1090748549,
+    "total_tx": 1090749349,
+    "mac": "02:00:00:00:00:09",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "2.4G",
+    "tx": 5,
+    "online": true,
+    "rx": 2,
+    "type": 0,
+    "total_rx_init": 109135801,
+    "name": "DEFAULT",
+    "total_rx": 109136169
+   },
+   "02:00:00:00:00:0D": {
+    "ip": "192.168.8.146",
+    "online_time": 1785028910,
+    "total_tx_init": 169392915,
+    "total_tx": 169393115,
+    "mac": "02:00:00:00:00:0D",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "2.4G",
+    "tx": 3,
+    "online": true,
+    "rx": 1,
+    "type": 0,
+    "total_rx_init": 33810167,
+    "name": "DEFAULT",
+    "total_rx": 33810247
+   },
+   "02:00:00:00:00:11": {
+    "ip": "192.168.8.152",
+    "online_time": 1785183023,
+    "total_tx_init": 2687803200,
+    "total_tx": 2687803200,
+    "mac": "02:00:00:00:00:11",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "5G",
+    "tx": 0,
+    "online": false,
+    "rx": 0,
+    "type": 1,
+    "total_rx_init": 44818806908,
+    "name": "echoshow-0e1bfeaab9f21a21",
+    "total_rx": 44818806908
+   },
+   "02:00:00:00:00:12": {
+    "ip": "192.168.8.227",
+    "total_rx": 476,
+    "total_tx_init": 774,
+    "total_tx": 774,
+    "mac": "02:00:00:00:00:12",
+    "ipv6": [],
+    "last_update_rate": 1788031659,
+    "iface": "cable",
+    "tx": 0,
+    "online": false,
+    "rx": 0,
+    "type": 2,
+    "total_rx_init": 476,
+    "name": "1110-W-Ironwood-Dr-AC3",
+    "online_time": 1788031659
+   },
+   "02:00:00:00:00:13": {
+    "ip": "192.168.8.196",
+    "online_time": 1785022207,
+    "total_tx_init": 3488441706,
+    "total_tx": 3488441706,
+    "mac": "02:00:00:00:00:13",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "2.4G",
+    "tx": 0,
+    "online": false,
+    "rx": 0,
+    "type": 0,
+    "total_rx_init": 117363677390,
+    "name": "iPhone",
+    "total_rx": 117363677390
+   },
+   "02:00:00:00:00:14": {
+    "ip": "192.168.8.221",
+    "online_time": 1785000167,
+    "total_tx_init": 1830870,
+    "total_tx": 1830870,
+    "mac": "02:00:00:00:00:14",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "2.4G",
+    "tx": 0,
+    "online": false,
+    "rx": 0,
+    "type": 0,
+    "total_rx_init": 2952413,
+    "name": "Watch",
+    "total_rx": 2952413
+   },
+   "02:00:00:00:00:15": {
+    "ip": "192.168.8.193",
+    "online_time": 1785023091,
+    "total_tx_init": 0,
+    "total_tx": 0,
+    "mac": "02:00:00:00:00:15",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "5G",
+    "tx": 0,
+    "online": false,
+    "rx": 0,
+    "type": 1,
+    "total_rx_init": 0,
+    "name": "LGwebOSTV",
+    "total_rx": 0
+   },
+   "02:00:00:00:00:16": {
+    "ip": "192.168.8.182",
+    "online_time": 1785000158,
+    "total_tx_init": 2407361620,
+    "total_tx": 2407361620,
+    "mac": "02:00:00:00:00:16",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "5G",
+    "tx": 0,
+    "online": false,
+    "rx": 0,
+    "type": 1,
+    "total_rx_init": 34765274869,
+    "name": "iPhone",
+    "total_rx": 34765274869
+   },
+   "02:00:00:00:00:0C": {
+    "ip": "192.168.8.157",
+    "online_time": 1785027723,
+    "total_tx_init": 1672066646,
+    "total_tx": 3658892091,
+    "mac": "02:00:00:00:00:0C",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "2.4G",
+    "tx": 0,
+    "online": true,
+    "rx": 0,
+    "type": 0,
+    "total_rx_init": 75800827349,
+    "name": "",
+    "total_rx": 170139998672
+   },
+   "02:00:00:00:00:17": {
+    "ip": "192.168.8.166",
+    "total_rx": 7096858,
+    "total_tx_init": 921281,
+    "total_tx": 921281,
+    "mac": "02:00:00:00:00:17",
+    "ipv6": [],
+    "last_update_rate": 1788818877,
+    "iface": "5G",
+    "tx": 0,
+    "online": false,
+    "rx": 0,
+    "type": 1,
+    "total_rx_init": 7096858,
+    "name": "5CD451GYXX",
+    "online_time": 1788818877
+   },
+   "02:00:00:00:00:10": {
+    "ip": "192.168.8.132",
+    "total_rx": 15615235868,
+    "total_tx_init": 346759090,
+    "total_tx": 404416172,
+    "mac": "02:00:00:00:00:10",
+    "ipv6": [],
+    "last_update_rate": 1787631491,
+    "iface": "5G",
+    "tx": 17,
+    "online": true,
+    "rx": 4,
+    "type": 1,
+    "total_rx_init": 12099184701,
+    "name": "RokuExpress4K",
+    "online_time": 1787631491
+   },
+   "02:00:00:00:00:18": {
+    "ip": "192.168.8.180",
+    "online_time": 1753870400,
+    "total_tx_init": 39101751,
+    "total_tx": 39101751,
+    "mac": "02:00:00:00:00:18",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "5G",
+    "tx": 0,
+    "online": false,
+    "rx": 0,
+    "type": 1,
+    "total_rx_init": 193921487,
+    "name": "pop-os",
+    "total_rx": 193921487
+   },
+   "02:00:00:00:00:0E": {
+    "ip": "192.168.8.215",
+    "online_time": 1785025664,
+    "total_tx_init": 33530070982,
+    "total_tx": 33530245727,
+    "mac": "02:00:00:00:00:0E",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "2.4G",
+    "tx": 970,
+    "online": true,
+    "rx": 2980,
+    "type": 0,
+    "total_rx_init": 191116236777,
+    "name": "iPhone",
+    "total_rx": 191116773227
+   },
+   "02:00:00:00:00:0A": {
+    "ip": "192.168.8.111",
+    "online_time": 1785028160,
+    "total_tx_init": 1031396927,
+    "total_tx": 1031398527,
+    "mac": "02:00:00:00:00:0A",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "2.4G",
+    "tx": 5,
+    "online": true,
+    "rx": 2,
+    "type": 0,
+    "total_rx_init": 186121752,
+    "name": "DEFAULT",
+    "total_rx": 186122424
+   },
+   "02:00:00:00:00:0F": {
+    "ip": "192.168.8.192",
+    "online_time": 1785104141,
+    "total_tx_init": 6737312,
+    "total_tx": 6737312,
+    "mac": "02:00:00:00:00:0F",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "2.4G",
+    "tx": 0,
+    "online": true,
+    "rx": 0,
+    "type": 0,
+    "total_rx_init": 262081633,
+    "name": "",
+    "total_rx": 262081633
+   },
+   "02:00:00:00:00:19": {
+    "ip": "192.168.8.243",
+    "online_time": 1785194485,
+    "total_tx_init": 115695,
+    "total_tx": 115695,
+    "mac": "02:00:00:00:00:19",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "2.4G",
+    "tx": 0,
+    "online": false,
+    "rx": 0,
+    "type": 0,
+    "total_rx_init": 1393860,
+    "name": "Watch",
+    "total_rx": 1393860
+   },
+   "02:00:00:00:00:1A": {
+    "ip": "192.168.8.130",
+    "online_time": 1785193666,
+    "total_tx_init": 230335121,
+    "total_tx": 230335121,
+    "mac": "02:00:00:00:00:1A",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "2.4G",
+    "tx": 0,
+    "online": false,
+    "rx": 0,
+    "type": 0,
+    "total_rx_init": 3932953829,
+    "name": "iPhone",
+    "total_rx": 3932953829
+   },
+   "02:00:00:00:00:1B": {
+    "ip": "192.168.8.242",
+    "online_time": 1785006560,
+    "total_tx_init": 14109580518,
+    "total_tx": 14109580518,
+    "mac": "02:00:00:00:00:1B",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "2.4G",
+    "tx": 0,
+    "online": false,
+    "rx": 0,
+    "type": 0,
+    "total_rx_init": 83672074191,
+    "name": "iPhone",
+    "total_rx": 83672074191
+   },
+   "02:00:00:00:00:0B": {
+    "ip": "192.168.8.159",
+    "online_time": 1785029323,
+    "total_tx_init": 4024529916,
+    "total_tx": 4084956767,
+    "mac": "02:00:00:00:00:0B",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "2.4G",
+    "tx": 8,
+    "online": true,
+    "rx": 15,
+    "type": 0,
+    "total_rx_init": 383006335,
+    "name": "DEFAULT",
+    "total_rx": 388698705
+   },
+   "02:00:00:00:00:1C": {
+    "ip": "192.168.8.134",
+    "online_time": 1785017083,
+    "total_tx_init": 182398034,
+    "total_tx": 182398034,
+    "mac": "02:00:00:00:00:1C",
+    "ipv6": [],
+    "last_update_rate": 1787419733,
+    "iface": "5G",
+    "tx": 0,
+    "online": false,
+    "rx": 0,
+    "type": 1,
+    "total_rx_init": 6032631548,
+    "name": "DESKTOP-9QER6R3",
+    "total_rx": 6032631548
+   }
+  }
+ },
+ "gl_cloud": {
+  "connected": "16:23:59"
+ },
+ "modem_signal": {
+  "signals": [
+   {
+    "sinr": 10,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789514386,
+    "rsrp": -106,
+    "strength": 2,
+    "rssi": -71,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -11,
+    "mode": 51,
+    "timestamp": 1789514376,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789514366,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789514356,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789514346,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789514336,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789514326,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789514316,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -11,
+    "mode": 51,
+    "timestamp": 1789514306,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789514296,
+    "rsrp": -105,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -11,
+    "mode": 51,
+    "timestamp": 1789514286,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789514276,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789514266,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789514256,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789514246,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789514236,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789514225,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789514215,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789514205,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789514195,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789514185,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789514175,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789514165,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789514155,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789514145,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789514135,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789514125,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789514115,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 10,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789514105,
+    "rsrp": -108,
+    "strength": 2,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789514095,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789514085,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789514075,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 10,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789514065,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789514055,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789514045,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789514034,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -11,
+    "mode": 51,
+    "timestamp": 1789514024,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789514014,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789514004,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513994,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -71,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513984,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513974,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513964,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789513954,
+    "rsrp": -105,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513944,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513934,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513924,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513914,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513904,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513894,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513884,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513874,
+    "rsrp": -106,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789513864,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513854,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513843,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789513833,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513823,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -17,
+    "mode": 51,
+    "timestamp": 1789513813,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -69,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513803,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513793,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513783,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513773,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -70,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513763,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 10,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513753,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513743,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513733,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513723,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789513713,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513703,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789513693,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513683,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -16,
+    "mode": 51,
+    "timestamp": 1789513673,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 10,
+    "network_type": "NR5G-NSA",
+    "rsrq": -16,
+    "mode": 51,
+    "timestamp": 1789513663,
+    "rsrp": -108,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513652,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513642,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513632,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513622,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513612,
+    "rsrp": -106,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513602,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513592,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513582,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513572,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513562,
+    "rsrp": -106,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789513552,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513542,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 10,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513532,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513522,
+    "rsrp": -106,
+    "strength": 2,
+    "rssi": -71,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513512,
+    "rsrp": -106,
+    "strength": 2,
+    "rssi": -70,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513502,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513492,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513482,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513472,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513462,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513451,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -71,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513441,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513431,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 10,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513421,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513411,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513401,
+    "rsrp": -108,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513391,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513381,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513371,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513361,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513351,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513341,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513331,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513321,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -71,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513311,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513301,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -71,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -16,
+    "mode": 51,
+    "timestamp": 1789513291,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513281,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513271,
+    "rsrp": -108,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513260,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513250,
+    "rsrp": -108,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513240,
+    "rsrp": -108,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513230,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513220,
+    "rsrp": -108,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513210,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 13,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513200,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513190,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513180,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513170,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513160,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513150,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -71,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -16,
+    "mode": 51,
+    "timestamp": 1789513140,
+    "rsrp": -108,
+    "strength": 2,
+    "rssi": -71,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513130,
+    "rsrp": -108,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513120,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513110,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789513100,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513090,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513080,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513069,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513059,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513049,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513039,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513029,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789513019,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789513009,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512999,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 10,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789512989,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789512979,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512969,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512959,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789512949,
+    "rsrp": -106,
+    "strength": 2,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -16,
+    "mode": 51,
+    "timestamp": 1789512939,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -16,
+    "mode": 51,
+    "timestamp": 1789512929,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -71,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789512919,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789512909,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 10,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789512899,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789512889,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789512879,
+    "rsrp": -108,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -16,
+    "mode": 51,
+    "timestamp": 1789512868,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -71,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789512858,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789512848,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789512838,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512828,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789512818,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789512808,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789512798,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789512788,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789512778,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -12,
+    "mode": 51,
+    "timestamp": 1789512768,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512758,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -16,
+    "mode": 51,
+    "timestamp": 1789512748,
+    "rsrp": -108,
+    "strength": 2,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789512738,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789512728,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -16,
+    "mode": 51,
+    "timestamp": 1789512718,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -70,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512708,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512698,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512688,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -76,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512678,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -70,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512667,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -70,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512657,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -77,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512647,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 10,
+    "network_type": "NR5G-NSA",
+    "rsrq": -13,
+    "mode": 51,
+    "timestamp": 1789512637,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 12,
+    "network_type": "NR5G-NSA",
+    "rsrq": -16,
+    "mode": 51,
+    "timestamp": 1789512627,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -72,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512617,
+    "rsrp": -108,
+    "strength": 3,
+    "rssi": -74,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512607,
+    "rsrp": -106,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789512597,
+    "rsrp": -108,
+    "strength": 2,
+    "rssi": -75,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -15,
+    "mode": 51,
+    "timestamp": 1789512587,
+    "rsrp": -107,
+    "strength": 2,
+    "rssi": -70,
+    "slot": 1
+   },
+   {
+    "sinr": 11,
+    "network_type": "NR5G-NSA",
+    "rsrq": -14,
+    "mode": 51,
+    "timestamp": 1789512577,
+    "rsrp": -107,
+    "strength": 3,
+    "rssi": -73,
+    "slot": 1
+   }
+  ]
+ },
+ "luci_leases": {
+  "dhcp_leases": [
+   {
+    "expires": 10366,
+    "hostname": "Watch",
+    "macaddr": "02:00:00:00:00:14",
+    "duid": "02:00:00:00:00:1D:bf",
+    "ipaddr": "192.168.8.221"
+   },
+   {
+    "expires": 39682,
+    "macaddr": "02:00:00:00:00:0F",
+    "duid": "02:00:00:00:00:1E:db",
+    "ipaddr": "192.168.8.192"
+   },
+   {
+    "expires": 8030,
+    "hostname": "iPhone",
+    "macaddr": "02:00:00:00:00:13",
+    "duid": "02:00:00:00:00:1F:cc",
+    "ipaddr": "192.168.8.196"
+   },
+   {
+    "expires": 39678,
+    "hostname": "iPhone",
+    "macaddr": "02:00:00:00:00:0E",
+    "duid": "02:00:00:00:00:20:d8",
+    "ipaddr": "192.168.8.215"
+   },
+   {
+    "expires": 40435,
+    "hostname": "DEFAULT",
+    "macaddr": "02:00:00:00:00:09",
+    "duid": "02:00:00:00:00:21:0b",
+    "ipaddr": "192.168.8.129"
+   },
+   {
+    "expires": 42809,
+    "hostname": "DEFAULT",
+    "macaddr": "02:00:00:00:00:0A",
+    "duid": "02:00:00:00:00:22:28",
+    "ipaddr": "192.168.8.111"
+   },
+   {
+    "expires": 39037,
+    "hostname": "RokuExpress4K",
+    "macaddr": "02:00:00:00:00:10",
+    "ipaddr": "192.168.8.132"
+   },
+   {
+    "expires": 31610,
+    "hostname": "DEFAULT",
+    "macaddr": "02:00:00:00:00:0D",
+    "duid": "02:00:00:00:00:23:c6",
+    "ipaddr": "192.168.8.146"
+   },
+   {
+    "expires": 26202,
+    "hostname": "DEFAULT",
+    "macaddr": "02:00:00:00:00:0B",
+    "duid": "02:00:00:00:00:24:4a",
+    "ipaddr": "192.168.8.159"
+   }
+  ],
+  "dhcp6_leases": []
+ },
+ "leases_file": "1789524750 02:00:00:00:00:14 192.168.8.221 Watch 02:00:00:00:00:1D:bf\n1789554066 02:00:00:00:00:0F 192.168.8.192 * 02:00:00:00:00:1E:db\n1789522414 02:00:00:00:00:13 192.168.8.196 iPhone 02:00:00:00:00:1F:cc\n1789554062 02:00:00:00:00:0E 192.168.8.215 iPhone 02:00:00:00:00:20:d8\n1789554819 02:00:00:00:00:09 192.168.8.129 DEFAULT 02:00:00:00:00:21:0b\n1789557193 02:00:00:00:00:0A 192.168.8.111 DEFAULT 02:00:00:00:00:22:28\n1789553421 02:00:00:00:00:10 192.168.8.132 RokuExpress4K *\n1789545994 02:00:00:00:00:0D 192.168.8.146 DEFAULT 02:00:00:00:00:23:c6\n1789540586 02:00:00:00:00:0B 192.168.8.159 DEFAULT 02:00:00:00:00:24:4a\n",
+ "explored_summary": {
+  "modem.signal": {
+   "present": true,
+   "methods": [
+    "get_signals",
+    "upload_cloud_signals"
+   ],
+   "signatures": {
+    "get_signals": {
+     "time": "Integer"
+    },
+    "upload_cloud_signals": {
+     "action": "String"
+    }
+   }
+  },
+  "modem": {
+   "present": false,
+   "methods": null,
+   "signatures": null
+  },
+  "gl-clients": {
+   "present": true,
+   "methods": [
+    "remove_offline",
+    "sync",
+    "notify",
+    "status",
+    "list",
+    "get_speed",
+    "clean_traffic"
+   ],
+   "signatures": {
+    "remove_offline": {},
+    "sync": {},
+    "notify": {},
+    "status": {},
+    "list": {},
+    "get_speed": {},
+    "clean_traffic": {}
+   }
+  },
+  "gl-cloud": {
+   "present": true,
+   "methods": [
+    "rebind",
+    "alive",
+    "dump_features",
+    "subscribe_events_notify",
+    "set_log_level",
+    "notify-network-info",
+    "unbind",
+    "notify",
+    "bind",
+    "status",
+    "dump_subscribe_attributes"
+   ],
+   "signatures": {
+    "rebind": {
+     "token": "String",
+     "url": "String"
+    },
+    "alive": {},
+    "dump_features": {},
+    "subscribe_events_notify": {},
+    "set_log_level": {
+     "level": "Integer"
+    },
+    "notify-network-info": {},
+    "unbind": {},
+    "notify": {},
+    "bind": {
+     "token": "String",
+     "url": "String",
+     "id": "String"
+    },
+    "status": {},
+    "dump_subscribe_attributes": {}
+   }
+  },
+  "mtk-wifi": {
+   "present": true,
+   "methods": [
+    "status",
+    "setup",
+    "teardown"
+   ],
+   "signatures": {
+    "status": {},
+    "setup": {},
+    "teardown": {}
+   }
+  },
+  "repeater": {
+   "present": true,
+   "methods": [
+    "reload",
+    "surveys",
+    "set_exit",
+    "devices",
+    "exit_bare_mode",
+    "enter_bare_mode",
+    "save_config",
+    "scan",
+    "disconnect",
+    "connect",
+    "log",
+    "status"
+   ],
+   "signatures": {
+    "reload": {},
+    "surveys": {},
+    "set_exit": {
+     "exit": "Boolean"
+    },
+    "devices": {},
+    "exit_bare_mode": {},
+    "enter_bare_mode": {
+     "client_macaddr": "String"
+    },
+    "save_config": {},
+    "scan": {
+     "cached": "Boolean"
+    },
+    "disconnect": {},
+    "connect": {
+     "key": "String",
+     "ip": "String",
+     "gateway": "String",
+     "hl": "Integer",
+     "disguise": "Boolean",
+     "dns": "Array",
+     "bssid": "String",
+     "identity": "String",
+     "wds": "Boolean",
+     "protocol": "String",
+     "ssid": "String",
+     "network": "String",
+     "auto_portal": "Boolean",
+     "netmask": "String",
+     "macaddr": "String",
+     "manual": "Boolean",
+     "remember": "Boolean",
+     "hostname": "String",
+     "mtu": "Integer",
+     "ttl": "Integer"
+    },
+    "log": {
+     "level": "String"
+    },
+    "status": {}
+   }
+  },
+  "network.wireless": {
+   "present": true,
+   "methods": [
+    "up",
+    "down",
+    "reconf",
+    "status",
+    "notify",
+    "get_validate"
+   ],
+   "signatures": {
+    "up": {},
+    "down": {},
+    "reconf": {},
+    "status": {},
+    "notify": {},
+    "get_validate": {}
+   }
+  },
+  "service": {
+   "present": true,
+   "methods": [
+    "set",
+    "add",
+    "list",
+    "delete",
+    "signal",
+    "update_start",
+    "update_complete",
+    "event",
+    "validate",
+    "get_data",
+    "state",
+    "watchdog"
+   ],
+   "signatures": {
+    "set": {
+     "name": "String",
+     "script": "String",
+     "instances": "Table",
+     "triggers": "Array",
+     "validate": "Array",
+     "autostart": "Boolean",
+     "data": "Table"
+    },
+    "add": {
+     "name": "String",
+     "script": "String",
+     "instances": "Table",
+     "triggers": "Array",
+     "validate": "Array",
+     "autostart": "Boolean",
+     "data": "Table"
+    },
+    "list": {
+     "name": "String",
+     "verbose": "Boolean"
+    },
+    "delete": {
+     "name": "String",
+     "instance": "String"
+    },
+    "signal": {
+     "name": "String",
+     "instance": "String",
+     "signal": "Integer"
+    },
+    "update_start": {
+     "name": "String"
+    },
+    "update_complete": {
+     "name": "String"
+    },
+    "event": {
+     "type": "String",
+     "data": "Table"
+    },
+    "validate": {
+     "package": "String",
+     "type": "String",
+     "service": "String"
+    },
+    "get_data": {
+     "name": "String",
+     "instance": "String",
+     "type": "String"
+    },
+    "state": {
+     "spawn": "Boolean",
+     "name": "String"
+    },
+    "watchdog": {
+     "mode": "Integer",
+     "timeout": "Integer",
+     "name": "String",
+     "instance": "String"
+    }
+   }
+  }
+ }
+}

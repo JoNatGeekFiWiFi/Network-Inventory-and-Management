@@ -30,3 +30,13 @@ az_spans_*.json
 *import-ready*.xlsx
 *accounts-filled*.xlsx
 /private/
+
+# Raw device captures and probes. These come off live customer routers and contain the things that
+# makes them identifiable: the customer's SSID, every connected client's MAC, the public IP the
+# carrier assigned. The anonymised extract under test/fixtures/ is what gets committed instead.
+# Anchored to the repo root: an unanchored pattern also swallowed the anonymised fixture under
+# test/fixtures/, which is the one file here that MUST be committed.
+/capture-*.json
+/katalyst-*.json
+/probe-*.json
+!test/fixtures/
