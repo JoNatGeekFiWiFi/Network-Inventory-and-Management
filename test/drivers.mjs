@@ -187,8 +187,9 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
   });
   ok(r.ssid === 'GeekFi-5G' && r.band === '5ghz', 'the SSID and band are read');
   ok(r.encryption !== 'open', 'encryption is reported');
-  // Deliberate: iwinfo cannot return a passphrase and this driver does not go looking in UCI for one.
-  ok(r.password === '', 'no passphrase is ever returned — the read path does not touch secrets');
+  // iwinfo genuinely has no passphrase field; it is merged in from network.wireless, which is why
+  // parsing iwinfo ALONE yields none.
+  ok(r.password === '', 'parsing iwinfo alone yields no passphrase — it does not carry one');
   ok(parseIwinfo('wlan1', { frequency: 2412 }).band === '2ghz', '2.4 GHz is classified by frequency');
   ok(parseIwinfo('wlan1', {}).ssid === '', 'a radio with no SSID configured does not throw');
 
@@ -290,6 +291,31 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
 
   ok((await d.wifiClients())[0].mac === 'DE:AD:BE:EF:00:11', 'associated stations are listed');
   ok((await d.dhcpLeases())[0].address === '192.168.1.10', 'leases fall back to the file when luci-rpc is absent');
+
+  // The passphrase reaches the reveal, and never reaches storage. Both halves matter, and the
+  // second is the one that makes the first safe.
+  {
+    const CAP2 = {
+      ...CAPTURED,
+      'network.wireless.status': { mt0: { config: { band: '2g' }, interfaces: [
+        { config: { ifname: 'wlan0', ssid: 'GeekFi', encryption: 'psk2', key: 'the-real-passphrase', mode: 'ap' } }
+      ] } },
+      'iwinfo.devices': { devices: ['wlan0'] }
+    };
+    const t2 = { kind: 'test', endpoint: 't', async call(o, m) { const k = `${o}.${m}`; return k in CAP2 ? { ok: true, data: CAP2[k] } : { ok: false, code: 4, error: 'nf' }; } };
+    const d2 = createDriver({ mgmt_address: '10.0.0.5', admin_password: 'x' }, { transport: t2 });
+    const wifi = await d2.wifi();
+    const radio = wifi.radios.find(r => r.iface === 'wlan0');
+    ok(radio.password === 'the-real-passphrase', 'the reveal path gets the passphrase, as RouterOS always has');
+    ok(radio.encryption && radio.encryption !== 'open',
+      'alongside the encryption it is protecting — here iwinfo reported it, so UCI is not consulted');
+
+    // This mirrors exactly what pollViaDriver stores.
+    const stored = { system: wifi.system, radios: wifi.radios.map(r => ({ iface: r.iface, ssid: r.ssid, disabled: r.disabled, band: r.band, hasPassword: !!r.password })) };
+    ok(!JSON.stringify(stored).includes('the-real-passphrase'),
+      'but nothing resembling it survives into what the poll writes to the database');
+    ok(stored.radios[0].hasPassword === true, 'which records only that one is set');
+  }
 
   const p = await d.poll();
   ok(p.interfaces.length === 2 && p.osVersion === 'Katalyst 1.4.2', 'one poll returns everything the device page stores');
@@ -690,8 +716,23 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
     'keyed by interface name, which is how it joins to iwinfo');
   ok(conf.every(c => c.hidden === false), 'and reports whether the SSID is hidden, which iwinfo cannot');
 
-  // The key IS in this payload on a real device. Nothing here reads it, and the capture tool
-  // strips it — so it must not be in the committed fixture either.
+  // THE PASSPHRASE. Read on purpose, and an earlier version of this driver refused to — which was
+  // not a security decision but an inconsistency: the RouterOS reader has always returned it on
+  // the same NOC-only, audited endpoint, so the WiFi page worked on one platform and not the other.
+  //
+  // What keeps it contained is that it is never STORED. The poll reduces each radio to
+  // hasPassword; the secret is read on demand, by a privileged user, and logged.
+  ok('key' in conf[0], 'the configured passphrase is available to the audited reveal');
+  {
+    const withKey = parseWirelessStatus({
+      r: { config: {}, interfaces: [{ config: { ifname: 'ra0', ssid: 'X', encryption: 'psk2', key: 'hunter2' } }] }
+    });
+    ok(withKey[0].key === 'hunter2', 'and comes through when the device reports one');
+    ok(parseWirelessStatus({ r: { config: {}, interfaces: [{ config: { ifname: 'ra0', ssid: 'X' } }] } })[0].key === '',
+      'while an open network yields an empty key rather than undefined');
+  }
+
+  // The capture tool still strips it, so it cannot reach a committed fixture.
   const raw = readFileSync('test/fixtures/katalyst-k500a.json', 'utf8');
   const { auditFixture } = await import('../lib/anonymise.js');
   const leaks = auditFixture(raw);
