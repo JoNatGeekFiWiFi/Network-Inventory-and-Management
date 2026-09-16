@@ -622,12 +622,29 @@ async function pollViaDriver(d, key) {
   // brief, sharp drop lives, which is the thing worth seeing.
   let signalStored = 0;
   if (out.signal && out.signal.available && out.signal.samples.length) {
+    // `db.exec('BEGIN')`, as everywhere else in this codebase — NOT `db.transaction(fn)`, which is
+    // better-sqlite3's API and does not exist on node:sqlite. Writing it the other way threw
+    // "db.transaction is not a function" and took the whole poll down with it, after the interfaces
+    // had already been written: the device page filled in and then reported an error.
     const ins = db.prepare(`INSERT INTO cell_signal (device_id, ts, rsrp, rsrq, sinr, rssi, bars, network_type, slot)
       VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(device_id, ts) DO NOTHING`);
-    const many = db.transaction((rows) => {
-      for (const s of rows) { const r = ins.run(d.id, s.ts, s.rsrp, s.rsrq, s.sinr, s.rssi, s.bars, s.networkType, s.slot); signalStored += r.changes; }
-    });
-    try { many(out.signal.samples); } catch (e) { console.warn('cell signal store:', e.message); }
+    // The whole block is inside the try, including opening the transaction. Previously the
+    // transaction was built outside it, so the one line that actually threw was the one line the
+    // catch could not protect.
+    try {
+      db.exec('BEGIN');
+      try {
+        for (const s of out.signal.samples) {
+          signalStored += ins.run(d.id, s.ts, s.rsrp, s.rsrq, s.sinr, s.rssi, s.bars, s.networkType, s.slot).changes;
+        }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+    } catch (e) {
+      // Signal history is a nice-to-have. Losing it must never cost the poll, which is what
+      // actually keeps the device's ports, addresses and reachability current.
+      signalStored = 0;
+      console.warn(`cell signal store for device ${d.id}:`, e.message);
+    }
   }
 
   let setPublic = null, setMgmt = null, target = null;

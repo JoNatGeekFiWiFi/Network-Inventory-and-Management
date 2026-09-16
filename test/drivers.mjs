@@ -912,6 +912,99 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
   const katRead = (await call('/api/devices/' + kat)).json;
   ok(katRead.platform === 'openwrt' && katRead.caps.interfaces, 'a device created from the catalog entry is set up to poll as OpenWrt');
 
+  // ---- cellular signal STORAGE, not just parsing ------------------------------------------------
+  //
+  // The parsers were well covered and the code that writes their output to the database was not,
+  // because no test ever polled a device with a modem. It shipped using `db.transaction(fn)` —
+  // better-sqlite3's API, which node:sqlite does not have — and threw "db.transaction is not a
+  // function" on the first real Katalyst poll. The interfaces had already been written, so the page
+  // filled in and then showed an error, which is a confusing way to find out.
+  //
+  // So the write path is exercised here against a real database, using the same statements.
+  {
+    const { DatabaseSync } = await import('node:sqlite');
+    const mem = new DatabaseSync(':memory:');
+    mem.exec(`CREATE TABLE cell_signal (device_id INTEGER NOT NULL, ts TEXT NOT NULL,
+      rsrp REAL, rsrq REAL, sinr REAL, rssi REAL, bars INTEGER, network_type TEXT, slot INTEGER,
+      PRIMARY KEY (device_id, ts))`);
+
+    const ins = mem.prepare(`INSERT INTO cell_signal (device_id, ts, rsrp, rsrq, sinr, rssi, bars, network_type, slot)
+      VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(device_id, ts) DO NOTHING`);
+    const { parseModemSignal } = await import('../lib/drivers/openwrt.js');
+    // Read the fixture here rather than reusing the earlier block's `cap`, which is scoped to it.
+    const fixtureSig = parseModemSignal(
+      JSON.parse(readFileSync('test/fixtures/katalyst-k500a.json', 'utf8')).modem_signal
+    );
+
+    const store = (samples) => {
+      let n = 0;
+      mem.exec('BEGIN');
+      try {
+        for (const s of samples) n += ins.run(1, s.ts, s.rsrp, s.rsrq, s.sinr, s.rssi, s.bars, s.networkType, s.slot).changes;
+        mem.exec('COMMIT');
+      } catch (e) { mem.exec('ROLLBACK'); throw e; }
+      return n;
+    };
+
+    const first = store(fixtureSig.samples);
+    ok(first === fixtureSig.samples.length, `all ${first} samples from a real device store`);
+
+    // THE POINT OF THE PRIMARY KEY. Polls overlap heavily — the modem holds half an hour and the
+    // platform polls every minute — so the same samples arrive again and again. Without the
+    // conflict clause one device would accumulate thirty duplicate rows per minute.
+    const second = store(fixtureSig.samples);
+    ok(second === 0, 're-storing the same half hour inserts nothing, so overlapping polls do not duplicate');
+    const total = mem.prepare('SELECT COUNT(*) n FROM cell_signal').get().n;
+    ok(total === fixtureSig.samples.length, 'and the row count is unchanged');
+
+    // A newer sample alongside old ones inserts only the new one.
+    const newer = [{ ts: new Date(Date.now() + 60000).toISOString(), rsrp: -99, rsrq: -12, sinr: 14, rssi: -70, bars: 3, networkType: 'NR5G-NSA', slot: 1 }];
+    ok(store([...fixtureSig.samples, ...newer]) === 1, 'a later poll stores only what is genuinely new');
+
+    // Partial samples must not break the insert — a build reporting only RSSI still stores.
+    ok(store([{ ts: '2026-01-01T00:00:00.000Z', rsrp: null, rsrq: null, sinr: null, rssi: -70, bars: null, networkType: null, slot: null }]) === 1,
+      'a sample with null metrics stores rather than throwing');
+
+    const back = mem.prepare('SELECT rsrp, network_type FROM cell_signal WHERE device_id=1 AND rsrp IS NOT NULL ORDER BY ts DESC LIMIT 1').get();
+    ok(back.rsrp === -99 && back.network_type === 'NR5G-NSA', 'and the values read back as stored');
+  }
+
+  // The whole class of bug: better-sqlite3 idioms in a node:sqlite codebase. `db.transaction(fn)`
+  // looks right, is widely documented, and does not exist here — it only fails when the line runs.
+  {
+    const files = ['server.js', 'db.js', 'domains/network.js', 'domains/importwiz.js', 'domains/billing.js',
+                   'domains/fiber.js', 'domains/support.js', 'domains/mobile.js', 'domains/wireguard.js',
+                   'domains/locate.js', 'domains/search.js', 'auth.js'];
+
+    // Comments are stripped first. Both of these checks failed on their own first run — one matched
+    // the comment explaining the rule, the other matched `express.raw()`, which is ordinary
+    // middleware. A check that cries wolf gets switched off, so it has to look at code.
+    const code = (f) => readFileSync(f, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')       // block comments
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');     // line comments, without eating https://
+
+    const offenders = files.filter(f => /\bdb\.transaction\s*\(/.test(code(f)));
+    ok(offenders.length === 0,
+      `no file calls db.transaction() — better-sqlite3's API, absent from node:sqlite${offenders.length ? ' (' + offenders.join(', ') + ')' : ''}`);
+
+    // The other better-sqlite3 statement methods that do not exist here. `.raw(` is deliberately
+    // NOT checked: express.raw() is legitimate and shares the name.
+    const others = files.filter(f => /\.(pluck|iterate|safeIntegers)\s*\(/.test(code(f)));
+    ok(others.length === 0, `nor .pluck()/.iterate()/.safeIntegers()${others.length ? ' (' + others.join(', ') + ')' : ''}`);
+  }
+
+  // ---- the signal endpoint ----------------------------------------------------------------------
+  {
+    const r = await call('/api/devices/' + kat + '/signal?range=24h');
+    ok(r.status === 200, 'the signal endpoint answers for a device with no history yet');
+    ok(r.json.total === 0 && Array.isArray(r.json.points), 'reporting nothing rather than erroring');
+    ok(r.json.latest === null, 'with no latest reading');
+
+    await login('support@geekitek.test', 'support123');
+    ok((await call('/api/devices/' + kat + '/signal')).status === 403, 'and it is NOC-only');
+    await login('admin@geekitek.test', 'admin123');
+  }
+
   for (const id of [ow, un, ros, noAddr, kat]) await call('/api/devices/' + id, { method: 'DELETE' });
 }
 
