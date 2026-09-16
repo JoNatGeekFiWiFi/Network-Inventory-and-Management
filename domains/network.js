@@ -8,6 +8,8 @@ import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync, copy
 import { join, extname } from "node:path";
 import net from "node:net";
 import { r2 } from "../lib/core.js";
+import { platformOf, driverFor, can } from "../lib/drivers/index.js";
+import { sshExec } from "../lib/sshexec.js";
 
 export default function registerNetwork(app, ctx) {
   const { db, N, audit, requireNoc, isPriv, role, getSetting, setSetting,
@@ -1094,48 +1096,102 @@ export default function registerNetwork(app, ctx) {
   }
 
   const _lastCtr = new Map(); // device:iface -> {rx,tx,t}
-  async function sampleDevice(d) {
-    const user = d.admin_username || 'admin';
-    const H = { Authorization: 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64'), Accept: 'application/json' };
-    const now = Date.now(), ts = new Date(now).toISOString();
-    // traffic from interface byte counters
-    const r = await restReq(d.mgmt_address, '/rest/interface', { headers: H, timeoutMs: 7000 });
-    if (r.status < 400) {
-      let arr; try { arr = JSON.parse(r.body); } catch { arr = null; }
-      if (Array.isArray(arr)) for (const i of arr) {
-        const rx = Number(i['rx-byte'] ?? i['rx-bytes']), tx = Number(i['tx-byte'] ?? i['tx-bytes']);
-        if (!isFinite(rx) || !isFinite(tx)) continue;
-        const key = d.id + ':' + i.name, prev = _lastCtr.get(key);
-        _lastCtr.set(key, { rx, tx, t: now });
-        if (prev) { const dt = (now - prev.t) / 1000; if (dt > 0 && rx >= prev.rx && tx >= prev.tx) {
-          db.prepare('INSERT INTO iface_traffic (device_id,iface,ts,rx_bps,tx_bps) VALUES (?,?,?,?,?)')
-            .run(d.id, i.name, ts, Math.round((rx - prev.rx) * 8 / dt), Math.round((tx - prev.tx) * 8 / dt));
-        } }
+  /**
+   * Turn raw byte counters into a bits-per-second sample.
+   *
+   * Shared by every platform, because the arithmetic is the same everywhere and only the source of
+   * the counters differs. The counters themselves are cumulative, so a sample needs the previous
+   * reading; a counter that went BACKWARDS means the device rebooted or the counter wrapped, and
+   * that interval is dropped rather than recorded as a huge negative-turned-positive spike.
+   */
+  function recordCounters(d, counters, now, ts) {
+    const ins = db.prepare('INSERT INTO iface_traffic (device_id,iface,ts,rx_bps,tx_bps) VALUES (?,?,?,?,?)');
+    for (const c of counters) {
+      const rx = Number(c.rxBytes), tx = Number(c.txBytes);
+      if (!c.name || !isFinite(rx) || !isFinite(tx)) continue;
+      const key = d.id + ':' + c.name, prev = _lastCtr.get(key);
+      _lastCtr.set(key, { rx, tx, t: now });
+      if (!prev) continue;
+      const dt = (now - prev.t) / 1000;
+      if (dt > 0 && rx >= prev.rx && tx >= prev.tx) {
+        ins.run(d.id, c.name, ts, Math.round((rx - prev.rx) * 8 / dt), Math.round((tx - prev.tx) * 8 / dt));
       }
     }
-    // WAN latency via router ping
-    try {
-      const rp = await restReq(d.mgmt_address, '/rest/ping', { headers: H, method: 'POST', body: { address: '8.8.8.8', count: '3' }, timeoutMs: 7000 });
-      if (rp.status < 400) {
-        const p = JSON.parse(rp.body);
-        const times = (Array.isArray(p) ? p : []).map(x => parseRtt(x.time)).filter(v => v != null);
-        if (times.length) db.prepare('INSERT INTO dev_latency (device_id,ts,ms) VALUES (?,?,?)').run(d.id, ts, Math.round(times.reduce((a, b) => a + b, 0) / times.length * 100) / 100);
-      }
-    } catch {}
+  }
+
+  /** RouterOS counters, unchanged — the field names are RouterOS's own. */
+  async function rosCounters(d) {
+    const H = rosHeaders(d);
+    const r = await restReq(d.mgmt_address, '/rest/interface', { headers: H, timeoutMs: 7000 });
+    if (r.status >= 400) return [];
+    let arr; try { arr = JSON.parse(r.body); } catch { return []; }
+    return (Array.isArray(arr) ? arr : []).map(i => ({
+      name: i.name, rxBytes: Number(i['rx-byte'] ?? i['rx-bytes']), txBytes: Number(i['tx-byte'] ?? i['tx-bytes'])
+    }));
+  }
+
+  async function rosLatency(d) {
+    const H = rosHeaders(d);
+    const rp = await restReq(d.mgmt_address, '/rest/ping', { headers: H, method: 'POST', body: { address: '8.8.8.8', count: '3' }, timeoutMs: 7000 });
+    if (rp.status >= 400) return null;
+    const p = JSON.parse(rp.body);
+    const times = (Array.isArray(p) ? p : []).map(x => parseRtt(x.time)).filter(v => v != null);
+    if (!times.length) return null;
+    return Math.round(times.reduce((a, b) => a + b, 0) / times.length * 100) / 100;
+  }
+
+  /**
+   * Sample one device's traffic and WAN latency.
+   *
+   * This used to be RouterOS REST outright, which is why an OpenWrt device polled perfectly and
+   * still had two empty graphs: the sampler asked it for /rest/interface every minute and got the
+   * vendor's HTML back. It now dispatches the same way polling does.
+   */
+  async function sampleDevice(d) {
+    const key = platformOf(d);
+    if (key === 'unknown') return;                 // nothing to ask, and asking wastes a minute
+    const now = Date.now(), ts = new Date(now).toISOString();
+
+    let counters = [], ms = null;
+    if (key === 'routeros') {
+      counters = await rosCounters(d);
+      try { ms = await rosLatency(d); } catch {}
+    } else {
+      const driver = await driverFor(d, { sshExec });
+      if (driver.counters) counters = await driver.counters();
+      // Latency is best-effort and must not cost the traffic sample: on a device where ping is
+      // missing or blocked, the byte counters are still worth having.
+      if (driver.latency) { try { ms = await driver.latency(); } catch {} }
+    }
+
+    recordCounters(d, counters, now, ts);
+    if (ms != null) db.prepare('INSERT INTO dev_latency (device_id,ts,ms) VALUES (?,?,?)').run(d.id, ts, ms);
   }
   let _sampling = false, _tickN = 0, _lastPushedSig = null;
   const blocklistSig = () => activeBlockIps().join(',');
   async function sampleTick() {
     if (_sampling) return; _sampling = true; _tickN++;
     try {
-      const devs = db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
+      const devs = db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND COALESCE(platform,'routeros')<>'unknown' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
       // every minute: sample traffic/latency + harvest failed-login IPs
-      for (const d of devs) { try { await sampleDevice(d); await harvestThreats(d); } catch {} }
+      //
+      // Threat harvesting is gated on the capability rather than attempted and caught. Attempting
+      // it against an OpenWrt device costs an 8-second timeout, every minute, for every such device
+      // — a cost that grows with the fleet and buys nothing, since the log formats differ and a
+      // regex that half-works would feed wrong addresses into a blocklist pushed to every router.
+      for (const d of devs) {
+        try {
+          await sampleDevice(d);
+          if (can(d, 'logRead') && platformOf(d) === 'routeros') await harvestThreats(d);
+        } catch {}
+      }
       // auto-push the blocklist when it changed (or every 10 min to repair drift)
       if (process.env.AUTO_PUSH !== 'off') {
         const sig = blocklistSig();
         if (sig && (sig !== _lastPushedSig || _tickN % 10 === 0)) {
-          for (const d of devs) { try { await pushBlocklistToDevice(d); } catch {} }
+          // Only to devices that can actually take it. Pushing an address-list to a box with no
+          // address-lists is a guaranteed failure on a timer.
+          for (const d of devs.filter(x => can(x, 'blocklistPush'))) { try { await pushBlocklistToDevice(d); } catch {} }
           _lastPushedSig = sig;
         }
       }

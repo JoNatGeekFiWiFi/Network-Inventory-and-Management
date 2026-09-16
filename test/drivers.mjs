@@ -309,6 +309,81 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
   ok(err && /permission denied/i.test(err.message), 'a denied interface read is an error, not an empty port list');
 }
 
+// ---- telemetry: the two graphs that stayed empty ------------------------------------------------
+//
+// An OpenWrt device polled perfectly and still showed no traffic and no latency, because the
+// sampler was RouterOS REST outright — it asked the Katalyst for /rest/interface every minute and
+// got the vendor's HTML page back. And the ZeroTier interface showed no address, because ZeroTier
+// assigns its own outside UCI, so `network.interface dump` genuinely does not have it.
+{
+  const { parseIpAddr, parsePingMs, createDriver } = await import('../lib/drivers/openwrt.js');
+
+  // Kernel addresses. The line that matters is the last one.
+  const addrs = parseIpAddr([
+    '1: lo    inet 127.0.0.1/8 scope host lo',
+    '2: br-lan    inet 192.168.8.1/24 brd 192.168.8.255 scope global br-lan',
+    '8: rmnet_mhi0    inet 97.202.242.70/30 scope global rmnet_mhi0',
+    '9: zt44xiyxyh    inet 10.241.80.78/16 brd 10.241.255.255 scope global zt44xiyxyh'
+  ].join('\n'));
+  ok(addrs['zt44xiyxyh'][0] === '10.241.80.78',
+    'the ZeroTier address is read from the kernel — UCI never had it, which is why the field was blank');
+  ok(addrs['br-lan'][0] === '192.168.8.1', 'and ordinary interfaces still come through');
+  ok(!addrs.lo, 'loopback is skipped');
+  ok(Object.keys(parseIpAddr('')).length === 0, 'empty output is empty, not a crash');
+
+  // Ping. busybox is what OpenWrt ships, and it formats differently from iputils.
+  ok(parsePingMs('round-trip min/avg/max = 23.4/24.1/25.0 ms') === 24.1, "busybox's summary line parses");
+  ok(parsePingMs('rtt min/avg/max/mdev = 23.4/24.1/25.0/0.6 ms') === 24.1, "as does iputils' four-value form");
+  ok(parsePingMs('64 bytes from 8.8.8.8: seq=0 ttl=117 time=20.0 ms\n64 bytes from 8.8.8.8: seq=1 ttl=117 time=30.0 ms') === 25,
+    'and with no summary at all, the individual replies are averaged');
+  ok(parsePingMs('PING 8.8.8.8: 56 data bytes\n\n--- 8.8.8.8 ping statistics ---\n3 packets transmitted, 0 received') === null,
+    'a ping where nothing came back is null — not zero, which would read as a perfect link');
+  ok(parsePingMs('') === null && parsePingMs(null) === null, 'and no output is null');
+
+  // The driver methods the sampler calls.
+  const status = {
+    'br-lan': { up: true, carrier: true, macaddr: 'aa:bb:cc:00:00:01', statistics: { rx_bytes: 1000, tx_bytes: 2000 } },
+    'rmnet_mhi0': { up: true, carrier: true, statistics: { rx_bytes: 5000, tx_bytes: 6000 } },
+    'lo': { up: true, carrier: true, statistics: { rx_bytes: 1, tx_bytes: 1 } }
+  };
+  let ran = [];
+  const t = {
+    kind: 'ssh', endpoint: 'ssh://test',
+    async call(o, m) { return o === 'network.device' && m === 'status' ? { ok: true, data: status } : { ok: false, code: 4, error: 'not found' }; },
+    async run(argv) {
+      ran.push(argv.join(' '));
+      if (argv[0] === 'ip') return { ok: true, data: '9: zt44xiyxyh    inet 10.241.80.78/16 scope global zt44xiyxyh' };
+      // Non-zero exit with usable output: busybox ping does exactly this when a packet is lost.
+      if (argv[0] === 'ping') return { ok: false, error: 'exited 1', data: '2 packets received\nround-trip min/avg/max = 18.2/19.5/21.0 ms' };
+      return { ok: false, data: '', error: 'no' };
+    }
+  };
+  const drv = createDriver({ mgmt_address: '10.241.80.78', admin_password: 'x' }, { transport: t });
+
+  const ctrs = await drv.counters();
+  ok(ctrs.length === 2, 'counters come back for the real ports (loopback excluded)');
+  ok(ctrs.find(c => c.name === 'rmnet_mhi0').rxBytes === 5000, 'with byte counts the sampler can difference');
+
+  const ms = await drv.latency();
+  ok(ms === 19.5, 'latency parses even though busybox ping exited non-zero after losing a packet');
+  ok(ran.some(c => c.startsWith('ping -c 3')), 'and it pings FROM the device, which is what measures the customer WAN');
+  ok(await drv.latency('; reboot') === null, 'a crafted ping target is refused rather than run');
+
+  const { interfaces } = await drv.interfaces();
+  const zt = interfaces.find(i => i.name === 'zt44xiyxyh');
+  ok(!zt, 'an interface the kernel knows but ubus does not is not invented');
+  const brlan = interfaces.find(i => i.name === 'br-lan');
+  ok(brlan && Array.isArray(brlan.ips), 'the merge runs without the kernel read breaking it');
+  ok(ran.some(c => c === 'ip -o -4 addr'), 'and the kernel address read is actually attempted');
+
+  // A transport with no shell (HTTP-only) must still work, just without the extras.
+  const httpOnly = createDriver({ mgmt_address: '10.0.0.1', admin_password: 'x' }, {
+    transport: { kind: 'http', endpoint: 'http://x', async call(o, m) { return o === 'network.device' ? { ok: true, data: status } : { ok: false, code: 4, error: 'nf' }; } }
+  });
+  ok((await httpOnly.counters()).length === 2, 'counters work over HTTP too');
+  ok(await httpOnly.latency() === null, 'and latency degrades to null rather than throwing when there is no shell');
+}
+
 // ---- the prober --------------------------------------------------------------------------------
 {
   const noSsh = async () => ({ ok: false, error: 'refused', unreachable: true, stdout: '' });
