@@ -416,7 +416,9 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
   // DEFECT 1: "not a 404" was treated as "the ubus endpoint is there". The Spark's web UI answers
   // every unknown path with its own HTML, so the report said "the endpoint exists but login
   // failed" — pointing at the password, when the endpoint was never installed.
-  const spark = await probeDevice({ host: '10.241.80.78', username: 'root', password: 'x' }, {
+  // Saved as `admin` on purpose: that is what the device form pre-fills, and reproducing it here
+  // is what makes the username mismatch below a real regression test rather than a hypothetical.
+  const spark = await probeDevice({ host: '10.241.80.78', username: 'admin', password: 'x' }, {
     tcpProbe: openOnly([22, 80, 443, 8080, 8443]),
     httpRequest: async () => ({ status: 200, body: '<!DOCTYPE html><html><head><title>Spark</title></head><body>…</body></html>' }),
     sshExec: async ({ argv }) => {
@@ -447,6 +449,29 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
   // The transport has to be REMEMBERED. Otherwise this device eats an HTTP timeout every minute.
   ok(spark.apply.mgmt_transport === 'ssh', 'the probe records that this device is reachable over SSH');
   ok(spark.apply.platform === 'openwrt', 'alongside the platform');
+
+  // THE USERNAME. Identify logs into a non-MikroTik device as root; the device form pre-fills
+  // `admin`, which is right for RouterOS. The result in production was an Identify that reported
+  // the device perfectly beside a poll that failed with "SSH rejected the username or password" —
+  // the two halves of one screen authenticating as different accounts.
+  ok(spark.apply.admin_username === 'root', 'the probe reports which username actually worked');
+  const note = spark.findings.find(f => /ubus over SSH/.test(f.check));
+  ok(note.user === 'root' && note.usernameDiffers === true,
+    'and flags that it differs from the one the device is saved with');
+  ok(/will not work/.test(note.detail) && /root/.test(note.detail),
+    'saying so in words, because a probe that succeeds otherwise looks like proof that polling will');
+
+  // When they already agree, no correction is implied.
+  const agreeing = await probeDevice({ host: '10.241.80.79', username: 'root', password: 'x' }, {
+    tcpProbe: openOnly([22]),
+    httpRequest: async () => ({ status: 0, body: '' }),
+    sshExec: async ({ argv }) => argv[1] === 'list'
+      ? { ok: true, stdout: 'system\nnetwork.device' }
+      : { ok: true, stdout: JSON.stringify(board) }
+  });
+  ok(agreeing.apply.admin_username === 'root', 'a device already saved as root still reports root');
+  ok(agreeing.findings.find(f => /ubus over SSH/.test(f.check)).usernameDiffers === false,
+    'without claiming anything needs changing');
 
   // And a device that genuinely has ubus over HTTP must still say so.
   const withHttp = await probeDevice({ host: '10.0.0.2', username: 'root', password: 'x' }, {

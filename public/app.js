@@ -1712,6 +1712,19 @@ function platformChanged() {
         ? 'DD-WRT is reached over SSH, which is off by default — enable it under Services → Secure Shell before this will work.'
         : 'The admin login is what polls the device for its live ports.';
   }
+
+  // Move the admin username to this platform's account, unless somebody has typed their own.
+  //
+  // The form used to pre-fill "admin" for everything, which is right for RouterOS and wrong for
+  // OpenWrt, where it is root. The result was the worst kind of failure: Identify logged in as root
+  // and reported the device correctly, then every poll authenticated as admin and was rejected — two
+  // parts of the same screen disagreeing about who to be.
+  const u = view().querySelector('#f [name=admin_username]');
+  if (u) {
+    const DEFAULTS = { routeros: 'admin', openwrt: 'root', ddwrt: 'root' };
+    const isUntouched = Object.values(DEFAULTS).includes(u.value) || !u.value.trim();
+    if (isUntouched && DEFAULTS[p.key]) u.value = DEFAULTS[p.key];
+  }
 }
 function setDest(t) { $('input[name=assigned_type]').value = t; $('#dt-site').classList.toggle('on', t === 'site'); $('#dt-pop').classList.toggle('on', t === 'pop'); $('#destSite').style.display = t === 'site' ? 'block' : 'none'; $('#destPop').style.display = t === 'pop' ? 'block' : 'none'; }
 async function saveDevice(id) {
@@ -2573,10 +2586,19 @@ async function probeDevice(id) {
     // Offered rather than applied. Changing a device's platform changes how it is managed, and
     // that is a decision, not a side effect of asking a question.
     const ap = r.apply || {};
-    const needsChange = r.suggested && (r.suggested !== r.current_platform || ap.mgmt_transport !== r.current_transport);
+    const userWrong = ap.admin_username && r.current_username && ap.admin_username !== r.current_username;
+    const needsChange = r.suggested &&
+      (r.suggested !== r.current_platform || ap.mgmt_transport !== r.current_transport || userWrong);
+    const bits = [];
+    if (r.suggested !== r.current_platform) bits.push(esc(r.suggested));
+    if (ap.mgmt_transport && ap.mgmt_transport !== 'auto') bits.push('over ' + esc(ap.mgmt_transport.toUpperCase()));
+    if (userWrong) bits.push('as ' + esc(ap.admin_username));
     const action = needsChange
-      ? `<div style="padding:10px 14px"><button class="btn sm primary" onclick="applyProbe(${id},'${esc(r.suggested)}','${esc(ap.mgmt_transport || 'auto')}')">
-           <i class="ti ti-check"></i> Set to ${esc(r.suggested)}${ap.mgmt_transport && ap.mgmt_transport !== 'auto' ? ` over ${esc(ap.mgmt_transport.toUpperCase())}` : ''}</button></div>`
+      ? `${userWrong ? `<div class="row" style="background:var(--warn-bg,transparent)"><i class="ti ti-alert-triangle"></i>
+           <div class="small">This device is saved with the username <span class="mono">${esc(r.current_username)}</span>, but it answers as
+           <span class="mono">${esc(ap.admin_username)}</span>. That is why polling fails even though Identify works.</div></div>` : ''}
+         <div style="padding:10px 14px"><button class="btn sm primary" onclick="applyProbe(${id},'${esc(r.suggested)}','${esc(ap.mgmt_transport || 'auto')}','${esc(ap.admin_username || '')}')">
+           <i class="ti ti-check"></i> Set ${bits.length ? bits.join(' ') : 'as found'}</button></div>`
       : r.suggested
         ? `<div class="help" style="padding:10px 14px">Already set to ${esc(r.suggested)} — nothing to change.</div>`
         : '';
@@ -2595,11 +2617,15 @@ async function probeDevice(id) {
  * Saves the transport as well as the platform. That is not a detail: a device reachable only over
  * SSH, left on 'auto', waits out an HTTP timeout before every single poll — once a minute, forever.
  */
-async function applyProbe(id, platform, mgmt_transport) {
+async function applyProbe(id, platform, mgmt_transport, admin_username) {
   try {
     const d = await api('/devices/' + id);
-    await api('/devices/' + id, { method: 'PUT', body: { ...d, platform, mgmt_transport } });
-    toast(`Set to ${platform}${mgmt_transport && mgmt_transport !== 'auto' ? ' over ' + mgmt_transport.toUpperCase() : ''}`);
+    const body = { ...d, platform, mgmt_transport };
+    // The username too. Without it, Identify keeps reporting success while every poll fails,
+    // because the two authenticate as different accounts.
+    if (admin_username) body.admin_username = admin_username;
+    await api('/devices/' + id, { method: 'PUT', body });
+    toast(`Set to ${platform}${mgmt_transport && mgmt_transport !== 'auto' ? ' over ' + mgmt_transport.toUpperCase() : ''}${admin_username ? ' as ' + admin_username : ''}`);
     renderDevice(id);
   } catch (e) { toast(e.message); }
 }

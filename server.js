@@ -814,7 +814,15 @@ app.post('/api/devices/:id/probe', requireNoc, async (req, res) => {
     { tcpProbe, httpRequest: probeHttp, sshExec }
   );
   audit(req, 'poll', 'device#' + d.id, `probed ${d.mgmt_address}: ${result.suggested || 'no platform identified'}`);
-  res.json({ ...result, current_platform: platformOf(d), current_transport: d.mgmt_transport || 'auto' });
+  res.json({
+    ...result,
+    current_platform: platformOf(d),
+    current_transport: d.mgmt_transport || 'auto',
+    // Sent so the page can compare what the device is SAVED with against what actually answered.
+    // A username mismatch is invisible otherwise, and produces an Identify that succeeds beside a
+    // poll that fails.
+    current_username: d.admin_username || null
+  });
 });
 
 /** Is anything listening? Short timeout: the prober knocks on six ports at once. */
