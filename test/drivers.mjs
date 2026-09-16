@@ -670,6 +670,60 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
   ok(/^(HT|VHT|HE|EHT)\d+/.test(ra0.width), `and the channel width (${ra0.width}), which support gets asked about`);
   ok(parseIwinfo('rax0', cap.iwinfo['rax0.info']).band === '5ghz', 'and the 5 GHz radio is on 5 GHz');
 
+  // 6b. WHICH SSIDs ARE ACTUALLY ON THE AIR.
+  //
+  // Confirmed against the owner's own knowledge of these units: the factory SSIDs on ra1/rax1 are
+  // not broadcasting. Two independent signals in the capture agree — neither interface appears in
+  // network.wireless status (not configured in UCI) nor in network.device status (no kernel
+  // interface up). iwinfo lists them anyway, because the MediaTek driver pre-creates every virtual
+  // AP whether or not anything uses it.
+  {
+    // Imported here: the later block's `const parseWirelessStatus` is in the same scope and would
+    // otherwise be referenced before its own initialisation.
+    const wl = await import('../lib/drivers/openwrt.js');
+    const upIfaces = new Set(Object.keys(cap.device_status));
+    const inUci = new Set(wl.parseWirelessStatus(cap.wireless_status).map(c => c.iface));
+
+    ok(upIfaces.has('ra0') && upIfaces.has('rax0'), 'the customer radios are up in the kernel');
+    ok(!upIfaces.has('ra1') && !upIfaces.has('rax1'),
+      'the factory-default radios are NOT up — which is the decisive signal, and matches the owner');
+    ok(inUci.has('ra0') && !inUci.has('ra1'), 'and UCI manages only the configured pair, agreeing independently');
+
+    // iwinfo is what made them look real, so the trap is worth pinning.
+    ok(cap.iwinfo['ra1.info'].ssid && cap.iwinfo['ra1.info'].mode === 'Master',
+      'iwinfo reports the dormant radio with an SSID and Master mode — indistinguishable from a live one');
+    ok(cap.iwinfo['ra1.info'].bssid, 'it even has a BSSID, so nothing about iwinfo alone gives it away');
+
+    // Which is why the kernel is consulted rather than iwinfo trusted.
+    const CAP3 = {
+      'iwinfo.devices': { devices: ['ra0', 'ra1'] },
+      'iwinfo.info': cap.iwinfo['ra0.info'],
+      'network.wireless.status': cap.wireless_status,
+      'network.device.status': cap.device_status
+    };
+    const t3 = { kind: 't', endpoint: 't', async call(o, m) { const k = `${o}.${m}`; return k in CAP3 ? { ok: true, data: CAP3[k] } : { ok: false, code: 4, error: 'nf' }; } };
+    const d3 = createDriver({ mgmt_address: '10.0.0.9', admin_password: 'x' }, { transport: t3 });
+    const w3 = await d3.wifi();
+    const r0 = w3.radios.find(r => r.iface === 'ra0'), r1 = w3.radios.find(r => r.iface === 'ra1');
+    ok(r0.broadcasting === true, 'the live radio is reported as broadcasting');
+    ok(r1.broadcasting === false, 'and the dormant one is not');
+    ok(r1.disabled === true, 'which also marks it disabled, so existing UI does not show it as normal');
+    ok(r1.configured === false, 'with "not configured" recorded separately — a different question from "not on"');
+    ok(w3.broadcasting === 1, 'and the count reflects what is on the air, not what the driver exposes');
+
+    // When the kernel cannot be read, guessing is worse than admitting it.
+    const t4 = { kind: 't', endpoint: 't', async call(o, m) {
+      const k = `${o}.${m}`;
+      if (o === 'network.device') return { ok: false, code: 6, error: 'permission denied' };
+      return k in CAP3 ? { ok: true, data: CAP3[k] } : { ok: false, code: 4, error: 'nf' };
+    } };
+    const w4 = await createDriver({ mgmt_address: '10.0.0.9', admin_password: 'x' }, { transport: t4 }).wifi();
+    ok(w4.radios.every(r => r.broadcasting === null),
+      'with no kernel view, broadcasting is unknown rather than assumed either way');
+    ok(!w4.radios.some(r => r.disabled === true && r.broadcasting === null),
+      'and nothing is marked disabled on the strength of a reading that failed');
+  }
+
   // 6. SIX RADIOS, TWO REAL. apcli0/apclix0 are the repeater client side with no SSID at all.
   const allRadios = cap.iwinfo_devices.devices.map(n => parseIwinfo(n, cap.iwinfo[n + '.info']));
   ok(allRadios.length === 6, 'this device exposes six radios');

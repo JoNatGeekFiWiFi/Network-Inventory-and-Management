@@ -1090,8 +1090,15 @@ async function renderDevice(id) {
   const wifiCard = (d.management_mode === 'provider' || !isPriv() || !capable('wifiRead') || !wifi || !wifi.radios || !wifi.radios.length) ? '' : `
     <div class="card"><a class="row rowlink" href="#/device/${d.id}/wifi">
       <i class="ti ti-wifi sec-muted"></i>
-      <div style="flex:1;min-width:0"><div>WiFi${wifi.radios.length > 1 ? ' · ' + wifi.radios.length + ' SSIDs' : ''}</div>
-        <div class="small sec-muted">${esc(wifi.radios.map(r => r.ssid || '(no SSID)').join(', '))} · clients, signal &amp; settings</div></div>
+      <div style="flex:1;min-width:0"><div>WiFi${(() => {
+        // Count what is ON THE AIR, not what the driver happens to expose. This hardware creates a
+        // virtual AP per radio whether or not it is used, so "4 SSIDs" on a device broadcasting two
+        // was a true statement about the driver and a false one about the customer's house.
+        const live = wifi.radios.filter(r => r.broadcasting !== false);
+        const off = wifi.radios.length - live.length;
+        return (live.length > 1 ? ' · ' + live.length + ' SSIDs' : '') + (off ? ` <span class="tag">${off} off air</span>` : '');
+      })()}</div>
+        <div class="small sec-muted">${esc(wifi.radios.filter(r => r.broadcasting !== false).map(r => r.ssid || '(no SSID)').join(', ')) || 'nothing broadcasting'} · clients, signal &amp; settings</div></div>
       <i class="ti ti-chevron-right muted"></i></a></div>`;
 
   view().innerHTML = `
@@ -2816,7 +2823,16 @@ async function manageWifi(id) {
     const r = await api('/devices/' + id + '/wifi');
     window._wifi = { id, system: r.system, radios: r.radios || [] };
     body.innerHTML = (r.radios || []).map((w, idx) => `<div style="padding:10px 14px;border-top:.5px solid var(--border)">
-      <div class="small sec-muted" style="margin-bottom:6px"><span class="mono">${esc(w.iface)}</span>${w.band ? ' · ' + esc(w.band) : ''}${w.disabled ? ' · (disabled)' : ''}</div>
+      <div class="small sec-muted" style="margin-bottom:6px"><span class="mono">${esc(w.iface)}</span>${w.band ? ' · ' + esc(w.band) : ''}${
+        // Say which of these SSIDs is actually on the air. This hardware ships factory networks on
+        // its spare radios that are configured-looking but never brought up, and listing them
+        // identically to the customer's live network — same editable fields — invites somebody to
+        // "fix" a network nobody can see, or to believe the unit is broadcasting four.
+        w.broadcasting === false
+          ? ` · <span class="tag" style="background:var(--warn-bg,transparent);color:var(--warn)">not broadcasting</span>${w.configured === false ? ' <span class="sec-muted">· not configured on the router</span>' : ''}`
+          : w.broadcasting === true ? ' · <span style="color:var(--success)">on air</span>'
+          : w.disabled ? ' · (disabled)' : ''
+      }${w.encryption ? ' · ' + esc(w.encryption) : ''}${w.hiddenSsid ? ' · hidden SSID' : ''}</div>
       <div class="grid2">
         <div class="fld" style="margin:0"><label class="fl">SSID (network name)</label><input id="wssid${idx}" value="${esc(w.ssid || '')}"/></div>
         <div class="fld" style="margin:0"><label class="fl">Password</label><input id="wpass${idx}" class="mono" value="${esc(w.password || '')}"/></div>

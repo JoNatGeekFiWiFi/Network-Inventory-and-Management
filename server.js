@@ -600,7 +600,10 @@ async function pollViaDriver(d, key) {
   const polled = new Date().toISOString();
 
   const wifiSummary = out.wifi && out.wifi.system
-    ? { system: out.wifi.system, radios: out.wifi.radios.map(r => ({ iface: r.iface, ssid: r.ssid, disabled: r.disabled, band: r.band, hasPassword: !!r.password })) }
+    // `broadcasting` rides along; the passphrase deliberately does not. A radio that exists in the
+    // driver but is not on the air is a normal state on this hardware, and the device card has to
+    // be able to say so rather than listing a factory SSID as if it were live.
+    ? { system: out.wifi.system, radios: out.wifi.radios.map(r => ({ iface: r.iface, ssid: r.ssid, disabled: r.disabled, band: r.band, hasPassword: !!r.password, broadcasting: r.broadcasting ?? null })) }
     : null;
 
   const sets = ['interfaces_json=?', 'wifi_json=?', 'last_polled=?'];
