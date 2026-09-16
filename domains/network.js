@@ -8,7 +8,7 @@ import { writeFileSync, createReadStream, existsSync, statSync, unlinkSync, copy
 import { join, extname } from "node:path";
 import net from "node:net";
 import { r2 } from "../lib/core.js";
-import { platformOf, driverFor, can } from "../lib/drivers/index.js";
+import { platformOf, driverFor, can, PLATFORMS } from "../lib/drivers/index.js";
 import { sshExec } from "../lib/sshexec.js";
 
 export default function registerNetwork(app, ctx) {
@@ -42,20 +42,62 @@ export default function registerNetwork(app, ctx) {
     return d;
   }
 
-  app.get('/api/devices/:id/dhcp-leases', requireNoc, async (req, res) => {
+  /**
+   * Refuse an operation this device's platform cannot do — before it is attempted.
+   *
+   * Written after fixing the same bug on three separate screens one at a time, each found by
+   * somebody clicking it: polling, the WiFi page and the DHCP page all reached RouterOS-only code
+   * and returned "Unexpected response (is REST enabled?)" from an OpenWrt router that has no REST
+   * and never did. Hiding the card was not enough, because the routes are still reachable by URL,
+   * which is exactly how the DHCP page got hit.
+   *
+   * A capability the platform does not claim now fails as a 400 naming the platform, rather than a
+   * 502 blaming the device for not being a MikroTik.
+   */
+  const requireCap = (capability) => (req, res, next) => {
+    const d = db.prepare('SELECT id, name, platform FROM devices WHERE id=?').get(req.params.id);
+    if (!d) return res.status(404).json({ error: 'not found' });
+    if (can(d, capability)) return next();
+    const label = PLATFORMS[platformOf(d)].label;
+    return res.status(400).json({
+      error: `${d.name} runs ${label}, which this platform cannot ${CAP_VERBS[capability] || capability} yet.`,
+      platform: platformOf(d), capability, unsupported: true
+    });
+  };
+
+  /** Phrased as the action a person was trying to take, not as an internal capability name. */
+  const CAP_VERBS = {
+    dhcpRead: 'read DHCP leases from',
+    dhcpWrite: 'change DHCP leases on',
+    wifiWrite: 'change WiFi settings on',
+    configBackup: 'back up the configuration of',
+    firmware: 'manage firmware on',
+    blocklistPush: 'push the threat blocklist to',
+    reboot: 'reboot'
+  };
+
+  app.get('/api/devices/:id/dhcp-leases', requireNoc, requireCap('dhcpRead'), async (req, res) => {
     const d = dhcpDevice(req, res); if (!d) return;
     try {
+      // Non-RouterOS platforms read leases through the driver, which knows whether this build has
+      // luci-rpc or only the raw dnsmasq file.
+      if (platformOf(d) !== 'routeros') {
+        const driver = await driverFor(d, { sshExec });
+        const leases = (await driver.dhcpLeases())
+          .sort((a, b) => String(a.address).localeCompare(String(b.address), undefined, { numeric: true }));
+        return res.json({ leases });
+      }
       const r = await restReq(d.mgmt_address, '/rest/ip/dhcp-server/lease', { headers: rosHeaders(d) });
       if (r.status >= 400) { const hint = r.status === 401 ? ' (login rejected — check admin user/pass)' : ''; return res.status(502).json({ error: `Device returned ${r.status}${hint}` }); }
       let data; try { data = JSON.parse(r.body); } catch { return res.status(502).json({ error: 'Unexpected response (is REST enabled?)' }); }
       const leases = (Array.isArray(data) ? data : []).map(mapLease)
         .sort((a, b) => String(a.address).localeCompare(String(b.address), undefined, { numeric: true }));
       res.json({ leases });
-    } catch (e) { res.status(502).json({ error: rosErr(e) }); }
+    } catch (e) { res.status(502).json({ error: e.http ? e.message : rosErr(e) }); }
   });
 
   // action: make-static | block | unblock | disable | enable | remove
-  app.post('/api/devices/:id/dhcp-leases/action', requireNoc, async (req, res) => {
+  app.post('/api/devices/:id/dhcp-leases/action', requireNoc, requireCap('dhcpWrite'), async (req, res) => {
     const d = dhcpDevice(req, res); if (!d) return;
     const { id, mac, action } = req.body || {};
     let dynamic = (req.body || {}).dynamic === true || (req.body || {}).dynamic === 'true';
@@ -212,7 +254,7 @@ export default function registerNetwork(app, ctx) {
       res.json(wf);
     } catch (e) { res.status(502).json({ error: e.http ? ('Device returned ' + e.http) : rosErr(e) }); }
   });
-  app.post('/api/devices/:id/wifi', requireNoc, async (req, res) => {
+  app.post('/api/devices/:id/wifi', requireNoc, requireCap('wifiWrite'), async (req, res) => {
     const d = dhcpDevice(req, res); if (!d) return;
     const b = req.body || {};
     if (!b.id || !b.system) return res.status(400).json({ error: 'id and system required' });
@@ -404,7 +446,9 @@ export default function registerNetwork(app, ctx) {
   }
   async function runWeeklyBackups(source) {
     let ok = 0, fail = 0;
-    for (const d of backupDevices()) {
+    // Only devices that can actually be backed up. Attempting the rest wrote a failed row per
+    // device per week — a growing pile of identical errors about a capability nobody claimed.
+    for (const d of backupDevices().filter(x => can(x, 'configBackup'))) {
       try { await backupDevice(d, source); ok++; }
       catch (e) { fail++; db.prepare("INSERT INTO router_backups (device_id,status,error,format,source) VALUES (?,?,?,?,?)").run(d.id, 'error', e.http ? ('HTTP ' + e.http) : (e.message || 'error'), 'rsc', source || 'auto'); }
     }
@@ -425,7 +469,7 @@ export default function registerNetwork(app, ctx) {
   app.get('/api/devices/:id/backups', requireNoc, (req, res) => {
     res.json(db.prepare('SELECT id, status, error, size, format, source, created_at FROM router_backups WHERE device_id=? ORDER BY datetime(created_at) DESC').all(req.params.id));
   });
-  app.post('/api/devices/:id/backup', requireNoc, async (req, res) => {
+  app.post('/api/devices/:id/backup', requireNoc, requireCap('configBackup'), async (req, res) => {
     const d = dhcpDevice(req, res); if (!d) return;
     try { const r = await backupDevice(d, 'manual'); pruneOldBackups(); audit(req, 'backup', 'device#' + d.id, 'manual export ' + r.size + 'b'); res.json({ ok: true, ...r }); }
     catch (e) {
@@ -434,7 +478,7 @@ export default function registerNetwork(app, ctx) {
     }
   });
   // Diagnostic: run each backup step and report raw RouterOS responses
-  app.get('/api/devices/:id/backup-debug', requireNoc, async (req, res) => {
+  app.get('/api/devices/:id/backup-debug', requireNoc, requireCap('configBackup'), async (req, res) => {
     const d = dhcpDevice(req, res); if (!d) return;
     const H = rosHeaders(d);
     const ros = (m, p, b) => restReq(d.mgmt_address, p, { headers: H, method: m, body: b, timeoutMs: 25000 });

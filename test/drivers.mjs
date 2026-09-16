@@ -1068,6 +1068,49 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
     ok(others.length === 0, `nor .pluck()/.iterate()/.safeIntegers()${others.length ? ' (' + others.join(', ') + ')' : ''}`);
   }
 
+  // ---- no endpoint may speak RouterOS to a non-RouterOS device -----------------------------------
+  //
+  // This exact bug was fixed three times, on three screens, each found by somebody clicking it:
+  // polling, then the WiFi page, then the DHCP page. Every time the symptom was the same — an
+  // OpenWrt router being told "Unexpected response (is REST enabled?)" about a REST API it has
+  // never had — and every time the cause was an endpoint that predated the driver layer.
+  //
+  // Fixing them one at a time was the wrong response. This finds the rest.
+  {
+    // Hiding a card is not enough: the DHCP page was reached by URL with the card already hidden,
+    // which is how it was found. So the ENDPOINTS are what get checked.
+    const attempts = [
+      ['GET', '/api/devices/' + kat + '/dhcp-leases', 'dhcpRead'],
+      ['POST', '/api/devices/' + kat + '/dhcp-leases/action', 'dhcpWrite'],
+      ['POST', '/api/devices/' + kat + '/wifi', 'wifiWrite'],
+      ['POST', '/api/devices/' + kat + '/backup', 'configBackup'],
+      ['GET', '/api/devices/' + kat + '/backup-debug', 'configBackup']
+    ];
+    for (const [method, path, capability] of attempts) {
+      const r = await call(path, method === 'POST' ? { body: { id: 'x', action: 'remove', system: 'wifi' } } : {});
+      const supported = can('openwrt', capability);
+      if (supported) {
+        // dhcpRead IS supported, so it must not be refused — it must be attempted through the
+        // driver. It will fail to reach 127.0.0.1, and that is a device error, not a refusal.
+        ok(r.status !== 400 || !(r.json && r.json.unsupported),
+          `${path} is supported on OpenWrt and is attempted, not refused`);
+      } else {
+        ok(r.status === 400 && r.json && r.json.unsupported === true,
+          `${method} ${path.replace(String(kat), ':id')} refuses cleanly on OpenWrt rather than trying REST`);
+        ok(!/REST enabled/i.test(r.json.error),
+          '  ...and does not blame the device for lacking a REST API it never had');
+        ok(new RegExp(capability).test(r.json.capability), '  ...naming the capability that is missing');
+        ok(/OpenWrt/.test(r.json.error), '  ...and the platform, so the message is actionable');
+      }
+    }
+
+    // A RouterOS device must be entirely unaffected by the guard.
+    const mt = (await call('/api/devices', { body: { name: 'CAPTEST mikrotik', platform: 'routeros', mgmt_address: '127.0.0.1', admin_password: 'x' } })).json.id;
+    const mtr = await call('/api/devices/' + mt + '/dhcp-leases');
+    ok(!(mtr.json && mtr.json.unsupported), 'a RouterOS device is never refused by the capability guard');
+    await call('/api/devices/' + mt, { method: 'DELETE' });
+  }
+
   // ---- the sampler diagnostic -------------------------------------------------------------------
   //
   // Added because an empty graph had several possible causes and the page named only one of them,
