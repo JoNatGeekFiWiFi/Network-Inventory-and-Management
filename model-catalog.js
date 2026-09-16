@@ -101,20 +101,102 @@ const UBIQUITI = [
   ['airFiber 5 Mid-Band', A, 1], ['airFiber 5 High-Band', A, 1], ['airFiber 2X', A, 1]
 ];
 
-// Insert any catalog models not already present. Returns how many were added.
+// ---- OpenWrt hardware -----------------------------------------------------------------------
+//
+// Hardware that SHIPS running OpenWrt, so the platform is known from the model alone. The Katalyst
+// Spark is a rebadged GL.iNet XE3000 — both names are listed, because a technician holding the box
+// will search for what is printed on it, not for what is inside.
+const KATALYST = [
+  ['Spark K500A', R, 1, 1]
+];
+
+const GLINET = [
+  ['GL-XE3000 (Puli AX)', R, 1, 1], ['GL-X3000 (Spitz AX)', R, 1, 1], ['GL-X750 (Spitz)', R, 1, 1],
+  ['GL-XE300 (Puli)', R, 1, 1], ['GL-E750 (Mudi)', R, 1, 1], ['GL-X1200 (Amarok)', R, 1, 1],
+  ['GL-MT6000 (Flint 2)', R, 1], ['GL-AX1800 (Flint)', R, 1], ['GL-MT3000 (Beryl AX)', R, 1],
+  ['GL-A1300 (Slate Plus)', R, 1], ['GL-AXT1800 (Slate AX)', R, 1], ['GL-MT2500 (Brume 2)', R],
+  ['GL-B3000 (Marble)', R, 1], ['GL-SFT1200 (Opal)', R, 1], ['GL-AR750S (Slate)', R, 1]
+];
+
+// ---- flashable hardware ----------------------------------------------------------------------
+//
+// These ship with the manufacturer's own firmware and may be running stock, OpenWrt or DD-WRT. The
+// model genuinely does not say which, so they default to "unknown" and Identify settles it in a few
+// seconds. Guessing here would assign a driver that fails every poll for a reason nobody can see.
+const LINKSYS = [
+  ['WRT1900AC', R, 1], ['WRT1900ACS', R, 1], ['WRT3200ACM', R, 1], ['WRT32X', R, 1],
+  ['WRT1200AC', R, 1], ['WRT54GL', R, 1], ['E8450', R, 1]
+];
+
+const NETGEAR = [
+  ['R7800 (Nighthawk X4S)', R, 1], ['R7000 (Nighthawk)', R, 1], ['R6700', R, 1],
+  ['WNDR3800', R, 1], ['WNDR4300', R, 1]
+];
+
+const TPLINK = [
+  ['Archer C7', R, 1], ['Archer A7', R, 1], ['Archer C2600', R, 1], ['Archer AX23', R, 1],
+  ['TL-WDR3600', R, 1], ['TL-WR1043ND', R, 1]
+];
+
+/**
+ * Insert any catalog models not already present, and keep the platform hint current.
+ *
+ * The platform belongs on the MODEL, not in a regex over its name. A device form that guesses
+ * "openwrt" from the string "Spark" is guessing; one that reads it from the catalog row knows. It
+ * stays a default — every device can override it, because the same Linksys chassis runs three
+ * different operating systems depending on what somebody flashed onto it.
+ *
+ * Returns how many models were added.
+ */
 export function importModelCatalog(db) {
   db.exec("UPDATE device_models SET manufacturer='Ubiquiti' WHERE manufacturer='Ubiquiti UniFi'"); // normalize legacy seed rows
-  const exists = db.prepare('SELECT id FROM device_models WHERE manufacturer=? COLLATE NOCASE AND model=? COLLATE NOCASE');
-  const ins = db.prepare('INSERT INTO device_models (manufacturer, model, device_type, has_wifi, has_cellular) VALUES (?,?,?,?,?)');
+  // Added here rather than in db.js migrate() so the column and the values that fill it arrive
+  // together — a column that exists but is empty until the next deploy is its own kind of bug.
+  const hasCol = db.prepare('PRAGMA table_info(device_models)').all().some(c => c.name === 'default_platform');
+  if (!hasCol) db.exec('ALTER TABLE device_models ADD COLUMN default_platform TEXT');
+
+  const exists = db.prepare('SELECT id, default_platform FROM device_models WHERE manufacturer=? COLLATE NOCASE AND model=? COLLATE NOCASE');
+  const ins = db.prepare('INSERT INTO device_models (manufacturer, model, device_type, has_wifi, has_cellular, default_platform) VALUES (?,?,?,?,?,?)');
+  const setPlatform = db.prepare('UPDATE device_models SET default_platform=? WHERE id=?');
   let added = 0;
-  const load = (manufacturer, list) => {
+
+  const load = (manufacturer, list, platform) => {
     for (const [model, type, wifi, cell] of list) {
-      if (exists.get(manufacturer, model)) continue;
-      ins.run(manufacturer, model, type, wifi ? 1 : 0, cell ? 1 : 0);
+      const row = exists.get(manufacturer, model);
+      if (row) {
+        // Backfill rows that predate the column, without overwriting a value someone has set by
+        // hand — a correction made in the UI has to survive the next deploy.
+        if (!row.default_platform && platform) setPlatform.run(platform, row.id);
+        continue;
+      }
+      ins.run(manufacturer, model, type, wifi ? 1 : 0, cell ? 1 : 0, platform || null);
       added++;
     }
   };
-  load('MikroTik', MIKROTIK);
-  load('Ubiquiti', UBIQUITI);
+
+  load('MikroTik', MIKROTIK, 'routeros');
+  // UniFi is managed by its own controller, not from here — polling it is not built, so claiming a
+  // platform would offer cards that cannot work.
+  load('Ubiquiti', UBIQUITI, 'unknown');
+  load('Katalyst', KATALYST, 'openwrt');
+  load('GL.iNet', GLINET, 'openwrt');
+  load('Linksys', LINKSYS, null);
+  load('Netgear', NETGEAR, null);
+  load('TP-Link', TPLINK, null);
+
+  // Manufacturer-level backfill, for rows that are in the database but not in the lists above —
+  // seed data, and anything added by hand in the UI. Without this a MikroTik somebody typed in
+  // themselves gets no hint, and the form leaves its operating system unset.
+  //
+  // Only ever fills a BLANK: every manufacturer here makes exactly one operating system, so the
+  // inference is safe in a way it would not be for Linksys or Netgear, which are deliberately absent.
+  // Single quotes: in SQLite a double-quoted token is an IDENTIFIER, so `default_platform=""`
+  // parses as a comparison against a column named "" and throws at startup.
+  const byMaker = db.prepare("UPDATE device_models SET default_platform=? WHERE manufacturer=? COLLATE NOCASE AND (default_platform IS NULL OR default_platform='')");
+  byMaker.run('routeros', 'MikroTik');
+  byMaker.run('unknown', 'Ubiquiti');
+  byMaker.run('openwrt', 'GL.iNet');
+  byMaker.run('openwrt', 'Katalyst');
+
   return added;
 }

@@ -1536,7 +1536,10 @@ async function formDevice(q) {
     if (q.ip) d.mgmt_address = q.ip;
   }
   window._carriers = await api('/carriers').catch(() => []);
-  const modelOpts = (await api('/models')).map(m => ({ v: m.id, l: m.manufacturer + ' ' + m.model }));
+  // Kept as its own list rather than reusing META.models, because the platform lookup below needs
+  // the full row and this one carries only the label.
+  const modelRows = await api('/models');
+  const modelOpts = modelRows.map(m => ({ v: m.id, l: m.manufacturer + ' ' + m.model }));
   const siteOpts = (await api('/sites')).map(s => ({ v: s.id, l: s.name }));
   const popOpts = (await api('/pops')).map(p => ({ v: p.id, l: 'POP · ' + p.name }));
   const custOpts = (await api('/customers')).map(c => ({ v: c.id, l: c.name + (c.account_names ? ' · ' + c.account_names : '') }));
@@ -1632,7 +1635,29 @@ async function formDevice(q) {
     </div>`;
   $('select[name=status]').addEventListener('change', e => { $('#deployBox').style.display = e.target.value === 'Deployed' ? 'block' : 'none'; });
   platformChanged();   // describe the selected OS straight away, not only after it is changed
-  attachSearch($('#ss-model'), modelOpts, 'model_id', d.model_id, 'Search manufacturer / model…');
+
+  // Picking a model sets the operating system, because the model usually determines it — a Katalyst
+  // Spark is OpenWrt, a hEX S is RouterOS. Without this the field is correct but nobody fills it in,
+  // and the device silently gets polled as a MikroTik.
+  //
+  // Only ever a default: an explicit choice is never overwritten (`_platformTouched`), and neither
+  // is the existing value on a device being edited. Hardware that ships stock firmware carries no
+  // hint at all, because a Linksys WRT chassis runs three different operating systems depending on
+  // what somebody flashed onto it, and a confident wrong answer is worse than none.
+  // An existing device already has an answer — somebody set it, or Identify confirmed it — so
+  // changing the model on an edit must not quietly reassign how it is polled.
+  window._platformTouched = !!q.id;
+  const sel = $('#platformSel');
+  if (sel) sel.addEventListener('change', () => { window._platformTouched = true; });
+  attachSearch($('#ss-model'), modelOpts, 'model_id', d.model_id, 'Search manufacturer / model…', (id) => {
+    if (window._platformTouched || !sel) return;
+    const m = modelRows.find(x => String(x.id) === String(id));
+    if (!m || !m.default_platform) return;
+    sel.value = m.default_platform;
+    platformChanged();
+    const hint = $('#platformHelp');
+    if (hint) hint.innerHTML = `<b>Set from the model.</b> ` + hint.innerHTML;
+  });
   attachSearch($('#ss-site'), siteOpts, 'assigned_site_id', d.assigned_site_id, 'Search client site…');
   attachSearch($('#ss-pop'), popOpts, 'assigned_pop_id', d.assigned_pop_id, 'Search POP…');
   attachCustChain(custOpts, accOpts, '');

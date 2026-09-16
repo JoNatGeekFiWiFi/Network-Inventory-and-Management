@@ -845,7 +845,49 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
   const pr = await call('/api/devices/' + noAddr + '/probe', { body: {} });
   ok(pr.status === 400, 'a device with no management address cannot be probed');
 
-  for (const id of [ow, un, ros, noAddr]) await call('/api/devices/' + id, { method: 'DELETE' });
+  // ---- the model catalog knows the platform --------------------------------------------------
+  //
+  // The Operating system field existed and was still useless in practice: there was no catalog
+  // entry for the hardware, and nothing connected a chosen model to the field. Someone adding a
+  // Katalyst had to know to set it by hand, and a device left alone got polled as a MikroTik.
+  const models = (await call('/api/models')).json;
+  const byName = (mfr, frag) => models.find(m => m.manufacturer === mfr && m.model.includes(frag));
+
+  const spark = byName('Katalyst', 'Spark');
+  ok(!!spark, 'the Katalyst Spark is in the model catalog — it can be picked when adding one');
+  ok(spark.default_platform === 'openwrt', 'and the catalog knows it is OpenWrt');
+  ok(spark.has_cellular === 1, 'and that it is cellular, which is what puts the signal card on its page');
+
+  // The OEM name too: the Spark is a rebadged GL.iNet XE3000, and a technician searches for
+  // whichever name is printed on the box in front of them.
+  ok(byName('GL.iNet', 'XE3000'), 'the underlying GL.iNet hardware is listed under its own name as well');
+  ok(byName('GL.iNet', 'Flint').default_platform === 'openwrt', 'GL.iNet hardware ships OpenWrt, so the catalog says so');
+
+  // Hardware that could be running anything must NOT claim a platform. A wrong default assigns a
+  // driver that fails every poll for a reason nobody can see.
+  const wrt = byName('Linksys', 'WRT1900ACS');
+  ok(!!wrt, 'the Linksys WRT series is in the catalog');
+  ok(!wrt.default_platform,
+    'but carries no platform — the same chassis runs stock, OpenWrt or DD-WRT depending on what was flashed');
+  ok(!byName('Netgear', 'R7800').default_platform, 'same for flashable Netgear hardware');
+
+  ok(byName('MikroTik', 'hEX S').default_platform === 'routeros', 'MikroTik models are RouterOS');
+  ok(byName('Ubiquiti', 'UDM-Pro').default_platform === 'unknown',
+    'and UniFi is marked unmanaged, since controller polling is not built — better than offering cards that cannot work');
+
+  // Every hint must name a platform that exists, or the form would select a value the driver layer
+  // does not recognise and silently fall back to RouterOS.
+  const hints = [...new Set(models.map(m => m.default_platform).filter(Boolean))];
+  ok(hints.every(h => PLATFORMS[h]), `every catalog platform hint is a real platform (${hints.join(', ')})`);
+
+  // Creating a device with the catalog's hint must round-trip.
+  const kat = (await call('/api/devices', {
+    body: { name: 'DRIVERTEST katalyst', model_id: spark.id, platform: spark.default_platform, mgmt_address: '127.0.0.1', admin_password: 'x' }
+  })).json.id;
+  const katRead = (await call('/api/devices/' + kat)).json;
+  ok(katRead.platform === 'openwrt' && katRead.caps.interfaces, 'a device created from the catalog entry is set up to poll as OpenWrt');
+
+  for (const id of [ow, un, ros, noAddr, kat]) await call('/api/devices/' + id, { method: 'DELETE' });
 }
 
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
