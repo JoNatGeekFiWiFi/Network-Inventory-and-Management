@@ -1068,6 +1068,26 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
     ok(others.length === 0, `nor .pluck()/.iterate()/.safeIntegers()${others.length ? ' (' + others.join(', ') + ')' : ''}`);
   }
 
+  // ---- the sampler diagnostic -------------------------------------------------------------------
+  //
+  // Added because an empty graph had several possible causes and the page named only one of them,
+  // repeatedly, on a device where that one did not apply. The sampler caught every error and
+  // discarded it, so there was no way to tell "never sampled" from "failing every minute".
+  {
+    const s = (await call('/api/devices/' + kat + '/sampler')).json;
+    ok(s.last === null, 'a device that has never been sampled says so, rather than looking like a failure');
+    ok(s.traffic_rows === 0 && s.latency_rows === 0, 'with the row counts that explain an empty graph');
+    ok(Array.isArray(s.wan_tagged) && s.wan_tagged.length === 0,
+      'and reports that no port is tagged WAN — which IS the cause when it is the cause');
+    ok(s.platform === 'openwrt' && typeof s.transport === 'string',
+      'plus the platform and transport, since those decide how it is sampled at all');
+    ok(typeof s.enabled === 'boolean', 'and whether the sampler is even running on this server');
+
+    await login('support@geekitek.test', 'support123');
+    ok((await call('/api/devices/' + kat + '/sampler')).status === 403, 'the diagnostic is NOC-only');
+    await login('admin@geekitek.test', 'admin123');
+  }
+
   // ---- the signal endpoint ----------------------------------------------------------------------
   {
     const r = await call('/api/devices/' + kat + '/signal?range=24h');

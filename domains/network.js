@@ -99,8 +99,46 @@ export default function registerNetwork(app, ctx) {
     if (r.status >= 400) return { err: r.status };
     try { return { data: JSON.parse(r.body) }; } catch { return { data: null }; }
   }
-  // Returns { system: 'wifi'|'wireless'|null, radios:[{id,iface,ssid,password,disabled,band,profile?,profileId?,configRef?}] }
+  /**
+   * WiFi radios, whatever the device runs.
+   *
+   * The RouterOS reader below is unchanged. This wrapper is what was missing: the WiFi page called
+   * straight into it, so an OpenWrt device whose ports list clearly showed two radios answered
+   * "No WiFi radios found" — the page was asking a MikroTik question of a MediaTek router.
+   */
   async function readWifi(d) {
+    if (platformOf(d) !== 'routeros') {
+      const driver = await driverFor(d, { sshExec });
+      return driver.wifi ? driver.wifi() : { system: null, radios: [] };
+    }
+    return readWifiRouterOS(d);
+  }
+
+  /**
+   * Associated stations, whatever the device runs. Same reason as above.
+   */
+  async function readWifiClients(d, preferred) {
+    if (platformOf(d) !== 'routeros') {
+      const driver = await driverFor(d, { sshExec });
+      const clients = driver.wifiClients ? await driver.wifiClients() : [];
+      return {
+        system: clients.length ? 'iwinfo' : null,
+        // Mapped into the shape the page already renders, so one table serves both platforms.
+        clients: clients.map(c => ({
+          iface: c.iface || '', ssid: '', mac: c.mac || '',
+          signal: c.signal ?? null, snr: (c.signal != null && c.noise != null) ? c.signal - c.noise : null,
+          txRate: c.txRate != null ? c.txRate + ' Mbps' : '',
+          rxRate: c.rxRate != null ? c.rxRate + ' Mbps' : '',
+          uptime: c.idleSeconds != null ? `idle ${c.idleSeconds}s` : '',
+          lastIp: '', comment: ''
+        }))
+      };
+    }
+    return readWifiClientsRouterOS(d, preferred);
+  }
+
+  // Returns { system: 'wifi'|'wireless'|null, radios:[{id,iface,ssid,password,disabled,band,profile?,profileId?,configRef?}] }
+  async function readWifiRouterOS(d) {
     // v7 wifi (wifiwave2) first
     const w = await rosGet(d, '/rest/interface/wifi');
     if (!w.err && Array.isArray(w.data) && w.data.length) {
@@ -186,7 +224,7 @@ export default function registerNetwork(app, ctx) {
   });
   // Associated WiFi clients + signal (registration table) for diagnostics
   function parseSignal(v) { if (v == null) return null; const m = String(v).match(/-?\d+/); return m ? parseInt(m[0], 10) : null; }
-  async function readWifiClients(d, preferred) {
+  async function readWifiClientsRouterOS(d, preferred) {
     const tryWifi = async () => { const r = await rosGet(d, '/rest/interface/wifi/registration-table'); return (!r.err && Array.isArray(r.data)) ? { system: 'wifi', data: r.data } : null; };
     const tryWl = async () => { const r = await rosGet(d, '/rest/interface/wireless/registration-table'); return (!r.err && Array.isArray(r.data)) ? { system: 'wireless', data: r.data } : null; };
     const res = preferred === 'wireless' ? (await tryWl() || await tryWifi()) : (await tryWifi() || await tryWl());
@@ -1072,6 +1110,36 @@ export default function registerNetwork(app, ctx) {
     res.json(rows);
   });
   // Aggregated traffic across interfaces tagged WAN1/WAN2
+  /**
+   * Why the graphs look the way they do.
+   *
+   * Deliberately its own endpoint rather than folded into the device read: it is diagnostic, it is
+   * only interesting while something is wrong, and it should not add work to every page load.
+   */
+  app.get('/api/devices/:id/sampler', requireNoc, (req, res) => {
+    const d = db.prepare('SELECT id, iface_roles_json, platform, mgmt_transport FROM devices WHERE id=?').get(req.params.id);
+    if (!d) return res.status(404).json({ error: 'not found' });
+    let roles = {}; try { roles = JSON.parse(d.iface_roles_json || '{}'); } catch {}
+    const wan = Object.keys(roles).filter(k => roles[k] === 'WAN1' || roles[k] === 'WAN2');
+    const st = _sampleStatus.get(Number(req.params.id)) || null;
+    const counted = db.prepare('SELECT COUNT(*) n FROM iface_traffic WHERE device_id=?').get(req.params.id).n;
+    const lat = db.prepare('SELECT COUNT(*) n FROM dev_latency WHERE device_id=?').get(req.params.id).n;
+    res.json({
+      enabled: process.env.SAMPLER !== 'off',
+      last: st,
+      wan_tagged: wan,
+      traffic_rows: counted,
+      latency_rows: lat,
+      platform: d.platform || 'routeros',
+      transport: d.mgmt_transport || 'auto',
+      // The first tick after a restart can only establish a baseline — traffic is a rate, so a
+      // reading needs two. Saying so stops "wait, is it broken?" two minutes after every deploy.
+      note: counted === 0 && st && st.ok
+        ? 'Sampled successfully but no traffic rows yet: the first tick only records a baseline, since bits-per-second needs two readings. Give it another minute.'
+        : null
+    });
+  });
+
   app.get('/api/devices/:id/wan-traffic', (req, res) => {
     const range = req.query.range || '1h';
     const d = db.prepare('SELECT iface_roles_json FROM devices WHERE id=?').get(req.params.id);
@@ -1166,7 +1234,17 @@ export default function registerNetwork(app, ctx) {
 
     recordCounters(d, counters, now, ts);
     if (ms != null) db.prepare('INSERT INTO dev_latency (device_id,ts,ms) VALUES (?,?,?)').run(d.id, ts, ms);
+    return counters.length;
   }
+
+  /**
+   * The last sampler result per device, in memory.
+   *
+   * Exists because the sampler used to swallow every error, so "the graphs are empty" had no
+   * follow-up question — the device page could not tell a device that had never been sampled from
+   * one failing every minute, and neither could anyone reading it.
+   */
+  const _sampleStatus = new Map();
   let _sampling = false, _tickN = 0, _lastPushedSig = null;
   const blocklistSig = () => activeBlockIps().join(',');
   async function sampleTick() {
@@ -1181,7 +1259,16 @@ export default function registerNetwork(app, ctx) {
       // regex that half-works would feed wrong addresses into a blocklist pushed to every router.
       for (const d of devs) {
         try {
-          await sampleDevice(d);
+          const n = await sampleDevice(d);
+          _sampleStatus.set(d.id, { ok: true, at: new Date().toISOString(), ifaces: n, error: null });
+        } catch (e) {
+          // Recorded rather than discarded. `catch {}` meant a device could fail every minute for
+          // an hour with two empty graphs as the only symptom and nothing, anywhere, saying why —
+          // which is exactly what happened when the sampler was still speaking RouterOS to an
+          // OpenWrt box. Kept in memory: it is a live diagnostic, not history.
+          _sampleStatus.set(d.id, { ok: false, at: new Date().toISOString(), ifaces: 0, error: String(e && e.message || e).slice(0, 300) });
+        }
+        try {
           if (can(d, 'logRead') && platformOf(d) === 'routeros') await harvestThreats(d);
         } catch {}
       }

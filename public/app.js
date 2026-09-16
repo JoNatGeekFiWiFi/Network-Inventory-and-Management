@@ -1217,7 +1217,25 @@ async function setWanRange(range) {
     { label: 'Download', data: rows.map(r => mbps(r.rx_bps)), borderColor: '#378ADD', backgroundColor: 'rgba(55,138,221,.12)', fill: true, tension: .35, pointRadius: 0, borderWidth: 2 },
     { label: 'Upload', data: rows.map(r => mbps(r.tx_bps)), borderColor: '#1D9E75', backgroundColor: 'rgba(29,158,117,.12)', fill: true, tension: .35, pointRadius: 0, borderWidth: 2 }] },
     options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => c.dataset.label + ': ' + c.parsed.y + ' Mbps' } } }, scales: { y: { beginAtZero: true, ticks: { callback: v => v + 'M' } } } } });
-  const h = $('#wanhelp'); if (h) h.textContent = rows.length ? 'Sum of interfaces tagged WAN1/WAN2 · sampled every minute' : 'No WAN traffic yet — tag a port as WAN1/WAN2 (expand a port → Role).';
+  const h = $('#wanhelp');
+  if (!h) return;
+  if (rows.length) { h.textContent = 'Sum of interfaces tagged WAN1/WAN2 · sampled every minute'; return; }
+
+  // An empty graph has several causes and they need different actions. The old message named only
+  // one of them — "tag a port as WAN1/WAN2" — and kept saying it on devices where a port WAS
+  // tagged and the sampler was failing every minute, which sent people to fix the wrong thing.
+  h.textContent = 'No WAN traffic yet — checking why…';
+  try {
+    const s = await api('/devices/' + window._devId + '/sampler');
+    if (!s.enabled) h.innerHTML = 'The telemetry sampler is switched off on this server (SAMPLER=off).';
+    else if (!s.wan_tagged.length) h.innerHTML = 'No port is tagged as WAN — expand a port above and set its Role to WAN1.';
+    else if (s.last && !s.last.ok) h.innerHTML = `<span style="color:var(--danger)">Sampling is failing:</span> ${esc(s.last.error)}
+      <span class="sec-muted">· last tried ${esc(s.last.at)}</span>`;
+    else if (!s.last) h.innerHTML = 'This device has not been sampled yet — the sampler runs once a minute.';
+    else if (s.note) h.innerHTML = esc(s.note);
+    else h.innerHTML = `Sampled ${esc(s.last.at)} across ${s.last.ifaces} interface(s), but none of them is tagged
+      ${esc(s.wan_tagged.join(' or '))}. Check the port name on the tagged role.`;
+  } catch { h.textContent = 'No WAN traffic yet.'; }
 }
 function fmtTs(ts, range) { const d = new Date(ts); return (range === '7d' || range === '60d') ? (d.getMonth() + 1) + '/' + d.getDate() : ('' + d.getHours()).padStart(2, '0') + ':' + ('' + d.getMinutes()).padStart(2, '0'); }
 let _latChart = null;
