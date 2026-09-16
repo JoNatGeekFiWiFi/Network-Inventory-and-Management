@@ -257,12 +257,35 @@ export default function registerNetwork(app, ctx) {
   app.post('/api/devices/:id/wifi', requireNoc, requireCap('wifiWrite'), async (req, res) => {
     const d = dhcpDevice(req, res); if (!d) return;
     const b = req.body || {};
-    if (!b.id || !b.system) return res.status(400).json({ error: 'id and system required' });
     try {
+      if (platformOf(d) !== 'routeros') {
+        // OpenWrt identifies a wireless network by its UCI section, which the WiFi read returns.
+        if (!b.section) return res.status(400).json({ error: 'section required' });
+
+        // A snapshot BEFORE the change, so there is something to restore from even though the
+        // device will also roll itself back. Belt and braces, and the braces are the cheap part.
+        let snapshot = null;
+        try { snapshot = await backupDevice(d, 'pre-change'); } catch (e) { snapshot = { error: e.message }; }
+
+        const driver = await driverFor(d, { sshExec });
+        const r = await driver.setWifi({ section: b.section, ssid: b.ssid, password: b.password });
+
+        // Audited with the PREVIOUS value, not just the new one: a change nobody can reverse from
+        // the record is only half logged.
+        audit(req, 'edit', 'device#' + d.id,
+          `wifi ${b.iface || b.section}: ${r.ok ? 'applied' : 'FAILED at ' + r.stage} · ` +
+          `ssid ${b.prevSsid ? JSON.stringify(b.prevSsid) + ' → ' : ''}${b.ssid ? JSON.stringify(b.ssid) : '(unchanged)'}` +
+          `${b.password ? ', password changed' : ''}${snapshot && snapshot.id ? ` · backup #${snapshot.id}` : ''}`);
+
+        if (!r.ok) return res.status(502).json({ error: r.error, stage: r.stage, rolledBack: r.rolledBack, changed: r.changed });
+        return res.json({ ok: true, changed: r.changed, confirmedWithin: r.timeout });
+      }
+
+      if (!b.id || !b.system) return res.status(400).json({ error: 'id and system required' });
       await writeWifi(d, b);
       audit(req, 'edit', 'device#' + d.id, `wifi ${b.iface || b.id}: ssid${b.ssid ? '=' + b.ssid : ' unchanged'}${b.password ? ', password changed' : ''}`);
       res.json({ ok: true });
-    } catch (e) { res.status(502).json({ error: e.http ? ('Device returned ' + e.http) : rosErr(e) }); }
+    } catch (e) { res.status(502).json({ error: e.http ? e.message : rosErr(e) }); }
   });
   // Associated WiFi clients + signal (registration table) for diagnostics
   function parseSignal(v) { if (v == null) return null; const m = String(v).match(/-?\d+/); return m ? parseInt(m[0], 10) : null; }
@@ -399,6 +422,19 @@ export default function registerNetwork(app, ctx) {
     return { enabled: true, address: patch.address || s.address || '(unchanged)' };
   }
   async function backupDevice(d, source) {
+    // OpenWrt keeps its configuration in /etc/config, not in a RouterOS .rsc export. The driver
+    // produces the same tar `sysupgrade -b` writes; everything downstream — the table, the weekly
+    // scheduler, retention, the download endpoint — is unchanged.
+    if (platformOf(d) !== 'routeros') {
+      const driver = await driverFor(d, { sshExec });
+      const out = await driver.configBackup();
+      const buf = Buffer.from(out.base64, 'base64');
+      const stored = `dev${d.id}-${Date.now()}.tar.gz`;
+      writeFileSync(join(BACKUPS_DIR, stored), buf);
+      const info = db.prepare("INSERT INTO router_backups (device_id,status,size,stored_name,format,source) VALUES (?,?,?,?,?,?)")
+        .run(d.id, 'ok', buf.length, stored, 'tar.gz', source || 'manual');
+      return { id: info.lastInsertRowid, size: buf.length, format: 'tar.gz', stored_name: stored };
+    }
     const H = rosHeaders(d);
     const ros = (method, path, body) => restReq(d.mgmt_address, path, { headers: H, method, body, timeoutMs: 25000 });
     let text = '';

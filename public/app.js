@@ -2847,11 +2847,22 @@ async function saveWifi(idx) {
   if (!ssid && !password) { toast('Nothing to change'); return; }
   toast('Saving WiFi to router…');
   try {
-    await api('/devices/' + window._wifi.id + '/wifi', { method: 'POST', body: JSON.stringify({
-      system: window._wifi.system, id: w.id, iface: w.iface, profile: w.profile, profileId: w.profileId, configRef: w.configRef, ssid, password
+    const r = await api('/devices/' + window._wifi.id + '/wifi', { method: 'POST', body: JSON.stringify({
+      system: window._wifi.system, id: w.id, iface: w.iface, profile: w.profile, profileId: w.profileId, configRef: w.configRef,
+      // OpenWrt addresses a wireless network by its UCI section; prevSsid goes along so the audit
+      // entry records what the value WAS, not only what it became.
+      section: w.section, prevSsid: w.ssid, ssid, password
     }) });
-    toast('WiFi updated · Poll now to confirm');
-  } catch (e) { toast(e.message); }
+    toast(r.confirmedWithin
+      ? `WiFi updated and confirmed — the router had ${r.confirmedWithin}s to roll back and did not need to`
+      : 'WiFi updated · Poll now to confirm');
+    renderDeviceWifi(window._wifi.id);
+  } catch (e) {
+    // A failure here is not an ordinary error: the change may already be live on the device with a
+    // rollback timer running. Saying so is the difference between waiting and driving to the site.
+    const msg = String(e.message || '');
+    toast(/roll/i.test(msg) ? msg : 'WiFi change failed: ' + msg);
+  }
 }
 async function showWg(id) {
   try {

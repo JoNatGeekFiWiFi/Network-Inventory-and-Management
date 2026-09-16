@@ -36,7 +36,10 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
   ok(platformOf({ platform: 'nonsense' }) === 'routeros', 'an unrecognised value does not produce an undefined driver');
 
   ok(can('routeros', 'wifiWrite'), 'RouterOS can have its WiFi rewritten');
-  ok(!can('openwrt', 'wifiWrite'), 'OpenWrt cannot yet — monitoring first, by decision');
+  ok(can('openwrt', 'wifiWrite'), 'OpenWrt can now write WiFi — the first configuration capability');
+  // `firmware` is the one still deliberately withheld: sysupgrade exists on the hardware, and a
+  // failed firmware push at a customer's house is not recoverable remotely.
+  ok(!can('openwrt', 'firmware'), 'but not firmware, which is withheld on purpose');
   ok(can('openwrt', 'interfaces') && can('openwrt', 'dhcpRead') && can('openwrt', 'wifiClients'),
     'but OpenWrt does cover the monitoring set');
   ok(!can('ddwrt', 'wifiRead'), 'DD-WRT claims nothing it cannot actually do');
@@ -49,7 +52,7 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
       ok(CAPABILITIES.includes(c), `${key} claims only real capabilities (${c})`);
 
   const m = capMap('openwrt');
-  ok(m.interfaces === true && m.wifiWrite === false, 'the capability map is complete, not sparse');
+  ok(m.interfaces === true && m.firmware === false, 'the capability map is complete, not sparse');
   ok(Object.keys(m).length === CAPABILITIES.length, 'and covers every capability, so absent never means unknown');
 
   ok(guessPlatform({ manufacturer: 'MikroTik', model: 'hEX S' }) === 'routeros', 'a MikroTik model guesses RouterOS');
@@ -408,6 +411,150 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
   });
   ok((await httpOnly.counters()).length === 2, 'counters work over HTTP too');
   ok(await httpOnly.latency() === null, 'and latency degrades to null rather than throwing when there is no shell');
+}
+
+// ---- writing configuration ---------------------------------------------------------------------
+//
+// The first writes to a customer's router. What is tested here is not mainly "does the value get
+// set" — it is the safety machinery around it, because that is what decides whether a mistake
+// self-heals or becomes a van to somebody's house.
+{
+  const { validateSsid, validateWifiKey, isUciName, parseUciChanges, createDriver } =
+    await import('../lib/drivers/openwrt.js');
+
+  // ---- validation, before anything reaches a device ----
+  ok(validateSsid('GeekFi-Home') === null, 'an ordinary SSID is accepted');
+  ok(/empty/.test(validateSsid('')), 'an empty one is refused');
+  // 32 BYTES, not characters. An SSID of accented or emoji characters hits the limit sooner than
+  // its length suggests, and a router that silently truncates leaves a network nobody can find.
+  ok(validateSsid('a'.repeat(32)) === null, '32 ASCII characters fit');
+  ok(/32 bytes/.test(validateSsid('a'.repeat(33))), '33 do not');
+  ok(/32 bytes/.test(validateSsid('é'.repeat(17))), 'and 17 two-byte characters do not either — the limit is bytes');
+  ok(/control/.test(validateSsid('bad name')), 'control characters are refused');
+
+  ok(validateWifiKey('longenough') === null, 'a normal passphrase is accepted');
+  ok(/at least 8/.test(validateWifiKey('short')), 'a short one is refused before the router sees it');
+  ok(/63/.test(validateWifiKey('x'.repeat(64))), 'and an over-long one');
+  ok(validateWifiKey('a'.repeat(64).replace(/a/g, '0')) === null, 'while a 64-character raw PSK in hex IS valid and is allowed');
+
+  ok(isUciName('wifi2g') && !isUciName('wifi 2g') && !isUciName('a;reboot'),
+    'UCI names are narrow — they become part of a root-level call');
+
+  ok(parseUciChanges({ wireless: [['set', 'wifi2g', 'ssid', 'New']] })[0].option === 'ssid',
+    'staged changes parse into something a person can be shown');
+
+  // ---- the confirmed-apply loop ----
+  const scenario = (opts = {}) => {
+    const calls = [];
+    const transport = {
+      kind: 'test', endpoint: 't', calls,
+      async call(object, method, params) {
+        calls.push(`${object}.${method}`);
+        if (object === 'uci' && method === 'changes') return { ok: true, data: { wireless: [['set', 'wifi2g', 'ssid', 'New']] } };
+        if (object === 'uci' && method === 'apply') {
+          if (opts.applyFails) return { ok: false, error: 'apply refused' };
+          return { ok: true, data: {} };
+        }
+        if (object === 'system' && method === 'board') {
+          return opts.deviceGoesAway ? { ok: false, error: 'no response', unreachable: true } : { ok: true, data: { model: 'x' } };
+        }
+        if (object === 'uci' && method === 'confirm') {
+          return opts.confirmFails ? { ok: false, error: 'confirm refused' } : { ok: true, data: {} };
+        }
+        return { ok: true, data: {} };
+      }
+    };
+    return { transport, calls, driver: createDriver({ mgmt_address: '10.0.0.1', admin_password: 'x' }, { transport }) };
+  };
+
+  {
+    const { driver, calls } = scenario();
+    const r = await driver.setWifi({ section: 'wifi2g', ssid: 'GeekFi-New', password: 'supersecret', timeoutSeconds: 30 });
+    ok(r.ok === true, 'a good change applies and confirms');
+    // THE ORDER IS THE SAFETY PROPERTY. apply-with-rollback, then verify, then confirm.
+    const seq = calls.filter(c => /^uci\.(apply|confirm)|^system\.board/.test(c));
+    ok(seq[0] === 'uci.apply' && seq[1] === 'system.board' && seq[2] === 'uci.confirm',
+      'in that order: apply, verify the device still answers, then confirm');
+    ok(!calls.includes('uci.commit'), 'and NEVER a bare commit, which has no rollback behind it');
+    ok(r.changed.some(c => c.option === 'ssid'), 'the change set is reported back');
+    ok(!JSON.stringify(r.changed).includes('supersecret'), 'with the passphrase hidden in the summary');
+  }
+
+  {
+    // THE CASE THAT MATTERS. The change applied, and then the device stopped answering — which is
+    // exactly what a bad change looks like from here.
+    const { driver, calls } = scenario({ deviceGoesAway: true });
+    const r = await driver.setWifi({ section: 'wifi2g', ssid: 'Broken', timeoutSeconds: 30 });
+    ok(r.ok === false && r.stage === 'verify', 'a device that goes silent after applying is a failure');
+    ok(!calls.includes('uci.confirm'), 'confirm is NOT sent — that is what lets the rollback fire');
+    ok(r.rolledBack === 'automatic', 'and the result says the device will revert itself');
+    ok(/roll the change back on its own/.test(r.error) && /30 seconds/.test(r.error),
+      'saying so in words, with the deadline, so nobody drives out to a device that is about to fix itself');
+    // Deliberately not calling rollback: if we cannot reach the device to verify, we cannot reach
+    // it to roll back either. The timer is the mechanism.
+    ok(!calls.includes('uci.rollback'), 'no rollback call is attempted down a path we just proved is broken');
+  }
+
+  {
+    const { driver } = scenario({ confirmFails: true });
+    const r = await driver.setWifi({ section: 'wifi2g', ssid: 'X' });
+    ok(r.ok === false && r.stage === 'confirm', 'a failed confirm is reported rather than assumed harmless');
+    ok(/revert/.test(r.error), 'and the person is told the change will not stick');
+  }
+
+  {
+    const { driver, calls } = scenario({ applyFails: true });
+    const r = await driver.setWifi({ section: 'wifi2g', ssid: 'X' });
+    ok(r.ok === false && r.stage === 'apply', 'a refused apply stops there');
+    ok(!calls.includes('uci.confirm'), 'without confirming something that never happened');
+  }
+
+  // Bad input never reaches the device at all.
+  {
+    const { driver, calls } = scenario();
+    ok((await driver.setWifi({ section: 'wifi2g', password: 'short' })).ok === false, 'a too-short password is refused');
+    ok(!calls.includes('uci.apply'), 'and nothing is applied');
+    ok((await driver.setWifi({ section: 'a;reboot', ssid: 'X' })).ok === false, 'a crafted section name is refused');
+    ok((await driver.setWifi({ section: 'wifi2g' })).ok === false, 'and a change with nothing in it');
+  }
+
+  // ---- backup: the prerequisite ----
+  {
+    const ran = [];
+    const t = {
+      kind: 'ssh', endpoint: 'ssh://t',
+      async call() { return { ok: false, code: 4, error: 'nf' }; },
+      async run(argv) {
+        ran.push(argv[0]);
+        if (argv[0] === 'sysupgrade') return { ok: true, data: '' };
+        if (argv[0] === 'base64') return { ok: true, data: Buffer.from('fake-tar-content').toString('base64') };
+        return { ok: true, data: '' };
+      }
+    };
+    const d = createDriver({ mgmt_address: '10.0.0.1', admin_password: 'x' }, { transport: t });
+    const b = await d.configBackup();
+    ok(b.format === 'tar.gz' && b.base64, 'a config backup comes back as a tar');
+    ok(Buffer.from(b.base64, 'base64').toString() === 'fake-tar-content', 'and round-trips intact');
+    ok(ran.includes('sysupgrade') && ran.includes('rm'), 'made with sysupgrade -b, and the temp file is cleaned up');
+
+    // No shell means no backup — and that must be said, not silently skipped, because a write path
+    // without an undo is the thing this exists to prevent.
+    const noShell = createDriver({ mgmt_address: '10.0.0.1', admin_password: 'x' }, {
+      transport: { kind: 'http', endpoint: 'h', async call() { return { ok: false, error: 'nf' }; } }
+    });
+    let err = null;
+    try { await noShell.configBackup(); } catch (e) { err = e; }
+    ok(err && /shell access/.test(err.message), 'a device with no shell says why it cannot be backed up');
+  }
+
+  // ---- firmware is READ ONLY, on purpose ----
+  {
+    const { capsFor } = await import('../lib/drivers/index.js');
+    ok(!capsFor('openwrt').includes('firmware'),
+      'firmware is NOT claimed for OpenWrt — sysupgrade exists on the hardware and is deliberately not wired up');
+    ok(capsFor('openwrt').includes('configBackup') && capsFor('openwrt').includes('wifiWrite'),
+      'while backup and WiFi writes are, in that order: the undo shipped before the change');
+  }
 }
 
 // ---- the prober --------------------------------------------------------------------------------
@@ -1008,7 +1155,7 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
 
   const owd = (await call('/api/devices/' + ow)).json;
   ok(owd.platform === 'openwrt', 'the platform round-trips through create');
-  ok(owd.caps && owd.caps.interfaces === true && owd.caps.wifiWrite === false,
+  ok(owd.caps && owd.caps.interfaces === true && owd.caps.firmware === false,
     'and the device read carries the capability map the page gates on');
   ok(owd.platform_label === 'OpenWrt (and vendor builds of it)', 'with a label fit to display');
 
