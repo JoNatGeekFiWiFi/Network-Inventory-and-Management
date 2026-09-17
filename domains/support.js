@@ -8,6 +8,9 @@ import { r2, todayStr, esc2, normPhone } from "../lib/core.js";
 
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
 
+import { sendRequest as metaSendRequest, explainSendError, parseMetaWebhook,
+         verifyMetaSignature, verifyChallenge, serviceWindow } from "../lib/metawa.js";
+
 export default function registerSupport(app, ctx) {
   const { db, N, audit, requireNoc, getSetting, setSetting, sendMail, mailSafe,
           verifyPassword, parseCookies, loginThrottle, loginSucceeded, customerAccounts } = ctx;
@@ -48,8 +51,31 @@ export default function registerSupport(app, ctx) {
     if (!from) return { ok: false, error: 'No SMS sender number configured' };
     return prov === 'telnyx' ? telnyxSendMessage({ to, from, body }) : twilioSendMessage({ to, from, body });
   }
+  /**
+   * Send WhatsApp straight from Meta, with no BSP in between.
+   *
+   * The Graph API error codes are translated rather than passed through, because the one that will
+   * actually happen — 131047, the 24-hour service window closing — is indistinguishable from a
+   * broken integration if it surfaces as "send failed".
+   */
+  async function metaSendWhatsApp({ to, body }) {
+    const req = metaSendRequest({
+      phoneNumberId: getSetting('meta_wa_phone_id'),
+      token: getSetting('meta_wa_token'),
+      to, body
+    });
+    if (req.error) return { ok: false, error: req.error };
+    try {
+      const r = await fetch(req.url, { method: 'POST', headers: req.headers, body: JSON.stringify(req.body) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) return { ok: false, error: explainSendError(j, r.status) };
+      return { ok: true, id: (j.messages && j.messages[0] && j.messages[0].id) || null };
+    } catch (e) { return { ok: false, error: 'Could not reach Meta: ' + e.message }; }
+  }
+
   async function sendWhatsApp(to, body) {
     const prov = getSetting('whatsapp_provider') || 'twilio';
+    if (prov === 'meta') return metaSendWhatsApp({ to, body });
     const from = prov === 'telnyx' ? getSetting('telnyx_wa_from') : getSetting('twilio_wa_from');
     if (!from) return { ok: false, error: 'No WhatsApp sender configured' };
     return prov === 'telnyx' ? telnyxSendMessage({ to, from, body, whatsapp: true }) : twilioSendMessage({ to, from, body, whatsapp: true });
@@ -342,6 +368,61 @@ export default function registerSupport(app, ctx) {
 
 
   // exposed for server.js (raw-body route + sampler) and cross-domain callers
+  /**
+   * Meta's webhook: the GET handshake once, then signed POSTs forever.
+   *
+   * Registered against the RAW body in server.js, because the signature is computed over the exact
+   * bytes Meta sent. Re-serialising parsed JSON changes whitespace and key order, so the hash
+   * would never match.
+   */
+  function inboundMetaWhatsApp(req, res) {
+    // The one-time handshake. Meta wants the raw challenge back — not JSON, not quoted.
+    if (req.method === 'GET') {
+      const v = verifyChallenge(req.query || {}, getSetting('meta_wa_verify_token'));
+      if (!v.ok) { console.warn('meta webhook verify refused:', v.reason); return res.status(v.status).type('text/plain').send(v.reason); }
+      return res.status(200).type('text/plain').send(v.challenge);
+    }
+
+    // Every delivery after that is signed. An unverified POST is refused outright: without this
+    // the endpoint is a public route that writes into customer tickets.
+    const sig = verifyMetaSignature(req.body, req.headers['x-hub-signature-256'], getSetting('meta_wa_app_secret'));
+    if (!sig.ok) {
+      console.warn('meta webhook rejected:', sig.reason);
+      // 200 regardless: Meta retries on anything else, and a retry loop on a payload we will never
+      // accept is just noise. The refusal is logged, which is where it belongs.
+      return res.status(200).json({ ignored: sig.reason });
+    }
+
+    let parsed;
+    try { parsed = parseMetaWebhook(req.body); }
+    catch (e) { console.warn('meta webhook parse failed:', e.message); return res.status(200).json({ ok: true }); }
+
+    for (const m of parsed.messages) {
+      if (!m.from) continue;
+      try { ingestInbound({ channel: 'whatsapp', from: m.from, to: m.to, body: m.body, external_id: m.external_id }); }
+      catch (e) { console.warn('meta inbound ingest failed:', e.message); }
+    }
+    // Delivery failures are worth seeing; sent/delivered/read are noise at this volume.
+    for (const s of parsed.statuses) {
+      if (s.status === 'failed') console.warn(`WhatsApp delivery failed to ${s.recipient}: ${s.error || 'no reason given'}`);
+    }
+    res.status(200).json({ ok: true });
+  }
+  ctx.jobs.inboundMetaWhatsApp = inboundMetaWhatsApp;
+
+  /**
+   * How long a customer's 24-hour WhatsApp window has left.
+   *
+   * Read from the last inbound WhatsApp message on their tickets, so the reply box can say whether
+   * a free-form message will be accepted before somebody types one.
+   */
+  app.get('/api/customers/:id/whatsapp-window', requireNoc, (req, res) => {
+    const row = db.prepare(`SELECT MAX(m.created_at) AS last FROM ticket_messages m
+      JOIN tickets t ON t.id = m.ticket_id
+      WHERE t.customer_id = ? AND m.channel = 'whatsapp' AND m.direction = 'in'`).get(req.params.id);
+    res.json(serviceWindow(row && row.last));
+  });
+
   ctx.jobs.pollImap = pollImap;
   ctx.jobs.inboundTelnyx = inboundTelnyx;
   ctx.requirePortal = requirePortal;

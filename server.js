@@ -149,6 +149,10 @@ app.use((req, res, next) => {
 app.post('/stripe/webhook', express.raw({ type: '*/*', limit: '1mb' }), (req, res) => ctx.jobs.stripeWebhook(req, res));
 // Telnyx signs the RAW request body (Ed25519), so it too must precede the JSON parser
 app.post('/inbound/telnyx/:secret', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => ctx.jobs.inboundTelnyx(req, res));
+// Meta signs the RAW body too (HMAC-SHA256 over the exact bytes), so this must also precede the
+// JSON parser. The GET is Meta's one-time verification handshake and carries no body at all.
+app.get('/inbound/whatsapp/:secret', (req, res) => ctx.jobs.inboundMetaWhatsApp(req, res));
+app.post('/inbound/whatsapp/:secret', express.raw({ type: '*/*', limit: '2mb' }), (req, res) => ctx.jobs.inboundMetaWhatsApp(req, res));
 app.use(express.json({ limit: '60mb' })); // raised so base64 note attachments + .npk package uploads fit
 app.use(express.urlencoded({ extended: false, limit: '10mb' })); // Twilio + Mailgun inbound post form-encoded
 
@@ -430,6 +434,11 @@ app.get('/api/settings', requireNoc, (req, res) => {
     // omnichannel messaging
     sms_provider: getSetting('sms_provider') || 'twilio',
     whatsapp_provider: getSetting('whatsapp_provider') || 'twilio',
+    meta_wa_phone_id: getSetting('meta_wa_phone_id') || '',
+    meta_wa_verify_token: getSetting('meta_wa_verify_token') || '',
+    // Never returned. The UI shows only whether one is set, the same way device credentials work.
+    has_meta_wa_token: !!getSetting('meta_wa_token'),
+    has_meta_wa_app_secret: !!getSetting('meta_wa_app_secret'),
     twilio_sid: getSetting('twilio_sid') || '',
     twilio_sms_from: getSetting('twilio_sms_from') || '',
     twilio_wa_from: getSetting('twilio_wa_from') || '',
@@ -469,7 +478,13 @@ app.put('/api/settings', requireNoc, (req, res) => {
   // omnichannel messaging config
   for (const k of ['twilio_sid', 'twilio_sms_from', 'twilio_wa_from', 'telnyx_sms_from', 'telnyx_wa_from', 'telnyx_profile', 'imap_host', 'imap_port', 'imap_user']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
   if (b.sms_provider !== undefined) setSetting('sms_provider', b.sms_provider === 'telnyx' ? 'telnyx' : 'twilio');
-  if (b.whatsapp_provider !== undefined) setSetting('whatsapp_provider', b.whatsapp_provider === 'telnyx' ? 'telnyx' : 'twilio');
+  if (b.whatsapp_provider !== undefined) {
+    setSetting('whatsapp_provider', ['telnyx', 'meta'].includes(b.whatsapp_provider) ? b.whatsapp_provider : 'twilio');
+  }
+  for (const k of ['meta_wa_phone_id', 'meta_wa_verify_token']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  // Secrets are only written when a non-empty value is supplied, so saving the form without
+  // retyping them does not wipe them — the same rule the device credential fields follow.
+  for (const k of ['meta_wa_token', 'meta_wa_app_secret']) if (b[k]) setSetting(k, String(b[k]).trim());
   if (b.email_inbound_method !== undefined) setSetting('email_inbound_method', b.email_inbound_method === 'webhook' ? 'webhook' : 'imap');
   if (b.imap_tls !== undefined) setSetting('imap_tls', b.imap_tls ? '1' : '0');
   if (b.twilio_token) setSetting('twilio_token', String(b.twilio_token).trim());
