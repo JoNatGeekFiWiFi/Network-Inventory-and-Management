@@ -8,6 +8,8 @@ import { r2, todayStr, esc2, normPhone } from "../lib/core.js";
 
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
 
+import { buildSendParams as rcsBuildSendParams, transportFromResponse, inboundTransport,
+         explainTwilioError, describeSetup as describeRcsSetup } from "../lib/rcs.js";
 import { sendRequest as metaSendRequest, explainSendError, parseMetaWebhook,
          verifyMetaSignature, verifyChallenge, serviceWindow } from "../lib/metawa.js";
 
@@ -45,11 +47,45 @@ export default function registerSupport(app, ctx) {
     const j = await r.json().catch(() => ({}));
     return r.ok ? { ok: true, id: j.data && j.data.id } : { ok: false, error: (j.errors && j.errors[0] && j.errors[0].detail) || ('Telnyx HTTP ' + r.status) };
   }
+  /**
+   * Send on the SMS channel — over RCS when the recipient can take it.
+   *
+   * Addressing a Twilio Messaging Service (rather than a plain From number) is what enables RCS;
+   * Twilio then picks RCS or SMS per recipient and falls back on its own. Nothing here chooses,
+   * because nothing here can know: it depends on the customer's handset and carrier at that moment.
+   *
+   * The transport that actually carried it is returned so the ticket can record it. Often it is
+   * still null at send time — Twilio resolves the channel after accepting the message — and null is
+   * reported honestly rather than optimistically assumed to be RCS because we asked for it.
+   */
   async function sendSms(to, body) {
     const prov = getSetting('sms_provider') || 'twilio';
-    const from = prov === 'telnyx' ? getSetting('telnyx_sms_from') : getSetting('twilio_sms_from');
-    if (!from) return { ok: false, error: 'No SMS sender number configured' };
-    return prov === 'telnyx' ? telnyxSendMessage({ to, from, body }) : twilioSendMessage({ to, from, body });
+    if (prov === 'telnyx') {
+      const from = getSetting('telnyx_sms_from');
+      if (!from) return { ok: false, error: 'No SMS sender number configured' };
+      return telnyxSendMessage({ to, from, body });
+    }
+
+    const built = rcsBuildSendParams({
+      to, body,
+      messagingServiceSid: getSetting('twilio_messaging_service_sid'),
+      fromNumber: getSetting('twilio_sms_from'),
+      fallbackFrom: getSetting('twilio_rcs_fallback_from')
+    });
+    if (built.error) return { ok: false, error: built.error };
+
+    const sid = getSetting('twilio_sid'), tok = getSetting('twilio_token');
+    if (!sid || !tok) return { ok: false, error: 'Twilio not configured' };
+    try {
+      const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
+        method: 'POST',
+        headers: { Authorization: 'Basic ' + Buffer.from(sid + ':' + tok).toString('base64'), 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(built.params)
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) return { ok: false, error: explainTwilioError(j.code, j.message) };
+      return { ok: true, id: j.sid, transport: transportFromResponse(j) };
+    } catch (e) { return { ok: false, error: 'Could not reach Twilio: ' + e.message }; }
   }
   /**
    * Send WhatsApp straight from Meta, with no BSP in between.
@@ -93,7 +129,7 @@ export default function registerSupport(app, ctx) {
       const to = normPhone(t.contact_phone || (channel === 'sms' ? cust.sms_number : cust.whatsapp_number) || cust.sms_number || cust.whatsapp_number);
       if (!to) return { ok: false, error: 'No phone number on file', to: null };
       const r = channel === 'sms' ? await sendSms(to, body) : await sendWhatsApp(to, body);
-      return { ok: r.ok, external_id: r.id || null, error: r.error, to };
+      return { ok: r.ok, external_id: r.id || null, error: r.error, to, transport: r.transport || null };
     }
     return { ok: true, to: null }; // portal/note: nothing to send externally
   }
@@ -165,9 +201,9 @@ export default function registerSupport(app, ctx) {
   const nl2br = s => esc2(s).replace(/\n/g, '<br>');
   function ticketNotify(subject, text, html) { const to = getSetting('access_notify_email') || getSetting('mail_from'); if (to) mailSafe({ to, subject, text, html }); }
   const TICKET_CHANNELS = ['portal', 'email', 'sms', 'whatsapp', 'note'];
-  function appendMessage(ticketId, { author_type, author, body, channel, direction, external_id, to_addr, from_addr, delivery_status }) {
-    return db.prepare("INSERT INTO ticket_messages (ticket_id,author_type,author,body,channel,direction,external_id,to_addr,from_addr,delivery_status) VALUES (?,?,?,?,?,?,?,?,?,?)")
-      .run(ticketId, author_type, author || '', body, TICKET_CHANNELS.includes(channel) ? channel : 'portal', direction === 'in' ? 'in' : 'out', N(external_id), N(to_addr), N(from_addr), N(delivery_status)).lastInsertRowid;
+  function appendMessage(ticketId, { author_type, author, body, channel, direction, external_id, to_addr, from_addr, delivery_status, delivery_transport }) {
+    return db.prepare("INSERT INTO ticket_messages (ticket_id,author_type,author,body,channel,direction,external_id,to_addr,from_addr,delivery_status,delivery_transport) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+      .run(ticketId, author_type, author || '', body, TICKET_CHANNELS.includes(channel) ? channel : 'portal', direction === 'in' ? 'in' : 'out', N(external_id), N(to_addr), N(from_addr), N(delivery_status), N(delivery_transport)).lastInsertRowid;
   }
   function createTicket({ customer_id, site_id, subject, body, priority, opened_by, author, channel, contact_email, contact_phone }) {
     const cust = db.prepare('SELECT billing_email, sms_number, whatsapp_number FROM customers WHERE id=?').get(customer_id) || {};
@@ -225,7 +261,12 @@ export default function registerSupport(app, ctx) {
     if (!TICKET_CHANNELS.includes(channel)) channel = t.last_channel || t.channel || 'portal';
     let deliv = { ok: true, to: null };
     if (['email', 'sms', 'whatsapp'].includes(channel)) { try { deliv = await deliverOnChannel(t, channel, body); } catch (e) { deliv = { ok: false, error: e.message, to: null }; } }
-    appendMessage(t.id, { author_type: 'staff', author: (req.user && req.user.email) || '', body, channel, direction: 'out', external_id: deliv.external_id, to_addr: deliv.to, delivery_status: deliv.ok ? (channel === 'portal' ? null : 'sent') : 'failed' });
+    appendMessage(t.id, { author_type: 'staff', author: (req.user && req.user.email) || '', body, channel, direction: 'out',
+      external_id: deliv.external_id, to_addr: deliv.to,
+      delivery_status: deliv.ok ? (channel === 'portal' ? null : 'sent') : 'failed',
+      // Often null at send time: Twilio resolves RCS-or-SMS after accepting. Recorded when known,
+      // left blank when not, rather than claiming RCS because we asked for it.
+      delivery_transport: deliv.transport || null });
     db.prepare("UPDATE tickets SET updated_at=datetime('now'), status=CASE WHEN status IN ('resolved','closed') THEN status ELSE 'waiting' END WHERE id=?").run(t.id);
     audit(req, 'reply', 'ticket#' + t.id, t.number + ' via ' + channel);
     res.json({ ok: true, channel, delivered: deliv.ok, error: deliv.ok ? undefined : deliv.error });
@@ -274,7 +315,7 @@ export default function registerSupport(app, ctx) {
   const findCustomerByEmail = (email) => { email = emailAddr(email); return email ? (db.prepare('SELECT * FROM customers WHERE lower(billing_email)=? ORDER BY id LIMIT 1').get(email) || null) : null; };
   const findCustomerByPhone = (phone) => { const p = normPhone(phone); return p ? (db.prepare('SELECT * FROM customers WHERE sms_number=? OR whatsapp_number=? ORDER BY id LIMIT 1').get(p, p) || null) : null; };
   const openTicketForCustomer = (cid) => db.prepare("SELECT * FROM tickets WHERE customer_id=? AND status NOT IN ('resolved','closed') ORDER BY updated_at DESC LIMIT 1").get(cid) || null;
-  function ingestInbound({ channel, from, to, subject, body, external_id }) {
+  function ingestInbound({ channel, from, to, subject, body, external_id, transport }) {
     body = String(body || '').trim(); if (!body && !subject) return { skipped: 'empty' };
     if (external_id) { const dup = db.prepare('SELECT id FROM ticket_messages WHERE external_id=?').get(external_id); if (dup) return { skipped: 'duplicate' }; }
     let t = null, cust = null;
@@ -296,7 +337,8 @@ export default function registerSupport(app, ctx) {
       ticketNotify(`New ${channel} ticket ${nt.number}: ${subj}`, `${from} via ${channel}:\n\n${body}`, `<p>New <b>${esc2(channel)}</b> ticket <b>${esc2(nt.number)}</b> from ${esc2(from)}:</p><p>${nl2br(body)}</p>`);
       return { ticket_id: id, number: nt.number, created: true };
     }
-    appendMessage(t.id, { author_type: 'customer', author: from, body, channel, direction: 'in', external_id, from_addr: channel === 'email' ? emailAddr(from) : normPhone(from) });
+    appendMessage(t.id, { author_type: 'customer', author: from, body, channel, direction: 'in', external_id,
+      from_addr: channel === 'email' ? emailAddr(from) : normPhone(from), delivery_transport: transport || null });
     db.prepare("UPDATE tickets SET updated_at=datetime('now'), last_channel=?, status=CASE WHEN status IN ('resolved','closed') THEN 'open' ELSE status END, closed_at=CASE WHEN status IN ('resolved','closed') THEN NULL ELSE closed_at END WHERE id=?").run(channel, t.id);
     ticketNotify(`Reply on ${t.number}: ${t.subject}`, `${from} via ${channel}:\n\n${body}`, `<p><b>${esc2(from)}</b> replied via <b>${esc2(channel)}</b> on <b>${esc2(t.number)}</b>:</p><p>${nl2br(body)}</p>`);
     return { ticket_id: t.id, number: t.number };
@@ -306,7 +348,13 @@ export default function registerSupport(app, ctx) {
   app.post('/inbound/twilio/:secret', (req, res) => {
     if (!inboundSecretOk(req)) return res.status(403).type('text/xml').send('<Response/>');
     const b = req.body || {}; const rawFrom = String(b.From || ''); const wa = rawFrom.startsWith('whatsapp:');
-    try { ingestInbound({ channel: wa ? 'whatsapp' : 'sms', from: rawFrom.replace(/^whatsapp:/, ''), to: String(b.To || '').replace(/^whatsapp:/, ''), body: b.Body || '', external_id: b.MessageSid || b.SmsSid || null }); }
+    try { ingestInbound({
+      channel: wa ? 'whatsapp' : 'sms',
+      from: rawFrom.replace(/^whatsapp:/, ''), to: String(b.To || '').replace(/^whatsapp:/, ''),
+      body: b.Body || '', external_id: b.MessageSid || b.SmsSid || null,
+      // RCS replies arrive at this same webhook. Recorded, not treated as a different conversation.
+      transport: wa ? null : inboundTransport(b)
+    }); }
     catch (e) { console.warn('twilio inbound failed:', e.message); }
     res.type('text/xml').send('<Response/>');
   });

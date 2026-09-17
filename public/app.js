@@ -1702,6 +1702,28 @@ function toggleNewSite() {
   $('#newSiteBox').style.display = on ? 'block' : 'none';
   $('#ss-site').style.display = on ? 'none' : 'block';
 }
+/**
+ * Say what the messaging settings will ACTUALLY do, not whether the fields are filled in.
+ *
+ * RCS carrier approval runs 8–16 weeks, and throughout it everything falls back to SMS. That is
+ * the system working, not failing, and the settings page has to say so — otherwise somebody spends
+ * a month believing the integration is broken.
+ */
+function describeRcs(s) {
+  const el = document.getElementById('rcsHelp'); if (!el) return;
+  if (!s.twilio_messaging_service_sid && !s.twilio_sms_from) {
+    el.textContent = 'No SMS sender configured — texts cannot be sent.';
+  } else if (!s.twilio_messaging_service_sid) {
+    el.innerHTML = `Sending plain SMS from <span class="mono">${esc(s.twilio_sms_from)}</span>. For branded, verified
+      messages on iPhone and Android, create a Twilio Messaging Service with an RCS sender and put its SID above.`;
+  } else {
+    const fb = s.twilio_rcs_fallback_from || s.twilio_sms_from;
+    el.innerHTML = `<b>RCS enabled.</b> Twilio will use RCS where the recipient supports it and fall back to SMS
+      ${fb ? `from <span class="mono">${esc(fb)}</span>` : 'automatically'} where they do not.
+      <span class="sec-muted">Until carrier approval completes everything falls back to SMS — that is working, not broken.</span>`;
+  }
+}
+
 function setMM(m) { $('input[name=management_mode]').value = m; $('#mm-plat').classList.toggle('on', m === 'platform'); $('#mm-prov').classList.toggle('on', m === 'provider'); $('#provExtra').style.display = m === 'provider' ? 'block' : 'none'; $('#platExtra').style.display = m === 'provider' ? 'none' : 'block'; }
 function setOwn(o) { $('input[name=ownership]').value = o; ['us', 'carrier', 'distributor'].forEach(x => $('#ow-' + x).classList.toggle('on', x === o)); }
 function setOv(o) { $('input[name=mgmt_overlay]').value = o; ['WireGuard', 'ZeroTier'].forEach(x => $('#ov-' + x).classList.toggle('on', x === o)); }
@@ -2277,6 +2299,8 @@ async function renderSettings() {
       ${field('Account SID', 'twilio_sid', s.twilio_sid, { mono: true, ph: 'ACxxxx…' })}
       ${field('Auth token', 'twilio_token', '', { mono: true, ph: s.has_twilio_token ? 'unchanged' : 'Twilio auth token' })}
       <div class="grid2">${field('SMS from number', 'twilio_sms_from', s.twilio_sms_from, { mono: true, ph: '+1555…' })}${field('WhatsApp sender', 'twilio_wa_from', s.twilio_wa_from, { mono: true, ph: '+1555… (WA-enabled)' })}</div>
+      <div class="grid2">${field('Messaging Service SID (enables RCS)', 'twilio_messaging_service_sid', s.twilio_messaging_service_sid, { mono: true, ph: 'MG…' })}${field('RCS fallback SMS number', 'twilio_rcs_fallback_from', s.twilio_rcs_fallback_from, { mono: true, ph: '+1555… (optional)' })}</div>
+      <div class="help" id="rcsHelp"></div>
       <div style="border-top:.5px solid var(--border);margin:10px 0;padding-top:10px"><b class="small">Telnyx</b></div>
       ${field('API key', 'telnyx_key', '', { mono: true, ph: s.has_telnyx_key ? 'unchanged' : 'KEYxxxx…' })}
       <div class="grid2">${field('SMS from number', 'telnyx_sms_from', s.telnyx_sms_from, { mono: true, ph: '+1555…' })}${field('WhatsApp sender', 'telnyx_wa_from', s.telnyx_wa_from, { mono: true, ph: '+1555…' })}</div>
@@ -2345,6 +2369,7 @@ async function renderSettings() {
       <div class="help">Each bench node uses its token to pull packages + the generic config and to enroll devices. The token is shown once when created.</div>
     </div>`;
   loadTokens();   // fills the phone & tablet card once the page is on screen
+  describeRcs(s); // says what the messaging settings will actually do, not just that they are set
   wgStatus();
 }
 async function saveSettings() {

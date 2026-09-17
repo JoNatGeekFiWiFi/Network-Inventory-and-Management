@@ -167,6 +167,10 @@ export function migrate() {
   ensure('ticket_messages', 'direction', "TEXT NOT NULL DEFAULT 'out'");    // in|out
   ensure('ticket_messages', 'external_id', 'TEXT');                          // provider msg id / email Message-ID (dedupe)
   ensure('ticket_messages', 'delivery_status', 'TEXT');                      // queued|sent|delivered|failed
+  // Which transport actually carried an SMS-channel message: rcs | sms | null (not yet known).
+  // RCS is not a separate channel — it is an upgrade Twilio applies per recipient, and the customer
+  // sees one thread either way — so it is RECORDED here rather than chosen by staff.
+  ensure('ticket_messages', 'delivery_transport', 'TEXT');
   ensure('ticket_messages', 'to_addr', 'TEXT');
   ensure('ticket_messages', 'from_addr', 'TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS idx_ticketmsg_ext ON ticket_messages(external_id)');

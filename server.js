@@ -442,6 +442,10 @@ app.get('/api/settings', requireNoc, (req, res) => {
     twilio_sid: getSetting('twilio_sid') || '',
     twilio_sms_from: getSetting('twilio_sms_from') || '',
     twilio_wa_from: getSetting('twilio_wa_from') || '',
+    // RCS: addressing a Messaging Service is what enables it. Twilio then picks RCS or SMS per
+    // recipient, so this is a transport upgrade of the SMS channel rather than a channel of its own.
+    twilio_messaging_service_sid: getSetting('twilio_messaging_service_sid') || '',
+    twilio_rcs_fallback_from: getSetting('twilio_rcs_fallback_from') || '',
     has_twilio_token: !!getSetting('twilio_token'),
     telnyx_sms_from: getSetting('telnyx_sms_from') || '',
     telnyx_wa_from: getSetting('telnyx_wa_from') || '',
@@ -476,7 +480,7 @@ app.put('/api/settings', requireNoc, (req, res) => {
   if (b.prov_admin_password) setSetting('prov_admin_password', String(b.prov_admin_password));
   if (b.prov_wifi_password) setSetting('prov_wifi_password', String(b.prov_wifi_password));
   // omnichannel messaging config
-  for (const k of ['twilio_sid', 'twilio_sms_from', 'twilio_wa_from', 'telnyx_sms_from', 'telnyx_wa_from', 'telnyx_profile', 'imap_host', 'imap_port', 'imap_user']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  for (const k of ['twilio_sid', 'twilio_sms_from', 'twilio_wa_from', 'twilio_messaging_service_sid', 'twilio_rcs_fallback_from', 'telnyx_sms_from', 'telnyx_wa_from', 'telnyx_profile', 'imap_host', 'imap_port', 'imap_user']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
   if (b.sms_provider !== undefined) setSetting('sms_provider', b.sms_provider === 'telnyx' ? 'telnyx' : 'twilio');
   if (b.whatsapp_provider !== undefined) {
     setSetting('whatsapp_provider', ['telnyx', 'meta'].includes(b.whatsapp_provider) ? b.whatsapp_provider : 'twilio');
