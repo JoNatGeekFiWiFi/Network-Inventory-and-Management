@@ -66,6 +66,28 @@ export function migrate() {
   // rather than rediscovered because a device that only answers over SSH would otherwise sit
   // through an HTTP timeout on every poll — once a minute, for as long as it is deployed.
   ensure('devices', 'mgmt_transport', "TEXT DEFAULT 'auto'");
+  // WireGuard peers that are NOT inventory hardware: a technician's laptop, a phone, an office
+  // machine that needs to reach the management overlay. Kept in its own table rather than as fake
+  // device rows, because a laptop has no site, no model and no customer, and every report that
+  // counts devices would start counting people.
+  //
+  // Addresses here come out of the SAME pool as device addresses. That is the whole reason this
+  // table has to be visible to the allocator: two peers handed the same overlay IP do not fail
+  // loudly, they intermittently steal each other's traffic.
+  db.exec(`CREATE TABLE IF NOT EXISTS wg_peers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    owner TEXT,
+    kind TEXT NOT NULL DEFAULT 'laptop',
+    address TEXT,
+    public_key TEXT,
+    private_key TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    notes TEXT,
+    created_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_wgpeer_addr ON wg_peers(address) WHERE address IS NOT NULL');
   // Cellular signal history for 5G/LTE CPE.
   //
   // The device keeps its own ring buffer at ten-second resolution — finer than this platform polls —

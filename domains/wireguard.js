@@ -21,16 +21,48 @@ export default function registerWireguard(app, ctx) {
 
   const hub = () => createHub({ iface: getSetting('wg_iface') || 'wg0' });
 
-  /** Every device that should exist as a peer on the hub. */
-  const desiredPeers = () => db.prepare(`SELECT id, name, wg_public_key, mgmt_address FROM devices
-      WHERE mgmt_overlay='WireGuard' AND wg_public_key IS NOT NULL AND wg_public_key <> ''
-        AND mgmt_address IS NOT NULL AND mgmt_address <> ''`).all()
-    .map(d => ({ name: d.name, publicKey: d.wg_public_key, allowedIps: `${d.mgmt_address}/32`, keepalive: 25 }));
+  /**
+   * Everything that should exist as a peer on the hub.
+   *
+   * TWO SOURCES, one overlay. Inventory devices (customer routers) and wg_peers (staff laptops and
+   * phones) are different records with different lifecycles, but they share one address space and
+   * one hub. Anything that forgets the second source silently removes every staff laptop from the
+   * hub on the next sync — the peers are gone, nobody is told, and the symptom is a technician who
+   * "just can't get on the VPN today".
+   */
+  const desiredPeers = () => {
+    const devices = db.prepare(`SELECT id, name, wg_public_key, mgmt_address FROM devices
+        WHERE mgmt_overlay='WireGuard' AND wg_public_key IS NOT NULL AND wg_public_key <> ''
+          AND mgmt_address IS NOT NULL AND mgmt_address <> ''`).all()
+      .map(d => ({ name: d.name, publicKey: d.wg_public_key, allowedIps: `${d.mgmt_address}/32`, keepalive: 25 }));
 
-  /** Addresses already handed out, so a new device cannot be given one twice. */
-  const takenAddresses = (exceptId = null) => db.prepare(`SELECT mgmt_address FROM devices
-      WHERE mgmt_overlay='WireGuard' AND mgmt_address IS NOT NULL AND mgmt_address <> ''
-        ${exceptId ? 'AND id <> ?' : ''}`).all(...(exceptId ? [exceptId] : [])).map(r => r.mgmt_address);
+    const people = db.prepare(`SELECT name, owner, public_key, address FROM wg_peers
+        WHERE enabled=1 AND public_key IS NOT NULL AND public_key <> ''
+          AND address IS NOT NULL AND address <> ''`).all()
+      .map(p => ({ name: `${p.name}${p.owner ? ' (' + p.owner + ')' : ''}`, publicKey: p.public_key,
+                   allowedIps: `${p.address}/32`, keepalive: 25 }));
+
+    return [...devices, ...people];
+  };
+
+  /**
+   * Every address already handed out, from BOTH sources.
+   *
+   * The exclusions are separate on purpose: re-provisioning a device must ignore that device's own
+   * address (so it keeps it) without also ignoring a staff peer that happens to share the id.
+   */
+  const takenAddresses = ({ exceptDeviceId = null, exceptPeerId = null } = {}) => {
+    // NOT filtered on having keys: a device that has been deprovisioned still HOLDS its address.
+    // Releasing it is a separate, deliberate act, because handing a live IP to a second device is
+    // the kind of mistake that shows up weeks later as traffic going to the wrong place.
+    const devices = db.prepare(`SELECT mgmt_address AS a FROM devices
+        WHERE mgmt_overlay='WireGuard' AND mgmt_address IS NOT NULL AND mgmt_address <> ''
+          ${exceptDeviceId ? 'AND id <> ?' : ''}`).all(...(exceptDeviceId ? [exceptDeviceId] : []));
+    const peers = db.prepare(`SELECT address AS a FROM wg_peers
+        WHERE address IS NOT NULL AND address <> ''
+          ${exceptPeerId ? 'AND id <> ?' : ''}`).all(...(exceptPeerId ? [exceptPeerId] : []));
+    return [...devices, ...peers].map(r => r.a);
+  };
 
   // ---- hub status -----------------------------------------------------------------------
   //
@@ -227,7 +259,7 @@ export default function registerWireguard(app, ctx) {
     // still-valid address means re-provisioning does not silently renumber a working device.
     let addr = d.mgmt_address;
     const keep = addr && d.mgmt_overlay === 'WireGuard' && contains(subnet, `${addr}/32`);
-    if (!keep) addr = nextFreeAddress(subnet, takenAddresses(d.id), { reserve: [hubAddress(subnet)] });
+    if (!keep) addr = nextFreeAddress(subnet, takenAddresses({ exceptDeviceId: d.id }), { reserve: [hubAddress(subnet)] });
     if (!addr) return res.status(409).json({ error: `No free address left in ${subnet}` });
 
     db.prepare('UPDATE devices SET wg_public_key=?, wg_private_key=?, mgmt_overlay=?, mgmt_address=? WHERE id=?')
@@ -239,13 +271,40 @@ export default function registerWireguard(app, ctx) {
   });
 
   /** Take a device off WireGuard and off the hub, in that order. */
+  /**
+   * Take a device off the hub — but KEEP ITS ADDRESS RESERVED.
+   *
+   * An overlay address is not just an allocation, it is a fact recorded elsewhere: in firewall
+   * rules, in monitoring, in somebody's notes, in a bookmark. A router pulled off the overlay for
+   * an RMA or a hardware swap and then put back must come back on the SAME address, or every one
+   * of those references silently points at whatever device was handed the number in between.
+   *
+   * So deprovisioning clears the KEYS and removes the peer from the hub — access is genuinely
+   * revoked — while the address stays held against the device. The pool only gives it up when the
+   * device is deleted, or when somebody explicitly releases it.
+   */
   app.post('/api/wireguard/devices/:id/deprovision', requireNoc, async (req, res) => {
     const d = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
     if (!d) return res.status(404).json({ error: 'not found' });
-    db.prepare('UPDATE devices SET wg_public_key=NULL, wg_private_key=NULL, mgmt_address=NULL WHERE id=?').run(d.id);
-    audit(req, 'edit', 'device#' + d.id, 'WireGuard removed');
+    const release = req.body && (req.body.release_address === true || req.body.release_address === 'true');
+
+    if (release) {
+      db.prepare('UPDATE devices SET wg_public_key=NULL, wg_private_key=NULL, mgmt_address=NULL WHERE id=?').run(d.id);
+      audit(req, 'edit', 'device#' + d.id, `WireGuard removed, address ${d.mgmt_address} RELEASED back to the pool`);
+    } else {
+      db.prepare('UPDATE devices SET wg_public_key=NULL, wg_private_key=NULL WHERE id=?').run(d.id);
+      audit(req, 'edit', 'device#' + d.id, `WireGuard removed, address ${d.mgmt_address} still reserved`);
+    }
+
     const sync = await hub().sync(desiredPeers());
-    res.json({ ok: true, hub: sync });
+    res.json({
+      ok: true, hub: sync,
+      address: release ? null : d.mgmt_address,
+      reserved: !release,
+      note: release
+        ? `${d.mgmt_address} is back in the pool and may be handed to another device.`
+        : `${d.mgmt_address} stays reserved for this device — re-provisioning gives it the same address back. Delete the device, or deprovision with "release address", to free it.`
+    });
   });
 
   // ---- push the config onto a RouterOS device -----------------------------------------------
@@ -339,5 +398,92 @@ export default function registerWireguard(app, ctx) {
     });
     audit(req, 'credential_read', 'device#' + d.id, 'WireGuard config');
     res.json({ config, address: d.mgmt_address });
+  });
+
+  // ---- peers that are not inventory hardware ---------------------------------------------------
+  //
+  // A technician's laptop, a phone, an office machine. Same overlay, same hub, same address pool —
+  // but not a router, not at a site, not owned by a customer, and not something any inventory
+  // report should count.
+
+  const PEER_KINDS = ['laptop', 'phone', 'desktop', 'server', 'other'];
+
+  app.get('/api/wireguard/peers', requireNoc, (req, res) => {
+    // Private keys are never listed. They are released only by the config endpoint, which audits.
+    res.json(db.prepare(`SELECT id, name, owner, kind, address, public_key, enabled, notes, created_by, created_at
+      FROM wg_peers ORDER BY name COLLATE NOCASE`).all());
+  });
+
+  app.post('/api/wireguard/peers', requireNoc, async (req, res) => {
+    const b = req.body || {};
+    const name = String(b.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'A peer needs a name' });
+
+    const subnet = getSetting('wg_subnet');
+    if (!subnet) return res.status(400).json({ error: 'Plan the WireGuard subnet first (Settings → WireGuard)' });
+
+    // Allocated against BOTH tables. A laptop given a router's address would not fail loudly — the
+    // two would intermittently steal each other's traffic, which is a genuinely horrible thing to
+    // diagnose weeks later.
+    const addr = nextFreeAddress(subnet, takenAddresses(), { reserve: [hubAddress(subnet)] });
+    if (!addr) return res.status(409).json({ error: `No free address left in ${subnet}` });
+
+    const kp = wgKeypair();
+    const info = db.prepare(`INSERT INTO wg_peers (name, owner, kind, address, public_key, private_key, notes, created_by)
+      VALUES (?,?,?,?,?,?,?,?)`).run(
+      name, String(b.owner || '').trim() || null,
+      PEER_KINDS.includes(b.kind) ? b.kind : 'laptop',
+      addr, kp.publicKey, kp.privateKey,
+      String(b.notes || '').trim() || null,
+      (req.user && req.user.email) || null);
+
+    audit(req, 'create', 'wg-peer#' + info.lastInsertRowid, `${name} → ${addr}`);
+    const sync = await hub().sync(desiredPeers());
+    res.json({ id: info.lastInsertRowid, address: addr, public_key: kp.publicKey, hub: sync });
+  });
+
+  app.put('/api/wireguard/peers/:id', requireNoc, async (req, res) => {
+    const p = db.prepare('SELECT * FROM wg_peers WHERE id=?').get(req.params.id);
+    if (!p) return res.status(404).json({ error: 'not found' });
+    const b = req.body || {};
+    const enabled = b.enabled === undefined ? p.enabled : (b.enabled ? 1 : 0);
+    db.prepare('UPDATE wg_peers SET name=?, owner=?, kind=?, notes=?, enabled=? WHERE id=?').run(
+      String(b.name || p.name).trim(), String(b.owner ?? p.owner ?? '').trim() || null,
+      PEER_KINDS.includes(b.kind) ? b.kind : p.kind,
+      String(b.notes ?? p.notes ?? '').trim() || null, enabled, p.id);
+    audit(req, 'edit', 'wg-peer#' + p.id, enabled ? 'enabled' : 'DISABLED');
+    // Disabling must reach the hub immediately — a peer that is off in the database and still on
+    // the hub is access somebody believes they have revoked.
+    const sync = await hub().sync(desiredPeers());
+    res.json({ ok: true, hub: sync });
+  });
+
+  app.delete('/api/wireguard/peers/:id', requireNoc, async (req, res) => {
+    const p = db.prepare('SELECT * FROM wg_peers WHERE id=?').get(req.params.id);
+    if (!p) return res.status(404).json({ error: 'not found' });
+    db.prepare('DELETE FROM wg_peers WHERE id=?').run(p.id);
+    audit(req, 'delete', 'wg-peer#' + p.id, `${p.name} (${p.address})`);
+    // Removed from the database first, then the hub is made to match — the same order the device
+    // deprovision uses, so a failure leaves access revoked rather than granted.
+    const sync = await hub().sync(desiredPeers());
+    res.json({ ok: true, hub: sync });
+  });
+
+  /** The peer's own config. Audited on every read, because it contains a private key. */
+  app.get('/api/wireguard/peers/:id/config', requireNoc, (req, res) => {
+    const p = db.prepare('SELECT * FROM wg_peers WHERE id=?').get(req.params.id);
+    if (!p) return res.status(404).json({ error: 'not found' });
+    if (!p.private_key || !p.address) return res.status(400).json({ error: 'This peer has no key yet' });
+    const subnet = getSetting('wg_subnet');
+    const config = deviceConfig({
+      privateKey: p.private_key,
+      address: p.address,
+      dns: getSetting('wg_dns'),
+      serverPub: getSetting('wg_server_pub') || 'SET_THE_HUB_KEY',
+      endpoint: getSetting('wg_endpoint') || 'YOUR_HUB:51820',
+      allowed: getSetting('wg_supernet') || subnet || '10.0.0.0/8'
+    });
+    audit(req, 'credential_read', 'wg-peer#' + p.id, `WireGuard config for ${p.name}`);
+    res.json({ config, address: p.address, name: p.name, filename: `${p.name.replace(/[^\w.-]+/g, '-').toLowerCase()}.conf` });
   });
 }

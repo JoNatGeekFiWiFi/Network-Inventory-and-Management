@@ -279,8 +279,20 @@ await login('admin@geekitek.test', 'admin123');
   const audit = (await call('/api/audit')).json;
   ok(audit.some(a => a.action === 'credential_read' && /WireGuard/.test(a.details || '')), 'downloading a config is audited');
 
-  ok((await call(`/api/wireguard/devices/${dev.id}/deprovision`, { body: {} })).status === 200, 'a device can be taken off WireGuard');
-  ok(!(await call('/api/devices/' + dev.id)).json.mgmt_address, 'and loses its address');
+  const off = await call(`/api/wireguard/devices/${dev.id}/deprovision`, { body: {} });
+  ok(off.status === 200, 'a device can be taken off WireGuard');
+
+  // Deliberately changed: deprovisioning used to NULL the address, which freed it for reuse. An
+  // overlay address is recorded in firewall rules, monitoring and people's notes, so a router
+  // pulled for an RMA and put back must return on the same one. The address is now HELD until the
+  // device is deleted, or until somebody asks for it back explicitly.
+  ok(!!(await call('/api/devices/' + dev.id)).json.mgmt_address, 'but KEEPS its address, reserved against the device');
+  ok(off.json.reserved === true, 'and the response says so');
+  ok(!(await call('/api/devices/' + dev.id)).json.wg_public_key, 'while the keys are gone, so access really is revoked');
+
+  const freed = await call(`/api/wireguard/devices/${dev.id}/deprovision`, { body: { release_address: true } });
+  ok(freed.json.reserved === false && !(await call('/api/devices/' + dev.id)).json.mgmt_address,
+    'releasing explicitly is what actually gives the address back');
 
   await call('/api/devices/' + dev.id, { method: 'DELETE' });
   await call('/api/devices/' + dev2.id, { method: 'DELETE' });

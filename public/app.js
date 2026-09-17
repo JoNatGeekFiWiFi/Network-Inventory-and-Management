@@ -60,6 +60,7 @@ function setupHeader() {
   $('#navModels').style.display = isPriv() ? '' : 'none';
   $('#navSettings').style.display = isPriv() ? '' : 'none';
   $('#navZt').style.display = isPriv() ? '' : 'none';
+  $('#navWg').style.display = isPriv() ? '' : 'none';
   $('#navBlock').style.display = isPriv() ? '' : 'none';
   $('#navBatch').style.display = isPriv() ? '' : 'none';
   $('#navAccess').style.display = isPriv() ? '' : 'none';
@@ -222,6 +223,7 @@ async function route() {
     if (p[0] === 'models') { setNav('models'); return await renderModels(); }
     if (p[0] === 'settings') { setNav('settings'); return await renderSettings(); }
     if (p[0] === 'zerotier') { setNav('zerotier'); return await renderZeroTier(); }
+    if (p[0] === 'wireguard') { setNav('wireguard'); return await renderWireGuard(); }
     if (p[0] === 'blocklist') { setNav('blocklist'); return await renderBlocklist(); }
     if (p[0] === 'batch' && p[1]) { setNav('batch'); return await renderBatchJob(p[1]); }
     if (p[0] === 'batch') { setNav('batch'); return await renderBatch(); }
@@ -2479,6 +2481,202 @@ async function ztSync() {
 }
 // ---------- ZeroTier status page ----------
 let _ztMembers = [];
+/**
+ * One page for the whole WireGuard overlay.
+ *
+ * Everything here already existed as an API; what was missing was anywhere to see it. Hub status
+ * lived in Settings, provisioning lived one device page at a time, and nothing showed the overlay
+ * as a whole — so "which of our routers are actually on WireGuard, and is the hub in step with the
+ * database" had no answer short of clicking through every device.
+ */
+async function renderWireGuard() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  view().innerHTML = '<h1>WireGuard</h1><div class="card" style="padding:20px">Reading the hub…</div>';
+
+  let st, peers = [], devices = [];
+  try {
+    [st, peers, devices] = await Promise.all([
+      api('/wireguard/status'),
+      api('/wireguard/peers'),
+      api('/devices')
+    ]);
+  } catch (e) {
+    view().innerHTML = `<h1>WireGuard</h1><div class="card" style="padding:20px">Couldn't reach the hub: ${esc(e.message)}</div>`;
+    return;
+  }
+  window._wgDevices = devices;
+
+  const wgDevices = devices.filter(d => d.mgmt_overlay === 'WireGuard' && d.mgmt_address);
+  // Handshakes are keyed by public key, which is the only thing the hub and the database agree on.
+  const byKey = {};
+  for (const p of (st.peers || [])) byKey[p.public_key] = p;
+
+  const sync = st.sync || {};
+  const drift = (sync.missing_on_hub || []).length + (sync.stale_on_hub || []).length;
+
+  const hubCard = st.hub.available
+    ? `<div class="grid3" style="margin:16px 0">
+        <div class="metric"><div class="l">Hub</div><div class="v" style="color:var(--success)">up</div>
+          <div class="small sec-muted">${esc(st.hub.endpoint || 'no endpoint set')}</div></div>
+        <div class="metric"><div class="l">Peers on hub</div><div class="v">${(st.peers || []).length}</div>
+          <div class="small sec-muted">${st.devices} expected</div></div>
+        <div class="metric"><div class="l">Addresses used</div><div class="v">${st.capacity ? st.capacity.used : '—'}</div>
+          <div class="small sec-muted">${st.capacity ? st.capacity.free + ' free in ' + esc(st.subnet) : ''}</div></div>
+      </div>`
+    : `<div class="card" style="padding:16px;margin:16px 0">
+        <div style="color:var(--danger);font-weight:500">The hub is not reachable</div>
+        <div class="small sec-muted" style="margin-top:6px">${esc(st.hub.reason || '')}</div>
+        <div class="mono small" style="margin-top:8px">${esc(st.setup_command)}</div>
+      </div>`;
+
+  // Drift between the database and the hub is the failure nobody can see from either screen alone,
+  // so it gets its own banner rather than being left to be inferred from two counts.
+  const driftCard = (st.hub.available && drift)
+    ? `<div class="card" style="padding:14px;margin-bottom:16px;border-left:3px solid var(--warn)">
+        <div style="font-weight:500">The hub does not match the database</div>
+        ${(sync.missing_on_hub || []).length ? `<div class="small">Missing from the hub: ${esc(sync.missing_on_hub.join(', '))}</div>` : ''}
+        ${(sync.stale_on_hub || []).length ? `<div class="small">On the hub but not here: ${sync.stale_on_hub.length} peer(s) — these still have access</div>` : ''}
+        <button class="btn sm primary" style="margin-top:10px" onclick="wgSyncNow()"><i class="ti ti-refresh"></i> Make the hub match</button>
+      </div>`
+    : '';
+
+  const row = (name, sub, key, addr, actions) => {
+    const p = byKey[key];
+    const live = p && p.online;
+    const seen = p && p.last_handshake ? new Date(p.last_handshake).toLocaleString() : null;
+    return `<div class="row">
+      <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${live ? 'var(--success)' : 'var(--text3)'};flex:none"></span>
+      <div style="flex:1;min-width:0">
+        <div>${esc(name)} <span class="mono small sec-muted">${esc(addr || '—')}</span></div>
+        <div class="small sec-muted">${esc(sub)}${seen ? ' · last handshake ' + esc(seen) : (p ? ' · never connected' : ' · not on the hub')}</div>
+      </div>${actions}</div>`;
+  };
+
+  view().innerHTML = `<div class="head"><h1 style="flex:1">WireGuard</h1>
+      <button class="btn" onclick="wgSyncNow()"><i class="ti ti-refresh"></i> Sync hub</button></div>
+    ${hubCard}${driftCard}
+
+    <div class="card">
+      <div class="hd"><h2><i class="ti ti-router-2"></i> Devices · ${wgDevices.length}</h2>
+        <button class="btn sm" onclick="wgAddDevice()"><i class="ti ti-plus"></i> Add a device</button></div>
+      ${wgDevices.map(d => row(d.name, d.assigned_label || 'unassigned', d.wg_public_key, d.mgmt_address,
+        `<button class="btn sm" onclick="showWg(${d.id})" title="Show or download this device's config — contains its private key, and the read is logged"><i class="ti ti-download"></i> Config</button>`
+      )).join('') || '<div class="row muted">No devices on WireGuard yet.</div>'}
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <div class="hd"><h2><i class="ti ti-device-laptop"></i> Laptops &amp; phones · ${peers.length}</h2>
+        <button class="btn sm" onclick="wgAddPeer()"><i class="ti ti-plus"></i> Add a laptop or phone</button></div>
+      ${peers.map(p => row(
+        p.name + (p.owner ? ' — ' + p.owner : ''),
+        p.kind + (p.enabled ? '' : ' · DISABLED'),
+        p.public_key, p.address,
+        `<button class="btn sm" onclick="wgPeerConfig(${p.id})" title="Show or download this config — contains a private key, and the read is logged"><i class="ti ti-download"></i> Config</button>
+         <button class="btn sm" onclick="wgPeerToggle(${p.id}, ${p.enabled ? 0 : 1})" title="${p.enabled ? 'Revoke access immediately' : 'Restore access'}"><i class="ti ti-${p.enabled ? 'ban' : 'check'}"></i> ${p.enabled ? 'Disable' : 'Enable'}</button>
+         <button class="btn sm" onclick="wgPeerDelete(${p.id})" title="Remove this peer and its hub access"><i class="ti ti-trash"></i></button>`
+      )).join('') || '<div class="row muted">No laptops or phones yet. Add one to give a technician access to the management overlay without ZeroTier.</div>'}
+      <div class="help">These are people, not inventory — they have no site, model or customer, and nothing counts them as hardware. They share the same address pool as the devices above.</div>
+    </div>
+    <div id="wgout" style="margin-top:16px"></div>`;
+}
+
+async function wgSyncNow() {
+  toast('Syncing the hub…');
+  try { const r = await api('/wireguard/sync', { method: 'POST' });
+    toast(r.ok ? `Hub synced (+${r.applied.added} ~${r.applied.updated} -${r.applied.removed})` : (r.reason || 'Sync failed'));
+    renderWireGuard();
+  } catch (e) { toast(e.message); }
+}
+
+/** Put an existing inventory device onto WireGuard. */
+async function wgAddDevice() {
+  const eligible = (window._wgDevices || []).filter(d => d.management_mode !== 'provider' && d.mgmt_overlay !== 'WireGuard');
+  const out = $('#wgout'); if (!out) return;
+  out.innerHTML = `<div class="card" style="padding:16px">
+    <h2 style="margin-bottom:10px">Add a device to WireGuard</h2>
+    ${eligible.length ? `<div class="fld"><label class="fl">Device</label>
+      <select id="wgNewDev" class="inp">${eligible.map(d => `<option value="${d.id}">${esc(d.name)}${d.assigned_label ? ' — ' + esc(d.assigned_label) : ''}</option>`).join('')}</select></div>
+      <div class="help">Generates a keypair, assigns the next free address, and adds it to the hub. If it is already on ZeroTier, that stays until you change its overlay.</div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:10px">
+        <button class="btn" onclick="document.getElementById('wgout').innerHTML=''">Cancel</button>
+        <button class="btn primary" onclick="wgProvisionSelected()"><i class="ti ti-shield-lock"></i> Provision</button></div>`
+      : '<div class="row muted">Every platform-managed device is already on WireGuard.</div>'}
+  </div>`;
+}
+async function wgProvisionSelected() {
+  const id = $('#wgNewDev') && $('#wgNewDev').value; if (!id) return;
+  try { const r = await api(`/wireguard/devices/${id}/provision`, { method: 'POST' });
+    toast(`Provisioned on ${r.address}`); renderWireGuard();
+  } catch (e) { toast(e.message); }
+}
+
+/** Issue a config to a person's laptop or phone. */
+async function wgAddPeer() {
+  const out = $('#wgout'); if (!out) return;
+  out.innerHTML = `<div class="card" style="padding:16px">
+    <h2 style="margin-bottom:10px">Add a laptop or phone</h2>
+    <div class="grid2">${field('Name', 'wgPeerName', '', { ph: "e.g. Jon's MacBook" })}${field('Person', 'wgPeerOwner', '', { ph: 'who it belongs to' })}</div>
+    <div class="grid2">${field('Type', 'wgPeerKind', 'laptop', { type: 'select', options: [
+      { v: 'laptop', l: 'Laptop' }, { v: 'phone', l: 'Phone' }, { v: 'desktop', l: 'Desktop' },
+      { v: 'server', l: 'Server' }, { v: 'other', l: 'Other' }] })}${field('Notes', 'wgPeerNotes', '', { ph: 'optional' })}</div>
+    <div class="help">Takes the next free address from the same pool as the devices. The config is shown once here and can be downloaded again later — each read is logged.</div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:10px">
+      <button class="btn" onclick="document.getElementById('wgout').innerHTML=''">Cancel</button>
+      <button class="btn primary" onclick="wgCreatePeer()"><i class="ti ti-plus"></i> Create and show config</button></div>
+  </div>`;
+}
+async function wgCreatePeer() {
+  const name = ($('[name=wgPeerName]') || {}).value || '';
+  if (!name.trim()) { toast('Give it a name'); return; }
+  try {
+    const r = await api('/wireguard/peers', { method: 'POST', body: {
+      name, owner: ($('[name=wgPeerOwner]') || {}).value, kind: ($('[name=wgPeerKind]') || {}).value,
+      notes: ($('[name=wgPeerNotes]') || {}).value } });
+    toast(`Created on ${r.address}`);
+    await renderWireGuard();
+    wgPeerConfig(r.id);
+  } catch (e) { toast(e.message); }
+}
+async function wgPeerToggle(id, enabled) {
+  try { await api(`/wireguard/peers/${id}`, { method: 'PUT', body: { enabled } });
+    toast(enabled ? 'Enabled' : 'Disabled — access revoked on the hub'); renderWireGuard();
+  } catch (e) { toast(e.message); }
+}
+async function wgPeerDelete(id) {
+  if (!confirm('Remove this peer? Its access is revoked on the hub immediately.')) return;
+  try { await api(`/wireguard/peers/${id}`, { method: 'DELETE' }); toast('Removed'); renderWireGuard(); }
+  catch (e) { toast(e.message); }
+}
+async function wgPeerConfig(id) {
+  const out = $('#wgout'); if (!out) return;
+  try {
+    const r = await api(`/wireguard/peers/${id}/config`);
+    out.innerHTML = `<div class="card" style="padding:16px">
+      <div class="hd" style="padding:0 0 10px"><h2>${esc(r.name)} · <span class="mono">${esc(r.address)}</span></h2>
+        <button class="btn sm" onclick="wgDownload()"><i class="ti ti-download"></i> Download .conf</button></div>
+      <pre id="wgcfg" class="mono" data-filename="${esc(r.filename)}" style="white-space:pre-wrap;background:var(--surface2);padding:12px;border-radius:8px;font-size:12px">${esc(r.config)}</pre>
+      <div class="help"><i class="ti ti-lock"></i> Contains a private key. This read is in the activity log. On a phone, import the file into the WireGuard app.</div>
+    </div>`;
+  } catch (e) { toast(e.message); }
+}
+/**
+ * Download the config currently on screen.
+ *
+ * Reads both the filename and the text out of the DOM rather than taking them as arguments baked
+ * into an onclick attribute. The first version interpolated JSON.stringify(filename) straight into
+ * the markup, which a peer named with an apostrophe would have broken out of — and the filename
+ * derives from a name a user types. The repository has a test for exactly that pattern, and it
+ * caught this.
+ */
+function wgDownload() {
+  const pre = document.getElementById('wgcfg'); if (!pre) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([pre.textContent], { type: 'text/plain' }));
+  a.download = pre.dataset.filename || 'wireguard.conf';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
 async function renderZeroTier() {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
   let data;
