@@ -9,7 +9,8 @@ import { importModelCatalog } from './model-catalog.js';
 import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie, pruneSessions,
          createApiToken, userForApiToken, listApiTokens, revokeApiToken, allApiTokens } from './auth.js';
 import { hashPassword, verifyPassword } from './hash.js';
-import { wgKeypair, nextFreeIp, serverIp, deviceConfig, serverPeerStanza, parseCidr } from './wg.js';
+// deviceConfig and serverPeerStanza left with the route that used them, in domains/wireguard.js.
+import { wgKeypair, nextFreeIp, serverIp, parseCidr } from './wg.js';
 import https from 'node:https';
 import http from 'node:http';
 import net from 'node:net';
@@ -550,19 +551,13 @@ app.post('/api/devices/:id/wireguard', requireNoc, (req, res) => {
 });
 
 // Download a device's WireGuard config (+ the server peer stanza). Contains a private key — audited.
-app.get('/api/devices/:id/wireguard/config', requireNoc, (req, res) => {
-  const dvc = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
-  if (!dvc) return res.status(404).json({ error: 'not found' });
-  if (!dvc.wg_private_key || !dvc.mgmt_address) return res.status(400).json({ error: 'Device is not provisioned on WireGuard yet' });
-  const cfg = deviceConfig({
-    privateKey: dvc.wg_private_key, address: dvc.mgmt_address, dns: getSetting('wg_dns'),
-    serverPub: getSetting('wg_server_pub') || 'SET_WG_SERVER_KEY', endpoint: getSetting('wg_endpoint') || 'YOUR_HUB:51820',
-    allowed: getSetting('wg_subnet') || '10.0.0.0/8'
-  });
-  const peer = serverPeerStanza({ name: dvc.name, publicKey: dvc.wg_public_key, address: dvc.mgmt_address });
-  audit(req, 'credential_read', 'device#' + req.params.id, 'WireGuard config');
-  res.json({ config: cfg, server_peer: peer, address: dvc.mgmt_address });
-});
+// A device's WireGuard config lives at /api/wireguard/devices/:id/config, in domains/wireguard.js.
+//
+// There used to be a second copy here. The two built the same file with one difference: this one
+// set AllowedIPs from wg_subnet, the other from wg_supernet. A router configured from the device
+// page therefore could not reach ZeroTier members, and one configured from the WireGuard page
+// could — the same device, two different answers, decided by which screen the technician happened
+// to be on. Nothing flagged it, because each endpoint was self-consistent.
 
 // Tag a device interface with a role (WAN1/WAN2/LAN/MGMT) — persists across polls
 app.put('/api/devices/:id/iface-role', requireNoc, (req, res) => {

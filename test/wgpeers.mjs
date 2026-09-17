@@ -98,6 +98,29 @@ await login('admin@geekitek.test', 'admin123');
       ok(again.json.reused_address === true, 'and reports that it was reused rather than freshly allocated');
 
       // Explicit release is the escape hatch, and it has to be asked for.
+      // ---- a device's config comes from ONE place now ----
+      //
+      // There were two endpoints building this file, differing only in whether AllowedIPs came from
+      // wg_subnet or wg_supernet. Same router, different config, depending on which page you opened
+      // — and the narrower one could not reach ZeroTier members. The old route is gone; this pins
+      // the survivor's shape so a device config and a laptop config stay interchangeable to the UI.
+      const dcfg = await call(`/api/wireguard/devices/${dev.id}/config`);
+      ok(dcfg.status === 200 && /\[Interface\]/.test(dcfg.json.config || ''), "a device's config is readable");
+      for (const key of ['config', 'address', 'name', 'filename', 'qr']) {
+        ok(dcfg.json[key] != null, `and carries ${key}, the same as a peer's — one shape, one viewer`);
+      }
+      ok(dcfg.json.filename.endsWith('.conf') && !/[^\w.-]/.test(dcfg.json.filename), 'with a safe filename derived from the device name');
+      ok(typeof dcfg.json.server_peer === 'string' && /\[Peer\]/.test(dcfg.json.server_peer),
+        'and the hub-side [Peer] block, which only the device endpoint has');
+
+      const supernet = (await call('/api/wireguard/status')).json.supernet;
+      if (supernet) ok(dcfg.json.config.includes(supernet),
+        `AllowedIPs uses the supernet ${supernet}, so the router can reach ZeroTier members too`);
+      else ok(true, 'no supernet configured in this fixture, so the AllowedIPs check does not apply');
+
+      ok((await call('/api/devices/' + dev.id + '/wireguard/config')).status === 404,
+        'and the old duplicate route is gone rather than left to drift');
+
       const released = await call(`/api/wireguard/devices/${dev.id}/deprovision`, { body: { release_address: true } });
       ok(released.json.reserved === false, 'releasing explicitly gives the address up');
       ok(/back in the pool/.test(released.json.note), 'and says so plainly');
@@ -123,6 +146,15 @@ await login('admin@geekitek.test', 'admin123');
     ok(/\[Peer\]/.test(cfg.json.config) && /Endpoint = /.test(cfg.json.config), 'and the hub to connect to');
     ok(cfg.json.filename.endsWith('.conf'), 'named so it imports cleanly into the WireGuard app');
     ok(!/[^\w.-]/.test(cfg.json.filename), 'with a filename safe to save — no spaces or punctuation from the peer name');
+
+    // ---- the QR, which is the point of the whole thing on a phone ----
+    ok(typeof cfg.json.qr === 'string' && cfg.json.qr.startsWith('<svg'), 'and a QR code to scan instead of emailing a private key around');
+    // The decoder has to get the config back, not something near it. Encoding is checked properly
+    // in test/qr.mjs; here the question is only whether the right TEXT went in.
+    const { encode } = await import('../lib/qr.js');
+    const roundTrip = encode(cfg.json.config);
+    ok(roundTrip.size > 0, `the config (${cfg.json.config.length} bytes) encodes at version ${roundTrip.version}`);
+    ok(!cfg.json.qr_error, 'with no fallback error');
 
     await call('/api/wireguard/peers/' + id, { method: 'DELETE' });
     await call('/api/wireguard/peers/' + second.json.id, { method: 'DELETE' });

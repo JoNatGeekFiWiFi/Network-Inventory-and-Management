@@ -186,3 +186,19 @@ label.fl{display:block;font-size:13px;color:var(--text2);margin-bottom:5px}
   }
   .sidebar { padding-left: calc(10px + env(safe-area-inset-left)); }
 }
+
+/* ---- config sheet -------------------------------------------------------------------------------
+   A config and its QR, over the page rather than pushed below it. The old panel rendered underneath
+   the list, so on a phone — which is exactly where scanning a QR matters — you tapped a row and
+   nothing appeared to happen, because the thing you wanted was off the bottom of the screen. */
+.sheet-back{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:900;display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
+.sheet{background:var(--surface);border:.5px solid var(--border);border-radius:var(--radius-lg);max-width:560px;width:100%;max-height:calc(100vh - 40px);overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.28)}
+.sheet .hd{position:sticky;top:0;background:var(--surface);border-bottom:.5px solid var(--border);z-index:1}
+.sheet-body{padding:16px}
+.qr-wrap{display:flex;justify-content:center;padding:14px;background:#fff;border-radius:var(--radius-lg);border:.5px solid var(--border)}
+.qr-wrap svg{max-width:100%;height:auto;display:block}
+@media (max-width:640px){
+  .sheet-back{padding:0;align-items:stretch}
+  .sheet{max-width:none;border-radius:0;max-height:100vh;
+    padding-bottom:env(safe-area-inset-bottom)}
+}

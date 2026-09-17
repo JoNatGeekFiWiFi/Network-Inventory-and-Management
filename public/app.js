@@ -2540,16 +2540,19 @@ async function renderWireGuard() {
       </div>`
     : '';
 
-  const row = (name, sub, key, addr, actions) => {
+  // Clicking the row opens the config sheet — the buttons on the right stop the click so they keep
+  // doing their own thing. `open` is the call as a string because these rows are built as markup;
+  // it takes only a numeric id, so there is nothing here to escape.
+  const row = (name, sub, key, addr, actions, open) => {
     const p = byKey[key];
     const live = p && p.online;
     const seen = p && p.last_handshake ? new Date(p.last_handshake).toLocaleString() : null;
-    return `<div class="row">
+    return `<div class="row rowlink" onclick="${open}" title="Open the config and QR code">
       <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${live ? 'var(--success)' : 'var(--text3)'};flex:none"></span>
       <div style="flex:1;min-width:0">
         <div>${esc(name)} <span class="mono small sec-muted">${esc(addr || '—')}</span></div>
         <div class="small sec-muted">${esc(sub)}${seen ? ' · last handshake ' + esc(seen) : (p ? ' · never connected' : ' · not on the hub')}</div>
-      </div>${actions}</div>`;
+      </div><div style="display:flex;gap:6px;flex:none" onclick="event.stopPropagation()">${actions}</div></div>`;
   };
 
   view().innerHTML = `<div class="head"><h1 style="flex:1">WireGuard</h1>
@@ -2560,7 +2563,8 @@ async function renderWireGuard() {
       <div class="hd"><h2><i class="ti ti-router-2"></i> Devices · ${wgDevices.length}</h2>
         <button class="btn sm" onclick="wgAddDevice()"><i class="ti ti-plus"></i> Add a device</button></div>
       ${wgDevices.map(d => row(d.name, d.assigned_label || 'unassigned', d.wg_public_key, d.mgmt_address,
-        `<button class="btn sm" onclick="showWg(${d.id})" title="Show or download this device's config — contains its private key, and the read is logged"><i class="ti ti-download"></i> Config</button>`
+        `<button class="btn sm" onclick="wgDeviceConfig(${d.id})" title="Show the config and QR code — contains this device's private key, and the read is logged"><i class="ti ti-qrcode"></i> Config &amp; QR</button>`,
+        `wgDeviceConfig(${d.id})`
       )).join('') || '<div class="row muted">No devices on WireGuard yet.</div>'}
     </div>
 
@@ -2571,9 +2575,10 @@ async function renderWireGuard() {
         p.name + (p.owner ? ' — ' + p.owner : ''),
         p.kind + (p.enabled ? '' : ' · DISABLED'),
         p.public_key, p.address,
-        `<button class="btn sm" onclick="wgPeerConfig(${p.id})" title="Show or download this config — contains a private key, and the read is logged"><i class="ti ti-download"></i> Config</button>
+        `<button class="btn sm" onclick="wgPeerConfig(${p.id})" title="Show the config and QR code — contains a private key, and the read is logged"><i class="ti ti-qrcode"></i> Config &amp; QR</button>
          <button class="btn sm" onclick="wgPeerToggle(${p.id}, ${p.enabled ? 0 : 1})" title="${p.enabled ? 'Revoke access immediately' : 'Restore access'}"><i class="ti ti-${p.enabled ? 'ban' : 'check'}"></i> ${p.enabled ? 'Disable' : 'Enable'}</button>
-         <button class="btn sm" onclick="wgPeerDelete(${p.id})" title="Remove this peer and its hub access"><i class="ti ti-trash"></i></button>`
+         <button class="btn sm" onclick="wgPeerDelete(${p.id})" title="Remove this peer and its hub access"><i class="ti ti-trash"></i></button>`,
+        `wgPeerConfig(${p.id})`
       )).join('') || '<div class="row muted">No laptops or phones yet. Add one to give a technician access to the management overlay without ZeroTier.</div>'}
       <div class="help">These are people, not inventory — they have no site, model or customer, and nothing counts them as hardware. They share the same address pool as the devices above.</div>
     </div>
@@ -2647,18 +2652,63 @@ async function wgPeerDelete(id) {
   try { await api(`/wireguard/peers/${id}`, { method: 'DELETE' }); toast('Removed'); renderWireGuard(); }
   catch (e) { toast(e.message); }
 }
-async function wgPeerConfig(id) {
-  const out = $('#wgout'); if (!out) return;
-  try {
-    const r = await api(`/wireguard/peers/${id}/config`);
-    out.innerHTML = `<div class="card" style="padding:16px">
-      <div class="hd" style="padding:0 0 10px"><h2>${esc(r.name)} · <span class="mono">${esc(r.address)}</span></h2>
-        <button class="btn sm" onclick="wgDownload()"><i class="ti ti-download"></i> Download .conf</button></div>
-      <pre id="wgcfg" class="mono" data-filename="${esc(r.filename)}" style="white-space:pre-wrap;background:var(--surface2);padding:12px;border-radius:8px;font-size:12px">${esc(r.config)}</pre>
-      <div class="help"><i class="ti ti-lock"></i> Contains a private key. This read is in the activity log. On a phone, import the file into the WireGuard app.</div>
+/**
+ * The config sheet — one view for a router and for a laptop, because the thing a technician needs is
+ * the same either way: the file, or a QR to point a phone at.
+ *
+ * `kind` is 'devices' or 'peers', which is literally the path segment. Keeping it to that rather
+ * than a boolean means adding a third sort of peer later needs no new branch here.
+ */
+async function wgConfigSheet(kind, id) {
+  let r;
+  try { r = await api(`/wireguard/${kind}/${id}/config`); }
+  catch (e) { toast(e.message); return; }
+
+  const qrBlock = r.qr
+    ? `<div class="qr-wrap">${r.qr}</div>
+       <div class="help" style="text-align:center;margin-top:8px">Open the WireGuard app on the phone, tap <b>+</b> → <b>Scan from QR code</b>.</div>`
+    : `<div class="card" style="padding:12px;margin:0"><div class="small">${esc(r.qr_error || 'No QR code for this config.')}</div></div>`;
+
+  const back = document.createElement('div');
+  back.className = 'sheet-back';
+  back.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" aria-label="WireGuard configuration">
+      <div class="hd" style="padding:12px 14px">
+        <h2 style="min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(r.name)} <span class="mono small sec-muted">${esc(r.address)}</span></h2>
+        <button class="btn sm" data-act="close" aria-label="Close"><i class="ti ti-x"></i></button>
+      </div>
+      <div class="sheet-body">
+        ${qrBlock}
+        <div style="display:flex;gap:8px;margin:14px 0">
+          <button class="btn sm primary" data-act="download"><i class="ti ti-download"></i> Download .conf</button>
+          <button class="btn sm" data-act="copy"><i class="ti ti-copy"></i> Copy</button>
+        </div>
+        <pre id="wgcfg" class="mono" style="white-space:pre-wrap;background:var(--surface2);padding:12px;border-radius:8px;font-size:12px;margin:0"></pre>
+        <div class="help"><i class="ti ti-lock"></i> This contains a private key, and the read is in the activity log. Anyone who scans or receives it can reach the management overlay — send it over something you trust, or better, scan it off this screen.</div>
+      </div>
     </div>`;
-  } catch (e) { toast(e.message); }
+
+  // The config and filename go in as TEXT, never interpolated into markup or an onclick attribute.
+  // A peer named with an apostrophe broke exactly that once; the repo has a test for the pattern.
+  const pre = back.querySelector('#wgcfg');
+  pre.textContent = r.config;
+  pre.dataset.filename = r.filename;
+
+  const close = () => { back.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  back.addEventListener('click', async (e) => {
+    if (e.target === back || e.target.closest('[data-act=close]')) return close();
+    if (e.target.closest('[data-act=download]')) return wgDownload();
+    if (e.target.closest('[data-act=copy]')) {
+      try { await navigator.clipboard.writeText(pre.textContent); toast('Copied — it is on your clipboard until you copy something else'); }
+      catch { toast('Could not copy; select the text instead'); }
+    }
+  });
+  document.body.appendChild(back);
+  back.querySelector('[data-act=close]').focus();
 }
+function wgPeerConfig(id) { return wgConfigSheet('peers', id); }
+function wgDeviceConfig(id) { return wgConfigSheet('devices', id); }
 /**
  * Download the config currently on screen.
  *
@@ -3087,25 +3137,10 @@ async function saveWifi(idx) {
     toast(/roll/i.test(msg) ? msg : 'WiFi change failed: ' + msg);
   }
 }
-async function showWg(id) {
-  try {
-    const r = await api('/devices/' + id + '/wireguard/config');
-    const out = $('#wgout');
-    out.innerHTML = `<div style="margin-top:12px">
-      <div class="small sec-muted" style="margin-bottom:4px">Device config (<span class="mono">${esc(r.address)}</span>)</div>
-      <textarea id="wgcfg" readonly rows="8" style="font-family:var(--mono);font-size:12px"></textarea>
-      <div class="small sec-muted" style="margin:8px 0 4px">Add this [Peer] to the hub</div>
-      <textarea id="wgpeer" readonly rows="4" style="font-family:var(--mono);font-size:12px"></textarea>
-      <button class="btn sm" id="wgdl" style="margin-top:8px" title="WireGuard config to load on the device (contains its private key)"><i class="ti ti-download"></i> Download .conf</button></div>`;
-    $('#wgcfg').value = r.config;
-    $('#wgpeer').value = r.server_peer;
-    $('#wgdl').addEventListener('click', () => {
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([r.config], { type: 'text/plain' }));
-      a.download = 'wg-' + id + '.conf'; a.click();
-    });
-  } catch (e) { toast(e.message); }
-}
+// The device page's WireGuard button now opens the same sheet the WireGuard page does, against the
+// same endpoint. It used to call a separate route that produced a subtly different config; see the
+// note where that route was removed in server.js.
+function showWg(id) { return wgConfigSheet('devices', id); }
 
 // ---------- Support / trouble tickets ----------
 // ---------- Import from Invoice Ninja (JSON export) ----------

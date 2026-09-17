@@ -14,7 +14,26 @@ import { createHub } from '../lib/wghub.js';
 import {
   planOverlay, nextFreeAddress, hubAddress, capacity, overlaps, contains, parseCidr, supernetOf
 } from '../lib/ipam.js';
-import { wgKeypair, deviceConfig } from '../wg.js';
+import { wgKeypair, deviceConfig, serverPeerStanza } from '../wg.js';
+import { toSvg } from '../lib/qr.js';
+
+/**
+ * One shape for both config reads — a router's and a laptop's — so the UI that shows them can be
+ * one piece of code. Previously the device endpoint returned neither a name nor a filename, and the
+ * peer endpoint did, which is why only peers had a usable download.
+ *
+ * The QR is best-effort ON PURPOSE. It exists so a technician can point a phone at the screen
+ * instead of emailing a private key around, but the config download is the thing people actually
+ * need, and it must not fail because a config grew past what the encoder can hold. So a QR failure
+ * downgrades to a null and an explanation, and the .conf still comes back.
+ */
+function configPayload(name, address, config) {
+  const filename = `${String(name || 'wireguard').replace(/[^\w.-]+/g, '-').toLowerCase()}.conf`;
+  let qr = null, qrError = null;
+  try { qr = toSvg(config, { moduleSize: 4 }); }
+  catch (e) { qrError = `This config is ${config.length} bytes, too long to fit in a QR code (${e.message}). Download the file instead.`; }
+  return { config, address, name, filename, qr, qr_error: qrError };
+}
 
 export default function registerWireguard(app, ctx) {
   const { db, audit, requireNoc, getSetting, setSetting, restReq, rosHeaders, rosErr } = ctx;
@@ -397,7 +416,14 @@ export default function registerWireguard(app, ctx) {
       allowed: getSetting('wg_supernet') || subnet || '10.0.0.0/8'
     });
     audit(req, 'credential_read', 'device#' + d.id, 'WireGuard config');
-    res.json({ config, address: d.mgmt_address });
+    res.json({
+      ...configPayload(d.name, d.mgmt_address, config),
+      // The matching [Peer] block for the hub, for the rare case of pasting it in by hand. It moved
+      // here when /api/devices/:id/wireguard/config was removed — that route built the SAME config
+      // with `allowed` set to wg_subnet instead of wg_supernet, so the file you got depended on
+      // which page you opened, and only one of the two could reach ZeroTier members.
+      server_peer: serverPeerStanza({ name: d.name, publicKey: d.wg_public_key, address: d.mgmt_address })
+    });
   });
 
   // ---- peers that are not inventory hardware ---------------------------------------------------
@@ -484,6 +510,6 @@ export default function registerWireguard(app, ctx) {
       allowed: getSetting('wg_supernet') || subnet || '10.0.0.0/8'
     });
     audit(req, 'credential_read', 'wg-peer#' + p.id, `WireGuard config for ${p.name}`);
-    res.json({ config, address: p.address, name: p.name, filename: `${p.name.replace(/[^\w.-]+/g, '-').toLowerCase()}.conf` });
+    res.json(configPayload(p.name, p.address, config));
   });
 }
