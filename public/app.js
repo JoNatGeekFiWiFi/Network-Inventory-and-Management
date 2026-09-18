@@ -2593,7 +2593,7 @@ async function renderWireGuard() {
         p.public_key, p.address,
         `<button class="btn sm" onclick="wgPeerConfig(${p.id})" title="Show the config and QR code — contains a private key, and the read is logged"><i class="ti ti-qrcode"></i> Config &amp; QR</button>
          <button class="btn sm" onclick="wgPeerToggle(${p.id}, ${p.enabled ? 0 : 1})" title="${p.enabled ? 'Revoke access immediately' : 'Restore access'}"><i class="ti ti-${p.enabled ? 'ban' : 'check'}"></i> ${p.enabled ? 'Disable' : 'Enable'}</button>
-         <button class="btn sm" onclick="wgPeerDelete(${p.id})" title="Remove this peer and its hub access"><i class="ti ti-trash"></i></button>`,
+         <button class="btn sm" onclick="wgPeerDelete(${p.id})" title="Remove this peer and its hub access"><i class="ti ti-trash"></i> Remove</button>`,
         `wgPeerConfig(${p.id})`
       )).join('') || '<div class="row muted">No laptops or phones yet. Add one to give a technician access to the management overlay without ZeroTier.</div>'}
       <div class="help">These are people, not inventory — they have no site, model or customer, and nothing counts them as hardware. They share the same address pool as the devices above.</div>

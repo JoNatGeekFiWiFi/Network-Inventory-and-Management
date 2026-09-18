@@ -517,5 +517,52 @@ const REAL = [
   globalThis.fetch = priorFetch; globalThis.CURRENT_USER = priorUser;
 }
 
+// ---- every control says what it does ------------------------------------------------------------
+//
+// Icons come from a CDN (cdnjs, in index.html). When that does not load — a blocked network, a
+// captive portal, a phone on a bad connection, the CDN simply being down — every <i class="ti">
+// renders as NOTHING. A button with text degrades to a plain text button. A button with only an
+// icon degrades to a blank rectangle that the user cannot identify and will not dare press.
+//
+// That is not hypothetical: it is what sent Jon the screenshot that prompted this test. The delete
+// button on a WireGuard peer had a title attribute, which is invisible on a touchscreen and to a
+// screen reader that is not hovering, and nothing else.
+//
+// So the rule is: an icon may DECORATE a control, never define it. Text inside the element, or an
+// explicit aria-label, is what counts — a title attribute alone does not.
+{
+  const label = (inner) => inner
+    .replace(/<i\b[^>]*><\/i>/g, '')       // icon elements contribute nothing readable
+    .replace(/<[^>]+>/g, '')
+    .replace(/\$\{[^}]*\}/g, 'X')          // a template slot is real text at runtime
+    .replace(/&[a-z]+;/g, 'x')
+    .trim();
+
+  for (const file of ['../public/app.js', '../public/index.html']) {
+    let src;
+    try { src = readFileSync(new URL(file, import.meta.url), 'utf8'); } catch { continue; }
+    const unlabelled = [];
+    let count = 0;
+    for (const m of src.matchAll(/<(button|a)\b([^>]*)>([\s\S]{0,400}?)<\/\1>/g)) {
+      const [, tag, attrs, inner] = m;
+      if (tag === 'a' && !/<i\b/.test(inner)) continue;          // plain text links are fine
+      count++;
+      if (label(inner) || /aria-label\s*=/.test(attrs)) continue;
+      unlabelled.push(`line ${src.slice(0, m.index).split('\n').length}: ${m[0].replace(/\s+/g, ' ').slice(0, 100)}`);
+    }
+    ok(unlabelled.length === 0,
+      unlabelled.length === 0
+        ? `all ${count} controls in ${file.split('/').pop()} carry text or an aria-label — none go blank if the icon font fails`
+        : `${unlabelled.length} control(s) in ${file} are icon-only, and vanish without the icon font:\n    ${unlabelled.join('\n    ')}`);
+  }
+
+  // A title is a tooltip, not a label: it does not exist on a touchscreen. Worth knowing how many
+  // controls would be relying on one if their text were ever removed.
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const titleOnly = [...app.matchAll(/<button\b([^>]*title=[^>]*)>([\s\S]{0,300}?)<\/button>/g)]
+    .filter(m => !label(m[2]) && !/aria-label/.test(m[1]));
+  ok(titleOnly.length === 0, 'and no button leans on a title attribute as its only description');
+}
+
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail) process.exitCode = 1;
