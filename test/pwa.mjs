@@ -467,5 +467,55 @@ const REAL = [
   ok(css.includes('env(safe-area-inset-top)'), 'and the notch is accounted for when installed');
 }
 
+// ---- api(), run for real rather than read -------------------------------------------------------
+//
+// This exists because of a bug that reached production while the whole suite was green.
+//
+// Most of app.js calls api() with an ALREADY-stringified body. Two call sites passed an object —
+// the obvious thing to write — and fetch turned it into the literal string "[object Object]". The
+// server could not parse it, so the request never reached the route that would have explained
+// itself, and the user got a bare "Bad request" toast with nothing to act on.
+//
+// Every server-side test passed throughout, because each uses its own fetch helper that
+// stringifies. Testing a helper by reading it, or by reimplementing what it ought to do, proves
+// nothing about the helper. So this pulls the real function out of app.js and runs it against a
+// stub fetch, and asserts on the bytes that would actually go over the wire.
+{
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const start = src.indexOf('async function api(');
+  const fnText = src.slice(start, src.indexOf('\n}', start) + 2);
+  ok(start !== -1, 'api() is where this test expects to find it');
+
+  let sent = null;
+  const priorFetch = globalThis.fetch, priorUser = globalThis.CURRENT_USER;
+  globalThis.fetch = async (url, opts) => {
+    sent = { url, opts };
+    return { ok: true, status: 200, json: async () => ({}), headers: { get: () => null } };
+  };
+  globalThis.CURRENT_USER = {};
+  globalThis.renderLogin = () => {};
+  const api = eval('(' + fnText.replace(/^async function api/, 'async function') + ')');
+
+  await api('/thing', { method: 'POST', body: { name: "Jon's iPhone", kind: 'phone', n: 2 } });
+  ok(typeof sent.opts.body === 'string', 'an OBJECT body is serialised — this is the bug that shipped');
+  ok(sent.opts.body !== '[object Object]', 'and specifically is not the string "[object Object]"');
+  const parsed = JSON.parse(sent.opts.body);
+  ok(parsed.name === "Jon's iPhone" && parsed.kind === 'phone' && parsed.n === 2,
+    'with every field intact, apostrophe included');
+
+  // The 88 existing call sites pass strings. Those must go through untouched — double-encoding them
+  // would break everything that works today.
+  await api('/thing', { method: 'POST', body: '{"already":"json"}' });
+  ok(sent.opts.body === '{"already":"json"}', 'a string body is passed through exactly, not re-encoded');
+
+  await api('/thing');
+  ok(sent.opts.body == null, 'and a request with no body stays without one');
+
+  await api('/thing', { method: 'POST', body: [1, 2, 3] });
+  ok(sent.opts.body === '[1,2,3]', 'an array body is serialised too');
+
+  globalThis.fetch = priorFetch; globalThis.CURRENT_USER = priorUser;
+}
+
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail) process.exitCode = 1;

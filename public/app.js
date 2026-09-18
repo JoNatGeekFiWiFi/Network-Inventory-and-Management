@@ -22,6 +22,22 @@ function setTheme(t) {
 
 async function api(path, opts = {}) {
   opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+
+  // A plain object body gets serialised here rather than at every call site.
+  //
+  // Most of this file passes body: '{...}' already stringified, so passing an object — the obvious
+  // thing to write — silently sent the string "[object Object]", which the server could not parse.
+  // The user saw "Bad request" with nothing to go on, because a body that fails to parse never
+  // reaches the route that would have explained itself. Two call sites were written that way and
+  // both were broken. Fixing them individually would have left the next one to be written the same
+  // way, so the helper accepts both now.
+  const b = opts.body;
+  const isRaw = b == null || typeof b === 'string'
+    || (typeof FormData !== 'undefined' && b instanceof FormData)
+    || (typeof Blob !== 'undefined' && b instanceof Blob)
+    || (typeof URLSearchParams !== 'undefined' && b instanceof URLSearchParams);
+  if (!isRaw) opts.body = JSON.stringify(b);
+
   const r = await fetch('/api' + path, opts);
   if (r.status === 401) { CURRENT_USER = null; renderLogin('Your session expired — please sign in.'); throw new Error('auth'); }
   if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.statusText); }
