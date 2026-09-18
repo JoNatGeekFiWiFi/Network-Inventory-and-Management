@@ -12,7 +12,7 @@
 //      audited; a cached copy on a shared or lost device is a liability with no upside here.
 //   2. Only GET is ever cached. A cached POST would be a replayed write.
 
-const VERSION = 'v3';
+const VERSION = 'v4';   // bumped when the CDN assets moved to /vendor — old caches hold CDN URLs
 const SHELL_CACHE = `netinv-shell-${VERSION}`;
 const ASSET_CACHE = `netinv-assets-${VERSION}`;
 
@@ -21,19 +21,33 @@ const ASSET_CACHE = `netinv-assets-${VERSION}`;
 // Only things whose URL never changes. app.js, styles.css and barcode.js are deliberately absent:
 // the server now stamps a build id into their URLs, so precaching a bare '/app.js' would cache a
 // file the page never actually asks for.
+//
+// The vendored libraries ARE precached, unlike our own code. Their URLs never change (a version
+// change means a different file committed under /vendor), and they are what the first paint needs:
+// without the icon font every control renders as a blank rectangle, which is the failure that got
+// them brought in-house in the first place.
 const SHELL = [
   '/',
   '/manifest.webmanifest',
   '/icon-192.png',
-  '/apple-touch-icon.png'
+  '/apple-touch-icon.png',
+  '/vendor/tabler-icons/tabler-icons.css',
+  '/vendor/tabler-icons/fonts/tabler-icons.woff2',
+  '/vendor/leaflet/leaflet.css',
+  '/vendor/leaflet/leaflet.js',
+  '/vendor/chartjs/chart.umd.js'
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
-    const cache = await caches.open(SHELL_CACHE);
+    // Each entry is precached into the SAME cache the fetch handler will later look in, or it is
+    // not precached at all — it is just a download that happens twice.
+    const shell = await caches.open(SHELL_CACHE);
+    const assets = await caches.open(ASSET_CACHE);
     // addAll fails the whole install if any single entry 404s. Add individually so one missing
     // icon cannot leave the app permanently uninstallable.
-    await Promise.all(SHELL.map(url => cache.add(url).catch(() => {})));
+    await Promise.all(SHELL.map(url =>
+      (url.startsWith('/vendor/') ? assets : shell).add(url).catch(() => {})));
     await self.skipWaiting();
   })());
 });
@@ -90,19 +104,26 @@ self.addEventListener('fetch', (event) => {
   // actually running. That turned a scanner fix into "it still does not work" for no reason. These
   // files are small; wait briefly for the current one, and fall back to cache when there is no
   // signal, which is the case the cache exists for.
+  // Everything we serve is now same-origin: the libraries that used to come from cdnjs live under
+  // /vendor. Anything else (map tiles, an outbound link) is none of this worker's business.
   const sameOrigin = url.origin === self.location.origin;
-  const cdn = url.hostname === 'cdnjs.cloudflare.com';
-  if (!sameOrigin && !cdn) return;
+  if (!sameOrigin) return;
 
   // A build-stamped URL identifies exactly one version of a file, so it can be cached forever:
   // the next deploy asks for a different URL. That is what makes "deployed but running old code"
   // impossible rather than merely unlikely.
+  //
+  // /vendor is excluded from the network-first path deliberately. Those files are immutable — a new
+  // Leaflet means a different file committed to the repo — so re-checking them on every load would
+  // pay the latency of the network-first timeout for content that cannot have changed.
   const versioned = url.searchParams.has('v');
-  const isOurCode = sameOrigin && !versioned && /\.(js|css)$/.test(url.pathname);
+  const isVendor = url.pathname.startsWith('/vendor/');
+  const isOurCode = sameOrigin && !versioned && !isVendor && /\.(js|css)$/.test(url.pathname);
 
   event.respondWith((async () => {
-    const cacheName = sameOrigin ? SHELL_CACHE : ASSET_CACHE;
-    const cache = await caches.open(cacheName);
+    // Vendored libraries are large and immutable, so they get their own cache: clearing or rebuilding
+    // the app shell should not mean re-fetching a megabyte of Leaflet and an icon font.
+    const cache = await caches.open(isVendor ? ASSET_CACHE : SHELL_CACHE);
 
     const fromNetwork = fetch(req).then(res => {
       if (res && res.status === 200 && res.type !== 'opaque') cache.put(req, res.clone()).catch(() => {});

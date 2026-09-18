@@ -17,8 +17,11 @@
   <script>/* apply saved theme before first paint to avoid a light-mode flash */
     try { var t = localStorage.getItem('theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
   </script>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/2.47.0/iconfont/tabler-icons.min.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <!-- Served from this box, not a CDN. See public/vendor/README.md for how these were produced and
+       how to update them. A management tool that goes blank because a third party is unreachable is
+       not a management tool. -->
+  <link rel="stylesheet" href="/vendor/tabler-icons/tabler-icons.css" />
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -66,8 +69,8 @@
     </nav>
     <main id="view" class="content"><div class="loading">Loading…</div></main>
   </div>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script src="/vendor/chartjs/chart.umd.js"></script>
   <!-- The barcode decoder is a module; the SPA is a classic script, so it is loaded separately and
        handed over on window. Failing to load must not break the app — scanning simply becomes
        manual entry. -->

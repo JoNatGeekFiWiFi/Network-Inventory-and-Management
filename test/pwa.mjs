@@ -385,7 +385,14 @@ const REAL = [
   ok(/url\.searchParams\.has\('v'\)/.test(sw), 'the service worker recognises a build-stamped URL');
   ok(/!versioned/.test(sw), 'and stops treating those as files that might go stale');
   ok(!/'\/app\.js',/.test(sw), 'the precache list no longer names an unversioned app.js the page never requests');
-  ok(/VERSION = 'v3'/.test(sw), 'and the cache version moved, so older entries are dropped');
+  // Pinning the literal 'v3' here meant this failed every time the version was legitimately bumped,
+  // which trains you to edit the test rather than think. What actually matters is structural: a
+  // version constant exists, and BOTH cache names are derived from it, so bumping it drops every
+  // old entry rather than half of them.
+  const version = (sw.match(/VERSION = '([^']+)'/) || [])[1];
+  ok(/^v\d+$/.test(version || ''), `the cache version is a bumpable constant (${version})`);
+  ok(sw.includes('netinv-shell-${VERSION}') && sw.includes('netinv-assets-${VERSION}'),
+    'and both caches are named from it, so one bump discards all stale entries');
 }
 
 // ---- served as an installable app ----
@@ -562,6 +569,104 @@ const REAL = [
   const titleOnly = [...app.matchAll(/<button\b([^>]*title=[^>]*)>([\s\S]{0,300}?)<\/button>/g)]
     .filter(m => !label(m[2]) && !/aria-label/.test(m[1]));
   ok(titleOnly.length === 0, 'and no button leans on a title attribute as its only description');
+}
+
+// ---- nothing loads from anyone else's server ------------------------------------------------------
+//
+// Every asset the browser needs is served from this box. The libraries used to come from cdnjs,
+// which put a third party on the critical path of a tool used to fix outages — and when it did not
+// load, every icon rendered as nothing.
+//
+// Two halves, and the second is the one that matters: it is easy to delete a CDN link and leave the
+// replacement missing, which fails only in a browser.
+{
+  // 1. No page pulls a script, stylesheet, font or image from another host.
+  for (const page of ['../public/index.html', '../public/locator.html']) {
+    let html;
+    try { html = readFileSync(new URL(page, import.meta.url), 'utf8'); } catch { continue; }
+    const external = [...html.matchAll(/(?:src|href)\s*=\s*["'](https?:\/\/[^"']+)["']/g)]
+      .map(m => m[1])
+      // An <a href> to Google Maps is a link the user chooses to follow, not an asset we load.
+      .filter(u => !/^https?:\/\/maps\.google\.com/.test(u));
+    ok(external.length === 0,
+      external.length === 0
+        ? `${page.split('/').pop()} loads nothing from an external host`
+        : `${page} still loads from outside: ${external.join(', ')}`);
+  }
+
+  // 2. Everything it now points at locally must actually be there and be served.
+  const VENDOR = [
+    ['/vendor/tabler-icons/tabler-icons.css', 'text/css'],
+    ['/vendor/tabler-icons/fonts/tabler-icons.woff2', 'font/woff2'],
+    ['/vendor/leaflet/leaflet.css', 'text/css'],
+    ['/vendor/leaflet/leaflet.js', 'javascript'],
+    ['/vendor/leaflet/images/marker-icon.png', 'image/png'],
+    ['/vendor/leaflet/images/marker-shadow.png', 'image/png'],
+    ['/vendor/leaflet/images/layers.png', 'image/png'],
+    ['/vendor/chartjs/chart.umd.js', 'javascript']
+  ];
+  for (const [path, type] of VENDOR) {
+    const r = await get(path);
+    ok(r.status === 200 && r.type.includes(type),
+      `${path} is served (${r.status}${r.status === 200 ? ', ' + r.type.split(';')[0] : ''})`);
+  }
+
+  // The icon CSS must reference only the font we actually shipped. Leaving the upstream src list
+  // intact would have the browser request .eot and .ttf files that are not in the repo.
+  const iconCss = (await get('/vendor/tabler-icons/tabler-icons.css')).text;
+  const urls = [...iconCss.matchAll(/url\(["']?([^"')]+)["']?\)/g)].map(m => m[1]);
+  ok(urls.length === 1 && urls[0].includes('woff2'),
+    `the icon CSS references exactly one font file, the woff2 we ship (found: ${urls.join(', ') || 'none'})`);
+  ok(iconCss.includes('.ti-router') && iconCss.includes('.ti-qrcode'),
+    'and it is the real icon set, not a stub');
+
+  // Every icon NAME the app uses must exist in the font we ship. A name that does not — a typo, or
+  // an icon added in a later Tabler release — renders as nothing, with no error anywhere.
+  //
+  // This found two live ones the moment it was written: ti-router-2 and ti-cable do not exist in
+  // 2.47.0 and had been blank since they were written, from the CDN too. Nobody noticed because
+  // both sit beside text, which is exactly the graceful degradation the labelling rule above buys —
+  // but "invisible and nobody noticed" is not the same as "fine".
+  const defined = new Set([...iconCss.matchAll(/\.ti-([a-z0-9-]+):before/g)].map(m => m[1]));
+  ok(defined.size > 4000, `the font defines ${defined.size} icons`);
+
+  const used = new Map();
+  for (const file of ['../public/app.js', '../public/index.html', '../public/locator.html']) {
+    let src;
+    try { src = readFileSync(new URL(file, import.meta.url), 'utf8'); } catch { continue; }
+    const name = file.split('/').pop();
+    for (const m of src.matchAll(/\bti ti-([a-z0-9-]+)/g)) used.set(m[1], name);
+    // The kind→icon lookup tables hold bare 'ti-foo' strings rather than full class attributes.
+    for (const m of src.matchAll(/'(ti-[a-z0-9-]+)'/g)) used.set(m[1].slice(3), name);
+  }
+  const missing = [...used].filter(([n]) => !defined.has(n));
+  ok(missing.length === 0,
+    missing.length === 0
+      ? `all ${used.size} icon names used by the app exist in the font`
+      : `icon(s) that will render as nothing: ${missing.map(([n, f]) => `ti-${n} (${f})`).join(', ')}`);
+
+  // Leaflet's CSS asks for its images by relative path; if the directory layout is wrong the map
+  // loses its markers with no error anywhere.
+  const leafletCss = (await get('/vendor/leaflet/leaflet.css')).text;
+  const imgs = [...leafletCss.matchAll(/url\((images\/[^)]+)\)/g)].map(m => m[1]);
+  ok(imgs.length > 0, `leaflet.css references ${imgs.length} image(s) by relative path`);
+  let allThere = true;
+  for (const img of [...new Set(imgs)]) {
+    if ((await get('/vendor/leaflet/' + img)).status !== 200) allThere = false;
+  }
+  ok(allThere, 'and every one of them resolves — the markers will render');
+
+  // The service worker must precache the vendored files into the cache its fetch handler reads,
+  // or they are downloaded twice and the app is not actually usable offline.
+  const sw = readFileSync(new URL('../public/sw.js', import.meta.url), 'utf8');
+  // Comments stripped first: the file explains in prose why the CDN case was removed, and matching
+  // that explanation as if it were code is the mistake this repo has made before.
+  const swCode = sw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  ok(!swCode.includes('cdnjs'), 'the service worker no longer has a special case for the CDN');
+  const precached = VENDOR.filter(([p]) => sw.includes(`'${p}'`)).length;
+  ok(precached >= 5, `it precaches the vendored assets (${precached} of them listed in SHELL)`);
+  ok(/isVendor \? ASSET_CACHE : SHELL_CACHE/.test(sw) && /startsWith\('\/vendor\/'\) \? assets : shell/.test(sw),
+    'and install and fetch agree on WHICH cache those go in — a mismatch silently re-downloads everything');
 }
 
 console.log(`RESULT: ${pass} passed, ${fail} failed`);

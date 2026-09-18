@@ -1,7 +1,7 @@
 // Network Inventory & Management Platform — API + static server (testing build)
 import express from 'express';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, extname } from 'node:path';
+import { dirname, join, extname, sep } from 'node:path';
 import { readFileSync, writeFileSync, createReadStream, existsSync, statSync, unlinkSync, copyFileSync } from 'node:fs';
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, backfillAccountCustomers, UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR } from './db.js';
@@ -2296,6 +2296,13 @@ app.get(['/', '/index.html'], (req, res) => renderIndex(res));
 app.use(express.static(join(__dirname, 'public'), {
   // Versioned URLs can be cached hard; anything unversioned must be revalidated.
   setHeaders(res, path) {
+    // /vendor holds third-party libraries pinned to a version, committed to the repo. Upgrading one
+    // means a different file in a different commit, so the bytes at a given path never change and
+    // revalidating them on every load is pure latency. Everything else is ours and changes often.
+    if (path.includes(`${sep}vendor${sep}`)) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      return;
+    }
     if (/\.(js|css)$/.test(path)) res.setHeader('Cache-Control', 'no-cache, must-revalidate');
   }
 }));

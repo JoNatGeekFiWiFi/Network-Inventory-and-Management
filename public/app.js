@@ -1067,7 +1067,7 @@ async function renderDevice(id) {
     </div>`;
 
   const overlayCard = (d.management_mode === 'provider') ? '' : `
-    <div class="card"><div class="hd"><h2><i class="ti ti-router-2"></i> Management overlay</h2><span class="tag">${esc(d.mgmt_overlay || 'none')}</span></div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-router"></i> Management overlay</h2><span class="tag">${esc(d.mgmt_overlay || 'none')}</span></div>
       <div style="padding:0 14px 14px">
         <div class="kv"><span class="small sec-muted">Overlay IP</span><span class="mono">${esc(d.mgmt_address || '—')}</span></div>
         <div class="kv"><span class="small sec-muted">ZeroTier node ID</span><span class="mono">${esc(d.zt_node_id || '—')}</span></div>
@@ -2576,7 +2576,7 @@ async function renderWireGuard() {
     ${hubCard}${driftCard}
 
     <div class="card">
-      <div class="hd"><h2><i class="ti ti-router-2"></i> Devices · ${wgDevices.length}</h2>
+      <div class="hd"><h2><i class="ti ti-router"></i> Devices · ${wgDevices.length}</h2>
         <button class="btn sm" onclick="wgAddDevice()"><i class="ti ti-plus"></i> Add a device</button></div>
       ${wgDevices.map(d => row(d.name, d.assigned_label || 'unassigned', d.wg_public_key, d.mgmt_address,
         `<button class="btn sm" onclick="wgDeviceConfig(${d.id})" title="Show the config and QR code — contains this device's private key, and the read is logged"><i class="ti ti-qrcode"></i> Config &amp; QR</button>`,
@@ -3587,7 +3587,7 @@ async function loadCables() {
   box.innerHTML = rows.map(c => {
     const pct = c.strand_count ? Math.round((c.strands_used / c.strand_count) * 100) : 0;
     return `<div class="row rowlink" onclick="location.hash='#/fiber/cable/${c.id}'">
-      <i class="ti ti-cable sec-muted"></i>
+      <i class="ti ti-line sec-muted"></i>
       <div style="flex:1;min-width:0"><div><b>${esc(c.name)}</b> · ${c.strand_count}ct${c.route_name ? ' · ' + esc(c.route_name) : ''}</div>
         <div class="small sec-muted">${c.a_structure_name ? esc(c.a_structure_name) : '—'} → ${c.z_structure_name ? esc(c.z_structure_name) : '—'} · ${c.strands_used} used / ${c.strands_free} free</div></div>
       <div style="width:90px"><div style="height:6px;background:var(--surface2);border-radius:3px;overflow:hidden"><div style="width:${pct}%;height:100%;background:var(--success,#1D9E75)"></div></div>
@@ -3637,7 +3637,7 @@ async function renderFiberRoute(id) {
     ${attachPanel('route', r.id, r.attachments, 'Route photos &amp; documents')}
     <div class="card"><div class="hd"><h2>Cables on this route · ${r.cables.length}</h2></div>
       ${r.cables.map(c => `<div class="row rowlink" onclick="location.hash='#/fiber/cable/${c.id}'">
-        <i class="ti ti-cable sec-muted"></i><div style="flex:1"><div>${esc(c.name)} · ${c.strand_count}ct</div>
+        <i class="ti ti-line sec-muted"></i><div style="flex:1"><div>${esc(c.name)} · ${c.strand_count}ct</div>
         <div class="small sec-muted">${c.strands_used} used / ${c.strands_free} free</div></div>
         <i class="ti ti-chevron-right muted"></i></div>`).join('') || '<div class="row muted">No cables on this route yet</div>'}</div>`;
 }
@@ -4469,7 +4469,7 @@ async function restoreBilling(input) {
 // One endpoint answers "asset, coordinate or address?", so both entry points share this code.
 
 const TYPE_ICON = {
-  circuit: 'ti-topology-star-3', cable: 'ti-cable', route: 'ti-line', structure: 'ti-map-pin',
+  circuit: 'ti-topology-star-3', cable: 'ti-line', route: 'ti-line', structure: 'ti-map-pin',
   site: 'ti-building-store', pop: 'ti-server-2', device: 'ti-router',
   customer: 'ti-users', account: 'ti-building-bank', coords: 'ti-crosshair', address: 'ti-map-search'
 };

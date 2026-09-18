@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="robots" content="noindex, nofollow" />
   <title>Fiber Fault Locator</title>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
   <style>
     /* Self-contained on purpose: this page is served to anyone, so it loads none of the
        inventory app's markup, scripts or data. */
@@ -104,7 +104,7 @@
   <p class="foot">GeekiTek · fibre distances are estimates — always confirm on site before excavating.</p>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="/vendor/leaflet/leaflet.js"></script>
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => (s == null ? '' : String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])));
