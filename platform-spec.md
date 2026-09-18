@@ -17,6 +17,18 @@ Different departments see different layouts over the **same underlying data**. N
 2. **One shared asset model.** A piece of hardware is a single asset record regardless of where it lives; it points to whatever it's assigned to.
 3. **Role-based layouts.** UI complexity adapts to the user's role. Default to simple; expose advanced (NOC) mode where the depth is needed.
 4. **Traceability.** From any POP or carrier you can answer "which customers does this affect?"
+5. **Self-hosted, end to end.** Everything the browser loads is served from this box — no CDNs, no
+   third-party script or font hosts. Front-end libraries are committed under `public/vendor/`
+   (see its README for versions and how to update). This is not a preference about privacy: it is
+   that a tool used to *fix outages* must not depend on somebody else's uptime, and the failure is
+   ugly — when the icon CDN was unreachable every icon rendered as nothing, turning an icon-only
+   button into a blank rectangle. `test/pwa.mjs` fails the build if any page references an external
+   host. The one deliberate exception is OpenStreetMap basemap tiles, which are imagery rather than
+   code and impractical to host; the maps degrade to plain backgrounds without them.
+6. **A control says what it does.** An icon may decorate a button, never define it. Every button and
+   link carries text or an `aria-label` — a `title` is a tooltip that does not exist on a touchscreen
+   and is not a label. Enforced by `test/pwa.mjs`, which also checks that every icon name the app
+   uses actually exists in the shipped font, since a missing one renders as nothing with no error.
 
 ## 3. Entities
 
