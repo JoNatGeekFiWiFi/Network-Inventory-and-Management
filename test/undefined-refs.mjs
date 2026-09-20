@@ -44,6 +44,41 @@ const files = [
   'server.js', 'db.js', 'auth.js', 'hash.js', 'wg.js'
 ];
 
+// ---- the browser files, which nothing was parsing ------------------------------------------------
+//
+// This was added after a syntax error in public/app.js — a stray escape inside a template literal —
+// passed the ENTIRE suite. Every server test went green while the application would have rendered
+// a blank page in any browser, because app.js IS the interface and a file that does not parse runs
+// none of itself.
+//
+// Parsed as a script, not a module: index.html loads it with a plain <script> tag, so parsing it as
+// ESM would reject things that are legal in the browser and reward nobody.
+{
+  for (const file of readdirSync('public').filter(f => f.endsWith('.js')).map(f => 'public/' + f)) {
+    let src;
+    try { src = readFileSync(file, 'utf8'); } catch { continue; }
+    const isModule = /^\s*(import|export)\s/m.test(src);
+    try {
+      const ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: isModule ? 'module' : 'script', locations: true });
+      ok(true, `${file} parses (${(src.length / 1024).toFixed(0)} KB${isModule ? ', module' : ''})`);
+
+      // A second top-level `function foo` silently replaces the first in a script. In one 5000-line
+      // file that is a real hazard: the duplicate looks fine, and whatever called the original
+      // quietly gets different behaviour. Caught here because the browser will not complain.
+      const counts = new Map();
+      for (const node of ast.body) {
+        if (node.type === 'FunctionDeclaration' && node.id) counts.set(node.id.name, (counts.get(node.id.name) || 0) + 1);
+      }
+      const dupes = [...counts].filter(([, n]) => n > 1).map(([n]) => n);
+      ok(dupes.length === 0, dupes.length === 0
+        ? `${file}: no duplicate top-level function declarations`
+        : `${file}: ${dupes.join(', ')} declared more than once — the later one silently replaces the earlier`);
+    } catch (e) {
+      ok(false, `${file} PARSES — ${e.message}. This file is the whole interface; a parse error here is a blank application.`);
+    }
+  }
+}
+
 for (const file of files) {
   let src;
   try { src = readFileSync(file, 'utf8'); } catch { continue; }

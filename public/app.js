@@ -2297,8 +2297,16 @@ async function renderSettings() {
       </div>
       <div id="billout"></div>
     </div>
+    <div class="card" style="padding:16px" id="gws">
+      <h2 style="margin-bottom:12px"><i class="ti ti-brand-google"></i> Google Workspace mail</h2>
+      <div id="gwsBody" class="small sec-muted">Loading…</div>
+    </div>
     <div class="card" style="padding:16px" id="mail">
-      <h2 style="margin-bottom:12px"><i class="ti ti-mail"></i> Email notifications</h2>
+      <h2 style="margin-bottom:12px"><i class="ti ti-mail"></i> Email notifications (SMTP)</h2>
+      <div class="help" style="margin-bottom:10px"><i class="ti ti-info-circle"></i> This is for system notifications only — access requests and the like.
+        Customer and vendor correspondence goes through Google Workspace above.
+        <b>Google switched off username-and-password SMTP for Workspace accounts in March 2025</b>, so these fields
+        will not work against a Workspace mailbox unless the password here is an App Password.</div>
       <div class="grid2">${field('SMTP host', 'smtp_host', s.smtp_host, { mono: true, ph: 'smtp.example.com' })}${field('SMTP port', 'smtp_port', s.smtp_port, { mono: true, ph: '587' })}</div>
       <label class="row" style="cursor:pointer;padding:6px 0"><input type="checkbox" id="smtpSecure" ${s.smtp_secure ? 'checked' : ''} style="width:auto"/>
         <div style="flex:1"><div>Use TLS/SSL (port 465)</div><div class="small sec-muted">Leave off for STARTTLS on 587.</div></div></label>
@@ -2389,6 +2397,143 @@ async function renderSettings() {
   loadTokens();   // fills the phone & tablet card once the page is on screen
   describeRcs(s); // says what the messaging settings will actually do, not just that they are set
   wgStatus();
+  loadWorkspace();
+}
+
+// ---------- Google Workspace mail ----------
+//
+// The setup this drives has several ways to be almost-right, and Google reports most of them
+// identically, so the card is built around telling you which one you have rather than showing a
+// green tick. The two-address distinction is surfaced in the form itself for the same reason: on a
+// Workspace carrying several domains, the address you sign in with and the address customers see
+// are different things, and one field for both works until it silently does not.
+async function loadWorkspace() {
+  const el = $('#gwsBody'); if (!el) return;
+  let cred, boxes;
+  try { [cred, boxes] = await Promise.all([api('/mail/credential'), api('/mail/mailboxes')]); }
+  catch (e) { el.innerHTML = `<div class="small">Could not load: ${esc(e.message)}</div>`; return; }
+
+  const admin = isAdmin();
+
+  if (!cred.configured || !cred.valid) {
+    el.innerHTML = `
+      ${cred.configured && !cred.valid ? `<div class="banner-warn small" style="margin-bottom:10px;color:var(--danger)">The saved key is not usable: ${esc(cred.error || '')}</div>` : ''}
+      <div class="small sec-muted" style="margin-bottom:10px">
+        Connects customer and vendor mail through the Gmail API using a service account, so no
+        mailbox password is stored anywhere and nothing depends on one person's account.
+        The full walkthrough is in <span class="mono">docs/google-workspace.md</span>.
+      </div>
+      <label class="fl">Service account JSON key</label>
+      <textarea id="gwsKey" rows="5" spellcheck="false" placeholder='{ "type": "service_account", "project_id": … }'
+        style="width:100%;font-family:var(--mono);font-size:12px" ${admin ? '' : 'disabled'}></textarea>
+      <div class="help">Paste the whole file. It is stored server-side, never sent back to the browser, and can be removed at any time.</div>
+      ${admin ? `<button class="btn primary" style="margin-top:10px" onclick="saveWorkspaceKey()"><i class="ti ti-check"></i> Save key</button>`
+              : `<div class="help">Admin only.</div>`}`;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="box" style="margin-bottom:12px">
+      <div class="small"><b>Service account</b> <span class="mono">${esc(cred.client_email)}</span></div>
+      <div class="small" style="margin-top:6px"><b>Client ID</b> <span class="mono">${esc(cred.client_id || 'unknown')}</span>
+        <button class="btn sm" style="margin-left:6px" onclick="copyText('${esc(cred.client_id || '')}')"><i class="ti ti-copy"></i> Copy</button></div>
+      <div class="small" style="margin-top:6px"><b>Scopes to authorise</b></div>
+      <div class="mono small" style="word-break:break-all">${cred.scopes.join(',<wbr>')}</div>
+      <button class="btn sm" style="margin-top:6px" onclick="copyText(${JSON.stringify(cred.scopes.join(',')).replace(/"/g, '&quot;')})"><i class="ti ti-copy"></i> Copy scopes</button>
+      <div class="help">Paste these two into Admin Console → Security → Access and data control → API controls → Manage domain-wide delegation.</div>
+      ${admin ? `<button class="btn sm" style="margin-top:8px" onclick="removeWorkspaceKey()"><i class="ti ti-trash"></i> Remove key</button>` : ''}
+    </div>
+
+    <div class="small" style="font-weight:500;margin-bottom:6px">Mailboxes</div>
+    ${boxes.length ? boxes.map(m => `
+      <div class="row" style="align-items:flex-start">
+        <div style="flex:1;min-width:0">
+          <div>${esc(m.label)} <span class="tag">${esc(m.purpose)}</span>${m.enabled ? '' : ' <span class="tag">disabled</span>'}</div>
+          <div class="small sec-muted">Signs in as <span class="mono">${esc(m.impersonate_as)}</span></div>
+          <div class="small sec-muted">Sends as <span class="mono">${esc(m.send_as || m.impersonate_as)}</span>${m.send_as ? '' : ' (same)'}</div>
+          <div class="small ${m.verified_at ? '' : 'sec-muted'}">${m.verified_at ? '✓ verified ' + esc(m.verified_at) : 'not yet tested'}</div>
+        </div>
+        <div style="display:flex;gap:6px;flex:none">
+          <button class="btn sm" onclick="testMailbox(${m.id})"><i class="ti ti-plug"></i> Test connection</button>
+          ${admin ? `<button class="btn sm" onclick="removeMailbox(${m.id})"><i class="ti ti-trash"></i> Remove</button>` : ''}
+        </div>
+      </div>
+      <div id="mbtest-${m.id}"></div>
+    `).join('') : '<div class="row muted">No mailboxes connected yet.</div>'}
+
+    ${admin ? `
+    <div class="box" style="margin-top:12px">
+      <div class="grid2">
+        ${field('Label', 'gwsLabel', '', { ph: 'Support' })}
+        ${field('Purpose', 'gwsPurpose', 'customer', { type: 'select', options: [
+          { v: 'customer', l: 'Customer mail' }, { v: 'vendor', l: 'Vendors / carriers' },
+          { v: 'billing', l: 'Billing' }, { v: 'other', l: 'Other' }] })}
+      </div>
+      ${field('Signs in as — the PRIMARY address on that account', 'gwsImpersonate', '', { mono: true, ph: 'support@geekfiwifi.com' })}
+      <div class="help" style="margin-top:-6px">This must be the address the account actually signs in with. Google refuses an alias here,
+        and the error it returns reads like a broken credential rather than the wrong address. If unsure, enter your best guess —
+        the connection test reports the real one and offers to correct it.</div>
+      ${field('Sends as (what customers see)', 'gwsSendAs', '', { mono: true, ph: 'support@geekitek.com — leave blank if the same' })}
+      <div class="help" style="margin-top:-6px">Leave blank unless mail should go out from a different domain than the sign-in address.</div>
+      <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="addMailbox()"><i class="ti ti-plus"></i> Add mailbox</button></div>
+    </div>` : ''}`;
+}
+
+async function saveWorkspaceKey() {
+  const key = ($('#gwsKey') || {}).value || '';
+  try { await api('/mail/credential', { method: 'PUT', body: { key } }); toast('Key saved'); loadWorkspace(); }
+  catch (e) { toast(e.message); }
+}
+async function removeWorkspaceKey() {
+  if (!confirm('Remove the service account key? Connected mailboxes stop working until a key is saved again.')) return;
+  try { await api('/mail/credential', { method: 'DELETE' }); toast('Removed'); loadWorkspace(); }
+  catch (e) { toast(e.message); }
+}
+async function addMailbox() {
+  const body = {
+    label: ($('[name=gwsLabel]') || {}).value,
+    purpose: ($('[name=gwsPurpose]') || {}).value,
+    impersonate_as: ($('[name=gwsImpersonate]') || {}).value,
+    send_as: ($('[name=gwsSendAs]') || {}).value
+  };
+  try { await api('/mail/mailboxes', { body }); toast('Added — now run the connection test'); loadWorkspace(); }
+  catch (e) { toast(e.message); }
+}
+async function removeMailbox(id) {
+  if (!confirm('Remove this mailbox? Mail already filed against records is kept.')) return;
+  try { await api('/mail/mailboxes/' + id, { method: 'DELETE' }); toast('Removed'); loadWorkspace(); }
+  catch (e) { toast(e.message); }
+}
+
+/**
+ * Show every check, not a verdict.
+ *
+ * Several outcomes are "connected, but something will go wrong later" — most importantly a From
+ * address the account may not use, which Gmail does not refuse but silently rewrites. Collapsing
+ * that into a tick would hide the one thing worth knowing.
+ */
+async function testMailbox(id) {
+  const out = document.getElementById('mbtest-' + id); if (!out) return;
+  out.innerHTML = '<div class="small sec-muted" style="padding:6px 14px">Connecting to Google…</div>';
+  let r;
+  try { r = await api(`/mail/mailboxes/${id}/test`, { body: {} }); }
+  catch (e) { out.innerHTML = `<div class="small" style="padding:6px 14px;color:var(--danger)">${esc(e.message)}</div>`; return; }
+
+  const icon = (c) => c.ok && !c.warn ? '<span style="color:var(--success)">✓</span>'
+    : c.warn ? '<span style="color:var(--warn)">!</span>' : '<span style="color:var(--danger)">✗</span>';
+  const adopt = r.checks.find(c => c.suggest_impersonate_as);
+
+  out.innerHTML = `<div style="padding:4px 14px 12px">
+    ${r.checks.map(c => `<div class="small" style="margin:5px 0;display:flex;gap:8px">
+      ${icon(c)}<div><b>${esc(c.name)}</b> — ${esc(c.detail)}</div></div>`).join('')}
+    ${adopt ? `<button class="btn sm" style="margin-top:6px" onclick="adoptPrimary(${id}, '${esc(adopt.suggest_impersonate_as)}')">
+        <i class="ti ti-check"></i> Use ${esc(adopt.suggest_impersonate_as)} instead</button>` : ''}
+  </div>`;
+}
+
+async function adoptPrimary(id, address) {
+  try { await api(`/mail/mailboxes/${id}/adopt-primary`, { body: { impersonate_as: address } }); toast('Updated — test again'); loadWorkspace(); }
+  catch (e) { toast(e.message); }
 }
 async function saveSettings() {
   const z = collect('#zt'), w = collect('#wg'), bk = collect('#bak');
