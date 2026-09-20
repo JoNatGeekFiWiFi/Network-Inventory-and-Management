@@ -45,6 +45,26 @@ costs nothing.
 4. Open the service account → **Keys** → **Add key → Create new key → JSON**. A `.json` file
    downloads.
 
+   **If this fails with "Service account key creation is disabled"** — an organisation policy
+   (`iam.disableServiceAccountKeyCreation`) blocks it. Google enables this by default on newer
+   organisations, on the reasoning that a service account key is a file which can read every
+   authorised mailbox, forever, with nothing to expire. That reasoning is sound; the alternative is
+   per-mailbox OAuth, which reaches one mailbox instead of the domain. We accepted the tradeoff
+   deliberately. To proceed:
+
+   - You need **Organization Policy Administrator** (`roles/orgpolicy.policyAdmin`) at the
+     **organisation** level. In IAM & Admin → IAM, switch the resource picker from the project to
+     the organisation before granting it.
+   - **IAM & Admin → Organization Policies**, again with the picker on the *organisation* — setting
+     this on the project alone does nothing when it is enforced above.
+   - Filter for `iam.disableServiceAccountKeyCreation` → **Manage policy** → **Override parent's
+     policy** → **Add a rule** → Enforcement **Off** → **Set policy**. The filter sometimes matches
+     more than one entry; change each.
+   - Allow a few minutes to propagate before concluding it did not work.
+
+   **Turn enforcement back on once the key exists.** The policy blocks key *creation*, not key
+   *use*, so re-enabling costs nothing and restores the guard for every future project.
+
    **That file is a credential that can read every mailbox you later authorise.** Treat it like a
    password: do not email it, do not commit it. You will paste its contents into the platform once
    and can then delete the download.
@@ -106,3 +126,21 @@ error usually means "not propagated yet" rather than "wrong".
 Admin Console → **Security → API controls → Manage domain-wide delegation** → delete the entry.
 That cuts off every mailbox immediately, without touching anyone's password. Deleting the key in
 Google Cloud does the same from the other end.
+
+**Removing the key in the platform is not revocation.** Settings → Google Workspace mail → Remove
+key stops *this server* using it. The key remains valid at Google and would still work for anyone
+holding a copy. To actually revoke, delete it in Google Cloud → the service account → Keys.
+
+## If you rebuild or move the server
+
+Treat the key as compromised and rotate it — restoring a backup copies the key along with
+everything else, and an old key left live is one nobody is watching.
+
+1. Google Cloud → the service account → **Keys** → create a new JSON key (you may need to disable
+   the org policy again for a moment).
+2. Paste the new key into the platform.
+3. **Delete the old key** in Google Cloud. Skipping this step is what leaves a working credential
+   on a decommissioned machine.
+
+The domain-wide delegation entry in Admin Console does not change: it authorises the service
+account's client ID, which survives key rotation.
