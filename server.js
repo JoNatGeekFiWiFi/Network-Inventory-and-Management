@@ -27,6 +27,7 @@ import registerImportWizard from './domains/importwiz.js';
 import registerMobile from './domains/mobile.js';
 import registerWireguard from './domains/wireguard.js';
 import registerDocuments from './domains/documents.js';
+import registerMail from './domains/mail.js';
 import { addressKey, unitFromAddress } from './lib/address.js';
 import { PLATFORMS, platformOf, capMap, capsFor, driverFor, guessPlatform } from './lib/drivers/index.js';
 import { sshExec } from './lib/sshexec.js';
@@ -2017,6 +2018,7 @@ registerBilling(app, ctx);
 // After support: documents deliver signing links over ctx.deliverOnChannel and ctx.pubBase, both of
 // which support installs onto ctx. Registering earlier leaves them undefined at send time.
 registerDocuments(app, ctx);
+registerMail(app, ctx);
 
 // ---- Files (admin only) ----
 //

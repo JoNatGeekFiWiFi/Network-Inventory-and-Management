@@ -638,6 +638,40 @@ export function migrate() {
     prev_hash TEXT NOT NULL DEFAULT '',
     hash TEXT NOT NULL)`);
   db.exec('CREATE INDEX IF NOT EXISTS idx_docevents_doc ON doc_events(document_id, id)');
+
+  // ---- Google Workspace mailboxes -------------------------------------------------------------
+  //
+  // TWO ADDRESSES, NOT ONE, and conflating them is the mistake this table exists to prevent.
+  //
+  //   impersonate_as — the account Google issues a token for. It MUST be the user's primary
+  //                    address. Domain-wide delegation rejects an alias, and the resulting error
+  //                    ("account not found") reads like a broken credential rather than the wrong
+  //                    address, which is how it costs an afternoon.
+  //   send_as        — what goes in the From header. On a Workspace account with several domains
+  //                    these often differ: sign in as support@primary.com, correspond as
+  //                    support@brand.com.
+  //
+  // They are stored separately because Gmail's failure mode when send_as is not permitted is to
+  // silently REWRITE the From to the account's own address. The mail goes out under the wrong
+  // identity, the API returns success, and nothing anywhere reports a problem. Recording both, and
+  // verifying send_as against Gmail's own sendAs list at setup, is what turns that into an error
+  // somebody sees.
+  db.exec(`CREATE TABLE IF NOT EXISTS mailboxes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL,                       -- "Support", "Carriers" — what staff see
+    impersonate_as TEXT NOT NULL UNIQUE,       -- the primary address; the JWT 'sub'
+    send_as TEXT,                              -- From header; NULL means use impersonate_as
+    purpose TEXT NOT NULL DEFAULT 'customer',  -- customer | vendor | billing | other
+    enabled INTEGER NOT NULL DEFAULT 1,
+    -- Incremental sync state. history_id is Gmail's cursor; when it ages out (about a week) the
+    -- sync falls back to a full pass rather than stalling.
+    history_id TEXT,
+    last_sync_at TEXT, last_sync_error TEXT, last_sync_count INTEGER DEFAULT 0,
+    -- What the connection test actually found, kept so a later failure can be compared against a
+    -- known-good baseline instead of guessed at.
+    verified_at TEXT, verified_send_as TEXT,   -- JSON array of addresses Google says it may send as
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_mailboxes_enabled ON mailboxes(enabled)');
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.
