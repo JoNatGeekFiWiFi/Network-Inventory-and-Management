@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="robots" content="noindex, nofollow" />
+<!-- The token lives in the URL fragment, which browsers do not send to the server and which stays
+     out of server logs and Referer headers. The page reads it and POSTs it in a request body. -->
+<title>Sign a document</title>
+<link rel="stylesheet" href="/vendor/tabler-icons/tabler-icons.css" />
+<style>
+  :root{ --bg:#f6f6f4; --surface:#fff; --surface2:#f1efe8; --text:#1f1f1d; --text2:#5f5e5a;
+         --text3:#8a8980; --border:rgba(0,0,0,.14); --accent:#185fa5; --danger:#b03030; --ok:#2f7a44; }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#1a1a18; --surface:#242422; --surface2:#2c2c2a; --text:#f1f1ef; --text2:#b4b2a9;
+           --text3:#888780; --border:rgba(255,255,255,.16); --accent:#85b7eb; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+  .wrap{max-width:760px;margin:0 auto;padding:24px 16px 64px}
+  .card{background:var(--surface);border:.5px solid var(--border);border-radius:12px;padding:20px;margin-bottom:16px}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--text2);font-size:13px}
+  .doc{background:var(--surface2);border-radius:8px;padding:18px;white-space:pre-wrap;
+       font:13px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;max-height:52vh;overflow:auto}
+  .btn{font:inherit;font-size:15px;padding:11px 18px;border-radius:9px;border:.5px solid var(--border);
+       background:var(--surface);color:var(--text);cursor:pointer;display:inline-flex;align-items:center;gap:7px}
+  .btn.primary{background:var(--accent);border-color:transparent;color:#fff}
+  .btn.primary[disabled]{opacity:.45;cursor:not-allowed}
+  .btn.link{background:none;border:none;color:var(--text2);text-decoration:underline;padding:6px 0}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  label{display:block;font-size:13px;color:var(--text2);margin-bottom:5px}
+  input[type=text]{font:inherit;font-size:16px;width:100%;padding:11px 12px;border-radius:8px;
+                   border:.5px solid var(--border);background:var(--surface);color:var(--text)}
+  .consent{display:flex;gap:11px;align-items:flex-start;background:var(--surface2);padding:14px;border-radius:9px}
+  .consent input{margin-top:3px;width:19px;height:19px;flex:none}
+  .tabs{display:flex;gap:6px;margin-bottom:12px}
+  .tab{padding:8px 15px;border-radius:8px;border:.5px solid var(--border);background:var(--surface);cursor:pointer;font-size:14px}
+  .tab[aria-selected=true]{background:var(--accent);color:#fff;border-color:transparent}
+  canvas{width:100%;height:190px;border:1.5px dashed var(--border);border-radius:9px;background:var(--surface);touch-action:none;display:block}
+  .typed-preview{border:1.5px dashed var(--border);border-radius:9px;padding:20px;min-height:76px;
+                 font:30px/1.2 "Times New Roman",Times,serif;font-style:italic;color:#12306b}
+  @media (prefers-color-scheme: dark){ .typed-preview{color:#9dc4f0} }
+  .note{font-size:12.5px;color:var(--text3);margin-top:9px}
+  .banner{padding:13px 15px;border-radius:9px;margin-bottom:16px;font-size:14px}
+  .banner.ok{background:rgba(47,122,68,.13);color:var(--ok)}
+  .banner.warn{background:rgba(176,48,48,.11);color:var(--danger)}
+  .hash{font:11px ui-monospace,monospace;color:var(--text3);word-break:break-all}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<div class="wrap" id="wrap">
+  <div class="card"><div id="boot">Loading the document…</div></div>
+</div>
+
+<script>
+// Deliberately dependency-free and self-contained. This page is opened by people who are not our
+// users, on unknown devices, often once. It should render with nothing but this file.
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const token = location.hash.slice(1);
+let doc = null, strokes = [], mode = 'drawn';
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.assign({ token }, body || {}))
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'Something went wrong');
+  return j;
+}
+
+function fail(message) {
+  $('#wrap').innerHTML = '<div class="card"><h1>This link cannot be opened</h1>' +
+    '<p class="sub">' + esc(message) + '</p>' +
+    '<p class="sub">If you still need to sign, reply to the message that brought you here and we will send a new link.</p></div>';
+}
+
+async function boot() {
+  if (!token) return fail('The link is incomplete — it may have been cut short by your email client. Try opening it from the original message.');
+  try { doc = await api('/api/sign/open'); } catch (e) { return fail(e.message); }
+  render();
+}
+
+function render() {
+  const signed = doc.already_signed;
+  const blocked = !doc.can_sign && !signed;
+
+  let banner = '';
+  if (signed) banner = '<div class="banner ok"><i class="ti ti-check"></i> You signed this document. A copy is below.</div>';
+  else if (doc.declined) banner = '<div class="banner warn">You declined this document.</div>';
+  else if (blocked && doc.waiting_for.length) banner = '<div class="banner warn">This document is waiting on ' + esc(doc.waiting_for.join(', ')) + ' before it reaches you. You will get another message when it is your turn.</div>';
+
+  $('#wrap').innerHTML = `
+    ${banner}
+    <div class="card">
+      <h1>${esc(doc.title)}</h1>
+      <div class="sub">From ${esc(doc.company)} · for ${esc(doc.signer.role_label)} ${esc(doc.signer.name)}</div>
+    </div>
+
+    <div class="card">
+      <label>The document</label>
+      <div class="doc">${esc(doc.body)}</div>
+      <div class="row" style="margin-top:12px">
+        <a class="btn" href="/api/sign/pdf?token=${encodeURIComponent(token)}" target="_blank" rel="noopener">
+          <i class="ti ti-download"></i> Open as PDF</a>
+      </div>
+      <div class="note">Document fingerprint (SHA-256), so this copy can be proven identical later:</div>
+      <div class="hash">${esc(doc.sha256 || '')}</div>
+    </div>
+
+    ${doc.others.length ? `<div class="card"><label>Other signers</label>${
+      doc.others.map(o => `<div class="sub">${esc(o.role_label)} — ${esc(o.name)} · ${esc(o.status)}</div>`).join('')
+    }</div>` : ''}
+
+    ${signed || doc.declined || blocked ? '' : signBlock()}
+  `;
+  if (!signed && !doc.declined && !blocked) wireSigning();
+}
+
+function signBlock() {
+  return `
+  <div class="card">
+    <label>Before you sign</label>
+    <div class="consent">
+      <input type="checkbox" id="consent" ${doc.signer.consented ? 'checked disabled' : ''} />
+      <label for="consent" style="margin:0;color:var(--text)">
+        I agree to sign this document electronically, and I understand my electronic signature is
+        as binding as one on paper. I can ask for a paper copy instead at no cost by replying to the
+        message that sent me this link.
+      </label>
+    </div>
+  </div>
+
+  <div class="card">
+    <label>Your signature</label>
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" id="tabDraw"  aria-selected="true"  onclick="setMode('drawn')">Draw it</button>
+      <button class="tab" role="tab" id="tabType" aria-selected="false" onclick="setMode('typed')">Type it</button>
+    </div>
+
+    <div id="drawPane">
+      <canvas id="pad" aria-label="Signature pad — draw your signature here"></canvas>
+      <div class="row" style="margin-top:9px">
+        <button class="btn" onclick="clearPad()"><i class="ti ti-eraser"></i> Clear</button>
+        <span class="note" style="margin:0">Draw with a finger, stylus or mouse.</span>
+      </div>
+    </div>
+
+    <div id="typePane" class="hidden">
+      <label for="typedName">Type your full legal name</label>
+      <input type="text" id="typedName" autocomplete="name" placeholder="${esc(doc.signer.name)}" oninput="onTyped()" />
+      <div class="typed-preview" id="typedPreview" aria-live="polite"></div>
+      <div class="note">Typing your name here and pressing Sign adopts it as your signature.</div>
+    </div>
+
+    <div class="row" style="margin-top:18px">
+      <button class="btn primary" id="signBtn" onclick="submit()" disabled>
+        <i class="ti ti-writing-sign"></i> Sign this document</button>
+      <button class="btn link" onclick="decline()">I do not want to sign this</button>
+    </div>
+    <div class="note" id="msg" role="status" aria-live="polite"></div>
+  </div>`;
+}
+
+function setMode(m) {
+  mode = m;
+  $('#tabDraw').setAttribute('aria-selected', String(m === 'drawn'));
+  $('#tabType').setAttribute('aria-selected', String(m === 'typed'));
+  $('#drawPane').classList.toggle('hidden', m !== 'drawn');
+  $('#typePane').classList.toggle('hidden', m !== 'typed');
+  refreshButton();
+}
+
+function onTyped() {
+  $('#typedPreview').textContent = $('#typedName').value;
+  refreshButton();
+}
+
+function refreshButton() {
+  const consented = doc.signer.consented || ($('#consent') && $('#consent').checked);
+  const has = mode === 'drawn' ? strokes.length > 0 : ($('#typedName').value.trim().length >= 2);
+  const btn = $('#signBtn');
+  if (btn) btn.disabled = !(consented && has);
+}
+
+let pad, ctx2d, drawing = false, currentStroke = null;
+
+function wireSigning() {
+  const c = $('#consent');
+  if (c && !c.disabled) c.addEventListener('change', refreshButton);
+
+  pad = $('#pad');
+  // Back the canvas at device resolution so a signature is not a blurry approximation of itself.
+  const dpr = window.devicePixelRatio || 1;
+  const rect = pad.getBoundingClientRect();
+  pad.width = Math.round(rect.width * dpr);
+  pad.height = Math.round(rect.height * dpr);
+  ctx2d = pad.getContext('2d');
+  ctx2d.scale(dpr, dpr);
+  ctx2d.lineWidth = 2.2; ctx2d.lineCap = 'round'; ctx2d.lineJoin = 'round';
+  ctx2d.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#111';
+
+  const pos = (e) => {
+    const r = pad.getBoundingClientRect();
+    const p = e.touches ? e.touches[0] : e;
+    return { x: p.clientX - r.left, y: p.clientY - r.top };
+  };
+  const start = (e) => {
+    e.preventDefault(); drawing = true;
+    currentStroke = []; strokes.push(currentStroke);
+    const p = pos(e); currentStroke.push(p);
+    ctx2d.beginPath(); ctx2d.moveTo(p.x, p.y);
+    // A tap with no movement must still leave a mark — dotting an i, or a full stop.
+    ctx2d.lineTo(p.x, p.y); ctx2d.stroke();
+    refreshButton();
+  };
+  const move = (e) => {
+    if (!drawing) return;
+    e.preventDefault();
+    const p = pos(e); currentStroke.push(p);
+    ctx2d.lineTo(p.x, p.y); ctx2d.stroke();
+  };
+  const end = () => { drawing = false; currentStroke = null; };
+
+  pad.addEventListener('pointerdown', start);
+  pad.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', end);
+  pad.addEventListener('touchstart', start, { passive: false });
+  pad.addEventListener('touchmove', move, { passive: false });
+  window.addEventListener('touchend', end);
+}
+
+function clearPad() {
+  strokes = [];
+  ctx2d.clearRect(0, 0, pad.width, pad.height);
+  refreshButton();
+}
+
+async function submit() {
+  const btn = $('#signBtn');
+  btn.disabled = true;
+  $('#msg').textContent = 'Recording your signature…';
+  try {
+    if (!doc.signer.consented) { await api('/api/sign/consent'); doc.signer.consented = true; }
+    const body = mode === 'drawn' ? { kind: 'drawn', strokes } : { kind: 'typed', typed: $('#typedName').value.trim() };
+    const r = await api('/api/sign/submit', body);
+    $('#wrap').innerHTML = `<div class="card">
+      <h1>Thank you — that is signed</h1>
+      <p class="sub">${r.complete
+        ? 'Everyone has now signed. A completed copy, with a certificate recording how it was signed, is available below.'
+        : 'We are now waiting on ' + esc((r.waiting_for || []).join(', ')) + '. You will be sent the completed copy once everyone has signed.'}</p>
+      <div class="row" style="margin-top:14px">
+        <a class="btn primary" href="/api/sign/pdf?token=${encodeURIComponent(token)}" target="_blank" rel="noopener">
+          <i class="ti ti-download"></i> Download your copy</a>
+      </div>
+      <p class="note">Save this for your records. If you lose it, ask us and we will send it again.</p>
+    </div>`;
+  } catch (e) {
+    $('#msg').textContent = e.message;
+    btn.disabled = false;
+  }
+}
+
+async function decline() {
+  const reason = prompt('If you would like, tell us why. This is recorded with the document.') ;
+  if (reason === null) return;     // cancelled — not a decline
+  try {
+    await api('/api/sign/decline', { reason });
+    $('#wrap').innerHTML = '<div class="card"><h1>You have declined</h1>' +
+      '<p class="sub">We have recorded that you did not sign, and nobody else will be asked to sign it. ' +
+      'If that was a mistake, reply to the message that brought you here.</p></div>';
+  } catch (e) { alert(e.message); }
+}
+
+boot();
+</script>
+</body>
+</html>

@@ -540,6 +540,104 @@ export function migrate() {
     }
     db.prepare("INSERT INTO settings (key,value) VALUES ('subaccount_migrated','1') ON CONFLICT(key) DO UPDATE SET value='1'").run();
   }
+
+  // ---- Documents and signatures -----------------------------------------------------------------
+  //
+  // A signed agreement is evidence, and that changes what the schema has to do. Ordinary records
+  // answer "what is true now"; these have to answer "what did this person see, when, and how do we
+  // know nobody has touched it since" — possibly years later, possibly to someone hostile.
+  //
+  // Three decisions follow from that, and all three are much harder to add afterwards:
+  //
+  //  1. THE DOCUMENT IS FROZEN WHEN IT IS SENT. `content_sha256` is the hash of the exact PDF bytes
+  //     the signer was shown. A signature is bound to that hash, not to a template or a row that
+  //     might be edited later. Change a template afterwards and existing signatures still refer to
+  //     what was actually signed.
+  //  2. TOKENS ARE STORED HASHED. A signing link is a bearer credential that reaches a document
+  //     without a login. Anyone with read access to this table would otherwise be able to sign as
+  //     the customer.
+  //  3. THE AUDIT LOG IS HASH-CHAINED. Each event carries the previous event's hash, so altering or
+  //     removing an event breaks every hash after it. Without this, a self-hosted trail is only as
+  //     credible as "we promise we did not edit our own database" — which is exactly the thing a
+  //     dispute would be about.
+
+  // A reusable document with {{merge_fields}}. Uploaded one-off documents have no template.
+  db.exec(`CREATE TABLE IF NOT EXISTS doc_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'agreement',   -- agreement | lease | consent | work_order | other
+    body TEXT NOT NULL DEFAULT '',            -- plain text with {{merge}} placeholders
+    signer_roles_json TEXT NOT NULL DEFAULT '["customer"]',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+
+  db.exec(`CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    template_id INTEGER REFERENCES doc_templates(id) ON DELETE SET NULL,
+    source TEXT NOT NULL DEFAULT 'generated',  -- generated | uploaded
+    -- What it belongs to. Customer for service agreements, site or pop for leases and access
+    -- agreements — a rooftop lease belongs to the structure, not to whoever is served from it.
+    parent_type TEXT NOT NULL,                 -- customer | site | pop
+    parent_id INTEGER NOT NULL,
+    body TEXT,                                 -- the merged text, kept so the document is readable
+                                               -- without re-rendering a PDF
+    stored_name TEXT,                          -- the PDF exactly as sent
+    content_sha256 TEXT,                       -- hash of those bytes; a signature binds to THIS
+    signed_stored_name TEXT,                   -- the completed PDF, signatures and certificate
+    signed_sha256 TEXT,
+    status TEXT NOT NULL DEFAULT 'draft',      -- draft|sent|viewed|partially_signed|signed|declined|voided|expired
+    expires_at TEXT,
+    voided_reason TEXT,
+    created_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    sent_at TEXT, completed_at TEXT)`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_documents_parent ON documents(parent_type, parent_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status)');
+
+  // One row per person who must sign. Separate from `documents` because a lease has a lessor AND a
+  // countersigning officer, and each needs their own link, their own evidence and their own status.
+  db.exec(`CREATE TABLE IF NOT EXISTS doc_signers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'customer',     -- customer | lessor | witness | countersign
+    name TEXT NOT NULL,
+    email TEXT, phone TEXT,
+    delivery TEXT NOT NULL DEFAULT 'email',    -- email | sms | whatsapp | portal | in_person
+    order_index INTEGER NOT NULL DEFAULT 0,    -- sequential signing; same number means parallel
+    -- Only the hash. The raw token exists in the emailed URL and nowhere else.
+    token_hash TEXT UNIQUE,
+    token_expires_at TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',    -- pending | viewed | signed | declined
+    -- Evidence. Under ESIGN/UETA what matters is intent to sign, consent to transact
+    -- electronically, and attribution to a person; these columns are that record.
+    consent_at TEXT,                           -- agreed to sign electronically, separately recorded
+    signed_at TEXT,
+    signature_kind TEXT,                       -- drawn | typed
+    signature_strokes TEXT,                    -- JSON stroke paths: order and shape of the pen
+    signature_typed TEXT,                      -- the name as typed
+    signed_ip TEXT, signed_user_agent TEXT,
+    viewed_at TEXT, declined_at TEXT, declined_reason TEXT)`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_docsigners_doc ON doc_signers(document_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_docsigners_token ON doc_signers(token_hash)');
+
+  // The tamper-evident trail. Append-only by convention and by hash: `hash` covers this row's
+  // contents AND `prev_hash`, so the chain can be recomputed end to end and any edit, insertion or
+  // deletion shows up as the first row where the recomputation diverges.
+  db.exec(`CREATE TABLE IF NOT EXISTS doc_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    signer_id INTEGER REFERENCES doc_signers(id) ON DELETE SET NULL,
+    kind TEXT NOT NULL,                        -- created|sent|delivered|viewed|consented|signed|declined|completed|voided|downloaded
+    detail TEXT,                               -- human-readable; this is what a certificate prints
+    actor TEXT,                                -- staff email, or the signer's name
+    ip TEXT, user_agent TEXT,
+    at TEXT NOT NULL DEFAULT (datetime('now')),
+    prev_hash TEXT NOT NULL DEFAULT '',
+    hash TEXT NOT NULL)`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_docevents_doc ON doc_events(document_id, id)');
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

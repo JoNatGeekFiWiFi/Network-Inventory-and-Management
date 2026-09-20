@@ -26,6 +26,7 @@ import registerLocate from './domains/locate.js';
 import registerImportWizard from './domains/importwiz.js';
 import registerMobile from './domains/mobile.js';
 import registerWireguard from './domains/wireguard.js';
+import registerDocuments from './domains/documents.js';
 import { addressKey, unitFromAddress } from './lib/address.js';
 import { PLATFORMS, platformOf, capMap, capsFor, driverFor, guessPlatform } from './lib/drivers/index.js';
 import { sshExec } from './lib/sshexec.js';
@@ -241,6 +242,11 @@ app.post('/api/logout', (req, res) => {
 // sensitive — it is a hash of file sizes.
 app.get('/api/build', (req, res) => res.json({ build: APP_BUILD }));
 
+// The signing routes, listed here rather than in domains/documents.js on purpose: which paths skip
+// authentication is a property of the application's security boundary, and it should be readable in
+// one place next to the middleware that enforces it, not discovered by reading a domain module.
+const SIGNING_PATHS = new Set(['/sign/open', '/sign/consent', '/sign/submit', '/sign/decline', '/sign/pdf']);
+
 // ---- require auth for everything else under /api ----
 //
 // Two ways in: the browser's session cookie, or a device token in an Authorization header for the
@@ -254,6 +260,15 @@ app.use('/api', (req, res, next) => {
   // password check and the same throttle as the web login. Matched exactly — a prefix test here
   // would open anything beginning with those characters.
   if (req.path === '/m/session') return next();
+
+  // Document signing. A customer or a rooftop lessor has no account here and never will, so these
+  // routes authenticate with the single-use token from their emailed link instead of a session.
+  //
+  // Matched EXACTLY, against a fixed set, for the reason given above: a startsWith('/sign') test
+  // would also unauthenticate any future route whose path merely begins with those characters.
+  // Each of these verifies the token itself and refuses to do anything without a valid one.
+  if (SIGNING_PATHS.has(req.path)) return next();
+
   const bearer = String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
   if (bearer) {
     const u = userForApiToken(bearer[1].trim(), clientIp(req));
@@ -1999,6 +2014,9 @@ registerMobile(app, ctx);
 registerWireguard(app, ctx);
 registerSupport(app, ctx);   // messaging helpers first: billing has no dependency, but portal/pubBase are shared
 registerBilling(app, ctx);
+// After support: documents deliver signing links over ctx.deliverOnChannel and ctx.pubBase, both of
+// which support installs onto ctx. Registering earlier leaves them undefined at send time.
+registerDocuments(app, ctx);
 
 // ---- Files (admin only) ----
 //
