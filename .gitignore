@@ -40,3 +40,8 @@ az_spans_*.json
 /katalyst-*.json
 /probe-*.json
 !test/fixtures/
+
+# Test PDFs dropped in for inspection. Blank IRS forms are public, but the folder is a working
+# area and a real signed contract must never be committed by accident.
+*.pdf
+!test/fixtures/*.pdf
