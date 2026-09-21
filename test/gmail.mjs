@@ -19,6 +19,7 @@ import {
 } from '../lib/googleauth.js';
 import {
   header, extractBody, htmlToText, addresses, displayName, normaliseMessage,
+  replyTokenIn, visibleReply,
   encodeHeader, buildRawMessage, buildReferences, replySubject, replyRecipients,
   createGmailClient, explainApiError, syncSince
 } from '../lib/gmail.js';
@@ -241,6 +242,9 @@ const KEY_JSON = JSON.stringify({
   ok(addresses('nothing here').length === 0, 'a header with no address yields none');
   ok(addresses(null).length === 0 && addresses('').length === 0, 'and null is safe');
   ok(addresses('a@b.com, a@b.com').length === 1, 'duplicates collapse');
+  ok(addresses('Support <support+e277a597d044c4e2f9f546fc3d746900@geekfiwifi.com>')[0]
+      === 'support+e277a597d044c4e2f9f546fc3d746900@geekfiwifi.com',
+    'a plus-addressed reply token survives — that is how a reply is matched back to the customer');
   ok(displayName('<a@b.com>') === null, 'an address with no display name gives null, not an empty string');
 }
 
@@ -365,6 +369,58 @@ const KEY_JSON = JSON.stringify({
   ok(/Google Group/.test(explainApiError(400, { error: { message: 'failedPrecondition' } }, 'support@geekitek.com')),
     'and a failed precondition names the Google Group trap, which is what it almost always is');
   ok(/rate-limiting/.test(explainApiError(429, {}, 'a@b.com')), 'rate limiting is described as temporary, because it is');
+}
+
+// ---- filing a reply, and not the rest of the inbox ------------------------------------------------
+{
+  const token = 'e277a597d044c4e2f9f546fc3d746900';
+  const reply = normaliseMessage({
+    id: 'm9', threadId: 't9', labelIds: ['INBOX'],
+    payload: {
+      mimeType: 'text/plain',
+      headers: [
+        { name: 'From', value: 'Jon Fernandez <jon@geekfiwifi.com>' },
+        { name: 'To', value: `support+${token}@geekfiwifi.com` },
+        { name: 'Subject', value: 'Re: [Jon & Angela Solorio-Fernandez] test-3' }
+      ],
+      body: { data: b64u('test I got it lets hope it shows up in the system\n\nOn Mon, Sep 21, 2026 at 1:21 PM support@geekfiwifi.com wrote:\n> testing 3\n> Reply to this email to continue the conversation.\n') }
+    }
+  });
+  ok(replyTokenIn(reply), 'a reply to our plus-address is recognised as a customer reply');
+  ok(visibleReply(reply.text) === 'test I got it lets hope it shows up in the system',
+    'the quoted original is dropped, so the timeline shows what the customer wrote');
+  ok(reply.routedTo.includes(`support+${token}@geekfiwifi.com`), 'the token address is kept for matching');
+
+  const deliveredOnly = normaliseMessage({
+    id: 'm10', threadId: 't10', labelIds: ['INBOX'],
+    payload: {
+      mimeType: 'text/plain',
+      headers: [
+        { name: 'From', value: 'jon@geekfiwifi.com' },
+        { name: 'To', value: 'support@geekfiwifi.com' },
+        { name: 'Delivered-To', value: `support+${token}@geekfiwifi.com` },
+        { name: 'Subject', value: 'Re: test-3' }
+      ],
+      body: { data: b64u('still here') }
+    }
+  });
+  ok(replyTokenIn(deliveredOnly), 'the token still counts when Gmail left it only on Delivered-To');
+
+  const newsletter = normaliseMessage({
+    id: 'm11', threadId: 't11', labelIds: ['INBOX'],
+    payload: {
+      mimeType: 'text/plain',
+      headers: [
+        { name: 'From', value: 'news@vendor.example' },
+        { name: 'To', value: 'support@geekfiwifi.com' },
+        { name: 'Subject', value: 'September newsletter' }
+      ],
+      body: { data: b64u('Hello') }
+    }
+  });
+  ok(!replyTokenIn(newsletter), 'ordinary inbox mail is not treated as a reply');
+  ok(replyTokenIn({ subject: 'Re: [TKT-1001] outage', to: [], cc: [], routedTo: [] }),
+    'a ticket number in the subject is enough when the plus-address was stripped');
 }
 
 console.log(`RESULT: ${pass} passed, ${fail} failed`);

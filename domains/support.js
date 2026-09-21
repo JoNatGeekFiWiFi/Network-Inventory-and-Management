@@ -633,6 +633,7 @@ export default function registerSupport(app, ctx) {
   });
 
   ctx.jobs.pollImap = pollImap;
+  ctx.ingestInbound = ingestInbound;
   ctx.jobs.inboundTelnyx = inboundTelnyx;
   ctx.requirePortal = requirePortal;
   ctx.pubBase = pubBase;

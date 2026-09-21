@@ -1385,6 +1385,7 @@ export default function registerNetwork(app, ctx) {
       }
       // inbound email: poll the support mailbox for customer replies (self-guards on config)
       if (process.env.IMAP !== 'off') { try { await ctx.jobs.pollImap(); } catch (e) { console.warn('imap poll:', e.message); } }
+      if (process.env.GMAIL !== 'off' && ctx.jobs.pollGmail) { try { await ctx.jobs.pollGmail(); } catch (e) { console.warn('gmail poll:', e.message); } }
       // end-of-day auto check-out of any visitors still on site (once per day, at/after the configured time)
       const acAt = getSetting('auto_checkout_at');
       if (acAt && /^\d{1,2}:\d{2}$/.test(acAt)) {

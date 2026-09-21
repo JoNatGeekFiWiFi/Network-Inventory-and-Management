@@ -2486,7 +2486,7 @@ async function renderSettings() {
         <div class="fld"><label class="fl">Telnyx (SMS + WhatsApp)</label><input readonly value="${esc(s.public_base_url_effective + '/inbound/telnyx/' + s.inbound_secret)}" style="font-family:var(--mono);background:var(--surface2)"/></div>
         <div class="fld"><label class="fl">Email (Mailgun / Postmark / SendGrid parse)</label><input readonly value="${esc(s.public_base_url_effective + '/inbound/email/' + s.inbound_secret)}" style="font-family:var(--mono);background:var(--surface2)"/></div>
         <div class="fld"><label class="fl">Mac bridge (iMessage · FaceTime · RCS/SMS from Messages.app)</label><input readonly value="${esc(s.public_base_url_effective + '/inbound/imessage/' + s.inbound_secret)}" style="font-family:var(--mono);background:var(--surface2)"/></div>` : '<div class="small sec-muted">Set the Public server URL (in Zero-touch provisioning) and save this section to generate your webhook URLs.</div>'}
-        <div class="help">For email replies to thread automatically, keep the <span class="mono">[TKT-####]</span> subject tag and the <span class="mono">Reply-To</span> address intact (both are set on outgoing mail). IMAP polling needs no webhooks — just the mailbox login above. On the Mac, set <span class="mono">webhookUrl</span> to this server’s ZeroTier or WireGuard address plus <span class="mono">/inbound/imessage/…</span>, so that traffic stays on the management overlay.</div></div>
+        <div class="help">For email replies to thread automatically, keep the <span class="mono">[TKT-####]</span> subject tag and the <span class="mono">Reply-To</span> address intact (both are set on outgoing mail). A connected Google mailbox is checked about once a minute; IMAP is only needed when mail is not in Workspace. On the Mac, set <span class="mono">webhookUrl</span> to this server’s ZeroTier or WireGuard address plus <span class="mono">/inbound/imessage/…</span>, so that traffic stays on the management overlay.</div></div>
     </div>
     <div class="card"><div class="row rowlink" onclick="location.hash='#/importwiz'">
       <i class="ti ti-table-import sec-muted"></i>
@@ -2600,9 +2600,11 @@ async function loadWorkspace() {
               : '<span class="sec-muted">Gmail returned no send-as addresses</span>')
             : '<span class="sec-muted">Aliases not checked yet</span>'}</div>
           <div class="small ${m.verified_at ? '' : 'sec-muted'}">${m.verified_at ? '✓ verified ' + esc(m.verified_at) : 'not yet tested'}</div>
+          ${m.last_sync_error ? `<div class="small" style="color:var(--danger)">Inbox check failed: ${esc(m.last_sync_error)}</div>` : (m.last_sync_at ? `<div class="small sec-muted">Inbox checked ${esc(m.last_sync_at)}</div>` : '')}
         </div>
         <div style="display:flex;gap:6px;flex:none;flex-wrap:wrap;justify-content:flex-end">
           <button class="btn sm" onclick="recheckAliases(${m.id})" title="Ask Gmail again which addresses this mailbox may send as"><i class="ti ti-refresh"></i> Re-check aliases</button>
+          <button class="btn sm" onclick="checkMailboxReplies(${m.id})" title="Read new mail in this mailbox and file customer replies"><i class="ti ti-inbox"></i> Check for replies</button>
           <button class="btn sm" onclick="testMailbox(${m.id})"><i class="ti ti-plug"></i> Test connection</button>
           ${admin ? `<button class="btn sm" onclick="removeMailbox(${m.id})"><i class="ti ti-trash"></i> Remove</button>` : ''}
         </div>
@@ -2652,6 +2654,20 @@ async function removeMailbox(id) {
   if (!confirm('Remove this mailbox? Mail already filed against records is kept.')) return;
   try { await api('/mail/mailboxes/' + id, { method: 'DELETE' }); toast('Removed'); loadWorkspace(); }
   catch (e) { toast(e.message); }
+}
+
+async function checkMailboxReplies(id) {
+  const out = document.getElementById('mbtest-' + id);
+  if (out) out.innerHTML = '<div class="small sec-muted" style="padding:6px 14px">Checking the mailbox for replies…</div>';
+  try {
+    const r = await api('/mail/mailboxes/' + id + '/sync', { body: {} });
+    const n = r.ingested || 0;
+    toast(n ? `Filed ${n} repl${n === 1 ? 'y' : 'ies'}` : 'No new replies');
+    loadWorkspace();
+  } catch (e) {
+    if (out) out.innerHTML = `<div class="small" style="padding:6px 14px;color:var(--danger)">${esc(e.message)}</div>`;
+    else toast(e.message);
+  }
 }
 
 async function recheckAliases(id) {

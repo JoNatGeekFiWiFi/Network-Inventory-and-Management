@@ -10,7 +10,7 @@
 // out under the wrong identity, the customer replies to somewhere unexpected, and no error is
 // raised anywhere. So send-as is verified against Gmail's own list at setup rather than trusted.
 import { parseServiceAccount, createTokenSource, ALL_SCOPES } from '../lib/googleauth.js';
-import { createGmailClient, addresses, buildRawMessage } from '../lib/gmail.js';
+import { createGmailClient, addresses, buildRawMessage, normaliseMessage, syncSince, replyTokenIn, visibleReply } from '../lib/gmail.js';
 
 const PURPOSES = ['customer', 'vendor', 'billing', 'other'];
 
@@ -319,6 +319,104 @@ export default function registerMail(app, ctx) {
     if (ok) db.prepare("UPDATE mailboxes SET verified_at=datetime('now') WHERE id=?").run(m.id);
     audit(req, 'view', 'mailbox#' + m.id, `connection test: ${ok ? 'passed' : 'failed'}`);
     res.json({ ok, checks, profile: profile ? { emailAddress: profile.emailAddress, messagesTotal: profile.messagesTotal } : null });
+  });
+
+  /**
+   * Pull new mail from a connected mailbox and file customer replies.
+   *
+   * The first pass looks back two days rather than walking the whole inbox. A support mailbox can
+   * hold tens of thousands of messages, and Gmail's history cursor does not exist until we have
+   * synced once. After that, only messages added since the stored history id are read.
+   * Anything that is not a reply to us — no plus-address token, no ticket number, and not from a
+   * customer on file — is left in Gmail and not turned into a ticket.
+   */
+  const LOOKBACK = 2;
+  const LOOKBACK_CAP = 40;
+  let _gmailBusy = false;
+
+  function knownCustomer(from) {
+    const addr = String(from || '').trim().toLowerCase();
+    if (!addr) return false;
+    return !!db.prepare('SELECT id FROM customers WHERE lower(billing_email)=?').get(addr);
+  }
+
+  async function recentIds(client) {
+    const page = await client.listMessages(`newer_than:${LOOKBACK}d -in:sent -in:draft -in:chats`, null, LOOKBACK_CAP);
+    return (page.messages || []).map(row => row.id);
+  }
+
+  async function syncMailbox(m) {
+    if (!ctx.ingestInbound) throw new Error('Inbound mail is not ready yet.');
+    const client = clientFor(m);
+    const profile = await client.profile();
+    let ids = [];
+    let nextHistory = profile.historyId ? String(profile.historyId) : null;
+    if (m.history_id) {
+      const sync = await syncSince(client, m.history_id);
+      if (sync.full) ids = await recentIds(client);
+      else {
+        ids = sync.messageIds;
+        nextHistory = sync.historyId ? String(sync.historyId) : nextHistory;
+      }
+    } else {
+      ids = await recentIds(client);
+    }
+
+    let ingested = 0;
+    for (const id of ids) {
+      let raw;
+      try { raw = await client.getMessage(id); }
+      catch (e) { if (e.status === 404) continue; throw e; }
+      const msg = normaliseMessage(raw);
+      if (msg.outbound || (msg.labels || []).includes('DRAFT')) continue;
+      const ours = allowedFrom(m).includes(String(msg.from || '').toLowerCase());
+      if (ours && !replyTokenIn(msg)) continue;
+      if (!replyTokenIn(msg) && !knownCustomer(msg.from)) continue;
+      const body = visibleReply(msg.text || '') || String(msg.snippet || '').trim();
+      if (!body) continue;
+      const r = ctx.ingestInbound({
+        channel: 'email',
+        from: msg.fromName && msg.from ? `${msg.fromName} <${msg.from}>` : (msg.from || ''),
+        to: (msg.routedTo || []).join(' '),
+        subject: msg.subject === '(no subject)' ? '' : (msg.subject || ''),
+        body,
+        external_id: msg.messageId || ('gmail-' + msg.id)
+      });
+      if (r && !r.skipped) ingested++;
+    }
+    db.prepare("UPDATE mailboxes SET history_id=?, last_sync_at=datetime('now'), last_sync_error=NULL, last_sync_count=? WHERE id=?").run(nextHistory, ingested, m.id);
+    return { ingested, scanned: ids.length };
+  }
+
+  async function pollGmail() {
+    if (_gmailBusy || !serviceAccount()) return;
+    _gmailBusy = true;
+    try {
+      const boxes = db.prepare('SELECT * FROM mailboxes WHERE enabled=1').all();
+      for (const m of boxes) {
+        try { await syncMailbox(m); }
+        catch (e) {
+          db.prepare("UPDATE mailboxes SET last_sync_at=datetime('now'), last_sync_error=? WHERE id=?").run(String(e.message).slice(0, 300), m.id);
+          console.warn('gmail poll ' + m.impersonate_as + ':', e.message);
+        }
+      }
+    } finally { _gmailBusy = false; }
+  }
+  ctx.jobs.pollGmail = pollGmail;
+
+  app.post('/api/mail/mailboxes/:id/sync', requireNoc, async (req, res) => {
+    const m = db.prepare('SELECT * FROM mailboxes WHERE id=?').get(req.params.id);
+    if (!m) return res.status(404).json({ error: 'not found' });
+    if (!serviceAccount()) return res.status(400).json({ error: 'No Google service account key has been saved yet (Settings → Email).' });
+    if (_gmailBusy) return res.status(409).json({ error: 'A mailbox check is already running.' });
+    _gmailBusy = true;
+    try {
+      const r = await syncMailbox(m);
+      res.json({ ok: true, ...r });
+    } catch (e) {
+      db.prepare("UPDATE mailboxes SET last_sync_at=datetime('now'), last_sync_error=? WHERE id=?").run(String(e.message).slice(0, 300), m.id);
+      res.status(502).json({ error: e.message });
+    } finally { _gmailBusy = false; }
   });
 
   app.post('/api/mail/mailboxes/:id/aliases', requireNoc, async (req, res) => {
