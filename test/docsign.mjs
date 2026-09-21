@@ -190,8 +190,21 @@ let token = null;
   const sent = await call(`/api/documents/${docId}/send`, { body: {} });
   ok(sent.status === 200 && sent.json.sha256, 'sending freezes and hashes the document');
   ok(sent.json.deliveries && sent.json.deliveries.length === 1, 'and reports what happened for each signer');
-  token = sent.json.deliveries[0].url.split('#')[1];
+  const url = sent.json.deliveries[0].url;
+  token = url.split('#')[1];
   ok(!!token && token.length > 30, 'a signing link carries a long token in the URL fragment');
+
+  // The token must be in the FRAGMENT, not the path or query. Browsers do not transmit a fragment,
+  // so it stays out of the server's own access log, out of Referer headers, and out of any proxy in
+  // between. A bearer credential in a path is a bearer credential in every log it passes through.
+  ok(!url.split('#')[0].includes(token), 'and the token appears nowhere in the path or query');
+  ok(url.split('#')[0].endsWith('/docs'), `the signing page is at a clean /docs path (${url.split('#')[0]})`);
+
+  // The public URL is derived from the request when it is not configured. Requiring a setting for
+  // this produced links like "/docs#token" — dead in an email — because nobody had filled in a
+  // field buried on the Settings page.
+  ok(/^https?:\/\//.test(url),
+    `the link is absolute even with no public URL configured, derived from the request (${url.split('#')[0]})`);
 
   const afterSend = (await call(`/api/documents/${docId}`)).json;
   ok(afterSend.status === 'sent' && afterSend.content_sha256, 'the document records the hash of what was sent');

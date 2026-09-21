@@ -308,7 +308,7 @@ export default function registerDocuments(app, ctx) {
       .run(stored, hash, d.id);
     appendEvent({ document_id: d.id, kind: 'sent', detail: `document frozen, sha256 ${hash.slice(0, 16)}…`, actor: (req.user && req.user.email) || null, req });
 
-    const base = ctx.pubBase ? ctx.pubBase() : '';
+    const base = ctx.pubBase ? ctx.pubBase(req) : '';
     const out = [];
     for (const s of signers) {
       const link = await issueLink(d, s, base, req);
@@ -331,7 +331,10 @@ export default function registerDocuments(app, ctx) {
     const expires = new Date(Date.now() + days * 86400e3).toISOString();
     db.prepare('UPDATE doc_signers SET token_hash=?, token_expires_at=? WHERE id=?').run(hash, expires, signer.id);
 
-    const url = base ? `${base}/sign.html#${token}` : `/sign.html#${token}`;
+    // /docs rather than /sign.html, to match /locator and /portal. What a signer sees in their
+    // address bar is part of whether they trust the link enough to open it, and a bare .html file
+    // reads like something that got left on a server.
+    const url = base ? `${base}/docs#${token}` : `/docs#${token}`;
     const result = { signer_id: signer.id, name: signer.name, role: signer.role, delivery: signer.delivery, url, sent: false, error: null };
 
     const subject = `Please sign: ${doc.title}`;
@@ -379,7 +382,7 @@ export default function registerDocuments(app, ctx) {
     if (!d || !s) return res.status(404).json({ error: 'not found' });
     if (s.status === 'signed') return res.status(409).json({ error: 'Already signed' });
     if (d.status === 'draft') return res.status(409).json({ error: 'Send the document first' });
-    const out = await issueLink(d, s, ctx.pubBase ? ctx.pubBase() : '', req);
+    const out = await issueLink(d, s, ctx.pubBase ? ctx.pubBase(req) : '', req);
     res.json(out);
   });
 

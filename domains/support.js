@@ -142,7 +142,35 @@ export default function registerSupport(app, ctx) {
     return s ? db.prepare('SELECT * FROM customers WHERE id=?').get(s.customer_id) : null;
   }
   function requirePortal(req, res, next) { const c = portalCustomer(req); if (!c) return res.status(401).json({ error: 'Please sign in' }); req.pcust = c; next(); }
-  const pubBase = () => (getSetting('public_base_url') || '').replace(/\/+$/, '');
+  /**
+   * The platform's own public address, for building links that go into emails.
+   *
+   * A configured value always wins — it is the only thing that works for links built by a
+   * background job, which has no request to learn from. But requiring it for a link built while a
+   * person is looking at the page is a setup step that exists for no reason: the server already
+   * knows its public address, because the staff member's browser just used it.
+   *
+   * Leaving it required produced exactly the failure it should have prevented — signing links
+   * coming out as "/sign.html#token", which is dead in an email, because nobody had filled in a
+   * field buried on the Settings page.
+   *
+   * Derived from the forwarded headers rather than by turning on Express's `trust proxy`, which
+   * would also change how req.ip resolves everywhere else — and req.ip feeds the audit trail and
+   * the login throttle, so it is not a knob to turn casually. The Host header is attacker-supplied
+   * in general; here it comes from an authenticated staff member's own browser session, so it is
+   * the address they are really using.
+   */
+  const pubBase = (req = null) => {
+    const configured = (getSetting('public_base_url') || '').replace(/\/+$/, '');
+    if (configured) return configured;
+    if (!req) return '';
+    const fwdHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+    const host = fwdHost || String(req.headers.host || '').trim();
+    if (!host || !/^[\w.-]+(:\d+)?$/.test(host)) return '';   // refuse anything that is not a plain host:port
+    const fwdProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+    const proto = fwdProto || (req.socket && req.socket.encrypted ? 'https' : 'http');
+    return `${proto}://${host}`;
+  };
   app.get('/portal', (req, res) => res.sendFile(join(PUBLIC_DIR, 'portal.html')));
   app.post('/portal/login', (req, res) => {
     const b = req.body || {}; const email = String(b.email || '').trim().toLowerCase();

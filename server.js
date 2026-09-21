@@ -2114,6 +2114,15 @@ function locatorThrottled(req) {
 
 app.get('/locator', (req, res) => res.sendFile(join(__dirname, 'public', 'locator.html')));
 
+// Where a customer or lessor lands to sign. Served at a clean path alongside /locator and /portal:
+// what a signer sees in the address bar is part of whether they trust the link enough to open it,
+// and a bare .html reads like something left on a server by accident.
+//
+// The token never appears here — it travels in the URL fragment, which browsers do not transmit, so
+// it stays out of access logs, Referer headers and any proxy in between. The page reads it from
+// location.hash and POSTs it.
+app.get('/docs', (req, res) => res.sendFile(join(__dirname, 'public', 'sign.html')));
+
 app.post('/locator/calc', express.raw({ type: () => true, limit: LOCATOR_MAX_BYTES }), (req, res) => {
   if (locatorThrottled(req))
     return res.status(429).json({ error: 'Too many calculations from this address — wait a minute and try again.' });
