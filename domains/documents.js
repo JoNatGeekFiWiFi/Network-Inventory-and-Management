@@ -339,8 +339,16 @@ export default function registerDocuments(app, ctx) {
 
     try {
       if (signer.delivery === 'email' && signer.email) {
-        result.sent = !!(await sendMail({ to: signer.email, subject, text }));
-        if (!result.sent) result.error = 'SMTP is not configured (Settings → Email)';
+        // Prefer the connected Workspace mailbox over SMTP. A contract arriving from the address the
+        // customer already corresponds with is the point; one from a no-reply@ they do not recognise
+        // is the kind of mail people delete without opening.
+        const sent = ctx.sendMailBest
+          ? await ctx.sendMailBest({ to: signer.email, subject, text, purpose: 'customer' })
+          : { ok: !!(await sendMail({ to: signer.email, subject, text })), via: 'smtp' };
+        result.sent = sent.ok;
+        result.via = sent.via;
+        result.from = sent.from || null;
+        if (!sent.ok) result.error = sent.error || 'Could not send';
       } else if ((signer.delivery === 'sms' || signer.delivery === 'whatsapp') && signer.phone && ctx.deliverOnChannel) {
         await ctx.deliverOnChannel(signer.delivery, signer.phone, `${doc.title} — please review and sign: ${url}`);
         result.sent = true;
@@ -354,7 +362,11 @@ export default function registerDocuments(app, ctx) {
     }
     appendEvent({
       document_id: doc.id, signer_id: signer.id, kind: result.sent ? 'delivered' : 'delivery_failed',
-      detail: `${signer.delivery} to ${signer.email || signer.phone || 'this device'}${result.error ? ' — ' + result.error : ''}`,
+      // Records WHICH transport carried it and from what address. On the certificate this is part of
+      // the attribution evidence: "sent to this address, from that one, at this time".
+      detail: `${signer.delivery} to ${signer.email || signer.phone || 'this device'}` +
+        (result.via ? ` via ${result.via}${result.from ? ` as ${result.from}` : ''}` : '') +
+        (result.error ? ` — ${result.error}` : ''),
       actor: (req && req.user && req.user.email) || null, req
     });
     return result;

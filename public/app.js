@@ -91,6 +91,7 @@ function setupHeader() {
   $('#navBatch').style.display = isPriv() ? '' : 'none';
   $('#navAccess').style.display = isPriv() ? '' : 'none';
   $('#navBilling').style.display = isPriv() ? '' : 'none';
+  $('#navDocs').style.display = isPriv() ? '' : 'none';
   $('#navPnl').style.display = isPriv() ? '' : 'none';
   $('#navTickets').style.display = isPriv() ? '' : 'none';
   $('#navPackages').style.display = isPriv() ? '' : 'none';
@@ -233,6 +234,9 @@ async function route() {
     if (p[0] === 'billing' && p[1] === 'quote' && p[2] === 'new') { setNav('billing'); return await formQuote({}); }
     if (p[0] === 'billing' && p[1] === 'quote' && p[3] === 'edit') { setNav('billing'); return await formQuote({ id: p[2] }); }
     if (p[0] === 'billing') { setNav('billing'); return await renderBilling(); }
+    if (p[0] === 'documents' && p[1] === 'templates') { setNav('documents'); return await renderDocTemplates(); }
+    if (p[0] === 'documents' && p[1]) { setNav('documents'); return await renderDocument(p[1]); }
+    if (p[0] === 'documents') { setNav('documents'); return await renderDocuments(); }
     if (p[0] === 'pnl') { setNav('pnl'); return await renderPnl(); }
     if (p[0] === 'import') { setNav('settings'); return await renderImport(); }
     if (p[0] === 'importwiz') { setNav('settings'); return await renderImportWiz(p[1]); }
@@ -416,7 +420,11 @@ async function renderSite(id) {
     <div class="card">
       <div class="hd"><h2><i class="ti ti-notes"></i> Site notes · ${s.notes.length}</h2><a class="btn sm" href="#/site/${s.id}/notes"><i class="ti ti-arrows-diagonal"></i> Expand</a></div>
       ${note ? `<div class="note"><div class="av">${initials(note.author)}</div><div style="flex:1"><div class="small"><b>${esc(note.author)}</b> <span class="muted">· ${esc(note.created_at)}</span></div>${note.body ? `<div class="small sec-muted" style="margin-top:2px">${esc(note.body)}</div>` : ''}${attachmentsHtml(note.attachments, false)}</div></div>` : '<div class="row muted">No notes yet</div>'}
-    </div>`;
+    </div>
+    <div id="docsFor-site-${s.id}"></div>`;
+  // A rooftop or access lease belongs to the site, not to whoever is served from it — the lease
+  // outlives the customer.
+  if (isPriv()) loadDocumentsFor('site', s.id);
 }
 
 function iconFor(t) { t = (t || '').toLowerCase(); if (t.includes('router')) return 'router'; if (t.includes('switch')) return 'switch-3'; if (t.includes('access')) return 'access-point'; if (t.includes('modem')) return 'device-desktop-analytics'; return 'device-desktop'; }
@@ -861,7 +869,42 @@ async function renderCust(id) {
     <div class="card"><div class="hd"><h2>Sites · ${c.sites.length}</h2><div style="display:flex;gap:8px">
       ${isPriv() ? `<button class="btn sm" onclick="attachSiteUI(${c.id})" title="Move an existing site to this customer"><i class="ti ti-link"></i> Attach existing site</button>` : ''}
       <a class="btn sm" href="#/site/new?customer=${c.id}"><i class="ti ti-plus"></i> Add site</a></div></div>
-      <div id="attachsite"></div>${sites || '<div class="row muted">No sites yet — attach an existing site or add a new one</div>'}</div>`;
+      <div id="attachsite"></div>${sites || '<div class="row muted">No sites yet — attach an existing site or add a new one</div>'}</div>
+    <div id="docsFor-customer-${c.id}"></div>`;
+  if (isPriv()) loadDocumentsFor('customer', c.id);
+}
+
+/**
+ * Signed documents on the record they belong to.
+ *
+ * Filed here rather than only on a Documents page because this is where someone looks when a
+ * customer disputes a term — from the customer, not from a list of every document the company has
+ * ever sent. Rendered after the page so a slow query never delays the record itself.
+ */
+async function loadDocumentsFor(parentType, parentId) {
+  const el = document.getElementById(`docsFor-${parentType}-${parentId}`);
+  if (!el) return;
+  let docs = [];
+  try { docs = await api(`/documents?parent_type=${parentType}&parent_id=${parentId}`); }
+  catch { return; }                      // a missing documents feature must not break the record page
+  if (!docs.length) {
+    el.innerHTML = `<div class="card"><div class="hd"><h2><i class="ti ti-file-certificate"></i> Documents</h2>
+      <button class="btn sm" onclick="newDocumentFor('${parentType}', ${parentId})"><i class="ti ti-plus"></i> New document</button></div>
+      <div class="row muted">Nothing on file.</div></div>`;
+    return;
+  }
+  el.innerHTML = `<div class="card"><div class="hd"><h2><i class="ti ti-file-certificate"></i> Documents · ${docs.length}</h2>
+      <button class="btn sm" onclick="newDocumentFor('${parentType}', ${parentId})"><i class="ti ti-plus"></i> New document</button></div>
+    ${docs.map(d => `<div class="row rowlink" onclick="location.hash='#/documents/${d.id}'">
+      <div style="flex:1;min-width:0"><div>${esc(d.title)} ${docBadge(d.status)}</div>
+        <div class="small sec-muted">${esc((d.completed_at || d.sent_at || d.created_at || '').slice(0, 16))}</div></div>
+      ${d.status === 'signed' ? `<a class="btn sm" href="/api/documents/${d.id}/pdf?signed=1" target="_blank" rel="noopener"
+         onclick="event.stopPropagation()"><i class="ti ti-download"></i> Signed PDF</a>` : ''}
+    </div>`).join('')}</div>`;
+}
+
+function newDocumentFor(parentType, parentId) {
+  newDocument({ parent_type: parentType, parent_id: parentId });
 }
 // Inline pickers: assign a site to a customer (from either end)
 async function assignCustomerUI(siteId, currentId) {
@@ -3312,6 +3355,386 @@ async function saveWifi(idx) {
 // same endpoint. It used to call a separate route that produced a subtly different config; see the
 // note where that route was removed in server.js.
 function showWg(id) { return wgConfigSheet('devices', id); }
+
+// ---------- Documents & e-signing ----------
+//
+// The states a document moves through are the whole interface here. A signature request that is
+// sitting unopened, one waiting on a countersigner, and one that was declined all look identical if
+// you only show "sent", and each needs a different action from a person.
+const DOC_STATUS = {
+  draft: { label: 'Draft', colour: 'var(--text3)' },
+  sent: { label: 'Awaiting signature', colour: 'var(--info)' },
+  viewed: { label: 'Opened, not signed', colour: 'var(--info)' },
+  partially_signed: { label: 'Partly signed', colour: 'var(--warn)' },
+  signed: { label: 'Signed', colour: 'var(--success)' },
+  declined: { label: 'Declined', colour: 'var(--danger)' },
+  voided: { label: 'Voided', colour: 'var(--text3)' },
+  expired: { label: 'Expired', colour: 'var(--text3)' }
+};
+const docBadge = (s) => {
+  const d = DOC_STATUS[s] || { label: s, colour: 'var(--text3)' };
+  return `<span class="tag" style="color:${d.colour}">${esc(d.label)}</span>`;
+};
+
+async function renderDocuments() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  let docs = [];
+  try { docs = await api('/documents'); }
+  catch (e) { view().innerHTML = `<h1>Documents</h1><div class="card" style="padding:20px">Couldn't load: ${esc(e.message)}</div>`; return; }
+
+  // Anything needing a person comes first. A list sorted purely by date buries the declined lease
+  // under thirty signed ones.
+  const needsYou = docs.filter(d => ['draft', 'declined'].includes(d.status));
+  const running = docs.filter(d => ['sent', 'viewed', 'partially_signed'].includes(d.status));
+  const done = docs.filter(d => !needsYou.includes(d) && !running.includes(d));
+
+  const row = (d) => `<div class="row rowlink" onclick="location.hash='#/documents/${d.id}'">
+      <div style="flex:1;min-width:0">
+        <div>${esc(d.title)} ${docBadge(d.status)}</div>
+        <div class="small sec-muted">${esc(d.parent_type)} · ${esc(d.parent_label)} ·
+          ${d.signers.map(s => `${esc(s.name)} <span style="opacity:.7">(${esc(s.status)})</span>`).join(', ')}</div>
+      </div>
+      <div class="small sec-muted" style="flex:none">${esc((d.completed_at || d.sent_at || d.created_at || '').slice(0, 16))}</div>
+    </div>`;
+
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Documents</h1>
+      <button class="btn" onclick="location.hash='#/documents/templates'"><i class="ti ti-template"></i> Templates</button>
+      <button class="btn primary" onclick="newDocument()"><i class="ti ti-plus"></i> New document</button></div>
+
+    ${needsYou.length ? `<div class="card"><div class="hd"><h2><i class="ti ti-alert-circle"></i> Needs you · ${needsYou.length}</h2></div>
+      ${needsYou.map(row).join('')}</div>` : ''}
+
+    <div class="card"><div class="hd"><h2><i class="ti ti-clock"></i> Out for signature · ${running.length}</h2></div>
+      ${running.map(row).join('') || '<div class="row muted">Nothing is waiting on a signature.</div>'}</div>
+
+    <div class="card" style="margin-top:16px"><div class="hd"><h2><i class="ti ti-check"></i> Completed · ${done.length}</h2></div>
+      ${done.slice(0, 50).map(row).join('') || '<div class="row muted">Nothing signed yet.</div>'}</div>
+    <div id="docout"></div>`;
+}
+
+async function renderDocTemplates() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const [tpls, fields] = await Promise.all([api('/doc-templates'), api('/doc-templates/fields')]);
+  window._docFields = fields;
+
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Document templates</h1>
+      <button class="btn" onclick="location.hash='#/documents'"><i class="ti ti-arrow-left"></i> Back to documents</button>
+      <button class="btn primary" onclick="editTemplate(null)"><i class="ti ti-plus"></i> New template</button></div>
+
+    <div class="card">
+      ${tpls.map(t => `<div class="row rowlink" onclick="editTemplate(${t.id})">
+        <div style="flex:1;min-width:0"><div>${esc(t.name)} <span class="tag">${esc(t.kind)}</span>${t.active ? '' : ' <span class="tag">inactive</span>'}</div>
+          <div class="small sec-muted">Signed by ${JSON.parse(t.signer_roles_json).join(', ')}</div></div>
+      </div>`).join('') || '<div class="row muted">No templates yet. A template is the wording you send repeatedly — a service agreement, a rooftop lease — with placeholders that fill themselves in.</div>'}
+    </div>
+    <div id="tplEdit"></div>`;
+}
+
+async function editTemplate(id) {
+  const t = id ? (await api('/doc-templates')).find(x => x.id === id) : null;
+  const fields = window._docFields || await api('/doc-templates/fields');
+  const out = $('#tplEdit'); if (!out) return;
+
+  out.innerHTML = `<div class="card" style="padding:16px;margin-top:16px">
+    <h2 style="margin-bottom:12px">${t ? 'Edit' : 'New'} template</h2>
+    <div class="grid2">${field('Name', 'tplName', t ? t.name : '', { ph: 'Service Agreement' })}
+      ${field('Kind', 'tplKind', t ? t.kind : 'agreement', { type: 'select', options: [
+        { v: 'agreement', l: 'Agreement' }, { v: 'lease', l: 'Lease' }, { v: 'consent', l: 'Consent' },
+        { v: 'work_order', l: 'Work order' }, { v: 'other', l: 'Other' }] })}</div>
+    ${field('Who signs (comma separated: customer, lessor, witness, countersign)', 'tplRoles',
+      t ? JSON.parse(t.signer_roles_json).join(', ') : 'customer', { mono: true })}
+    <div class="help" style="margin-top:-6px">Order matters — they sign in the order listed. A countersignature should come last.</div>
+
+    <label class="fl" style="margin-top:10px">Wording</label>
+    <textarea id="tplBody" rows="14" spellcheck="true" style="width:100%;font-family:var(--mono);font-size:12.5px">${esc(t ? t.body : '')}</textarea>
+    <div class="help">Click a field below to insert it. Anything left unfilled when a document is created shows as a visible marker, not a blank.</div>
+    <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:8px">
+      ${fields.map(f => `<button class="btn sm" onclick="insertField('${esc(f.key)}')" title="${esc(f.label)}"><span class="mono">${esc(f.key)}</span></button>`).join('')}
+    </div>
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button class="btn primary" onclick="saveTemplate(${id || 'null'})"><i class="ti ti-check"></i> Save</button>
+      <button class="btn" onclick="document.getElementById('tplEdit').innerHTML=''">Cancel</button>
+      ${t ? `<div style="flex:1"></div><button class="btn" onclick="deleteTemplate(${t.id})"><i class="ti ti-trash"></i> Delete</button>` : ''}
+    </div>
+  </div>`;
+  const ta = $('#tplBody'); if (ta) ta.focus();
+}
+
+/** Insert at the caret, not at the end — people write a clause then add the field mid-sentence. */
+function insertField(key) {
+  const ta = document.getElementById('tplBody'); if (!ta) return;
+  const token = `{{${key}}}`;
+  const start = ta.selectionStart, end = ta.selectionEnd;
+  ta.value = ta.value.slice(0, start) + token + ta.value.slice(end);
+  ta.selectionStart = ta.selectionEnd = start + token.length;
+  ta.focus();
+}
+
+async function saveTemplate(id) {
+  const body = {
+    name: ($('[name=tplName]') || {}).value,
+    kind: ($('[name=tplKind]') || {}).value,
+    body: (document.getElementById('tplBody') || {}).value,
+    signer_roles: String(($('[name=tplRoles]') || {}).value || 'customer').split(',').map(s => s.trim()).filter(Boolean)
+  };
+  try {
+    if (id) await api('/doc-templates/' + id, { method: 'PUT', body });
+    else await api('/doc-templates', { body });
+    toast('Saved'); renderDocTemplates();
+  } catch (e) { toast(e.message); }
+}
+
+async function deleteTemplate(id) {
+  if (!confirm('Delete this template? Documents already created from it are unaffected — their wording is stored on the document itself.')) return;
+  try { await api('/doc-templates/' + id, { method: 'DELETE' }); toast('Deleted'); renderDocTemplates(); }
+  catch (e) { toast(e.message); }
+}
+
+// ---- creating a document ----
+
+async function newDocument(preset = {}) {
+  const [tpls, customers] = await Promise.all([api('/doc-templates'), api('/customers')]);
+  const active = tpls.filter(t => t.active);
+  if (!active.length && !preset.allowBlank) {
+    if (!confirm('There are no templates yet. Templates are the wording you send repeatedly. Create one now?')) return;
+    location.hash = '#/documents/templates'; return;
+  }
+  window._docCustomers = customers;
+
+  view().innerHTML = `<div class="head"><h1 style="flex:1">New document</h1>
+      <button class="btn" onclick="location.hash='#/documents'">Cancel</button></div>
+    <div class="card" style="padding:16px">
+      <div class="grid2">
+        ${field('Template', 'ndTemplate', preset.template_id || '', { type: 'select',
+          options: [{ v: '', l: '— write it directly —' }, ...active.map(t => ({ v: String(t.id), l: t.name }))] })}
+        ${field('Title', 'ndTitle', preset.title || '', { ph: 'defaults to the template name' })}
+      </div>
+      <div class="grid2">
+        ${field('Attach to', 'ndParentType', preset.parent_type || 'customer', { type: 'select', options: [
+          { v: 'customer', l: 'Customer' }, { v: 'site', l: 'Site' }, { v: 'pop', l: 'POP' }] })}
+        ${field('Which one (id)', 'ndParentId', preset.parent_id || '', { mono: true, ph: 'numeric id' })}
+      </div>
+      <div class="help" style="margin-top:-4px">A service agreement belongs to the customer; a rooftop lease belongs to the site or POP, because the lease outlives whoever is served from it.</div>
+
+      <div style="margin-top:14px"><label class="fl">Signers</label>
+        <div id="ndSigners"></div>
+        <button class="btn sm" onclick="addSignerRow()"><i class="ti ti-plus"></i> Add a signer</button>
+      </div>
+
+      <div style="display:flex;gap:8px;margin-top:16px">
+        <button class="btn" onclick="previewDocument()"><i class="ti ti-eye"></i> Preview wording</button>
+        <div style="flex:1"></div>
+        <button class="btn primary" onclick="createDocument()"><i class="ti ti-check"></i> Create as draft</button>
+      </div>
+      <div class="help">Creating it does not send anything. You review the draft, then send.</div>
+      <div id="ndPreview"></div>
+    </div>`;
+  addSignerRow();
+}
+
+function addSignerRow(v = {}) {
+  const wrap = document.getElementById('ndSigners'); if (!wrap) return;
+  const i = wrap.children.length;
+  const div = document.createElement('div');
+  div.className = 'box';
+  div.style.marginBottom = '8px';
+  div.innerHTML = `<div class="grid2">
+      ${field('Name', 'sgName' + i, v.name || '', { ph: 'Dana Okafor' })}
+      ${field('Role', 'sgRole' + i, v.role || 'customer', { type: 'select', options: [
+        { v: 'customer', l: 'Customer' }, { v: 'lessor', l: 'Lessor' },
+        { v: 'witness', l: 'Witness' }, { v: 'countersign', l: 'Countersigned by us' }] })}
+    </div>
+    <div class="grid2">
+      ${field('Email', 'sgEmail' + i, v.email || '', { mono: true })}
+      ${field('Send by', 'sgDelivery' + i, v.delivery || 'email', { type: 'select', options: [
+        { v: 'email', l: 'Email' }, { v: 'sms', l: 'SMS' }, { v: 'whatsapp', l: 'WhatsApp' },
+        { v: 'in_person', l: 'In person, on a tablet' }] })}
+    </div>
+    ${field('Phone (for SMS/WhatsApp)', 'sgPhone' + i, v.phone || '', { mono: true })}
+    <div style="display:flex;justify-content:flex-end"><button class="btn sm" onclick="this.closest('.box').remove()"><i class="ti ti-x"></i> Remove</button></div>`;
+  wrap.appendChild(div);
+}
+
+function collectSigners() {
+  const wrap = document.getElementById('ndSigners');
+  if (!wrap) return [];
+  return [...wrap.children].map((box, order) => {
+    const val = (prefix) => { const el = box.querySelector(`[name^=${prefix}]`); return el ? el.value.trim() : ''; };
+    return { name: val('sgName'), role: val('sgRole'), email: val('sgEmail'), phone: val('sgPhone'),
+             delivery: val('sgDelivery'), order_index: order };
+  }).filter(s => s.name);
+}
+
+async function previewDocument() {
+  const tplId = ($('[name=ndTemplate]') || {}).value;
+  const out = $('#ndPreview'); if (!out) return;
+  if (!tplId) { out.innerHTML = '<div class="help">Pick a template to preview it, or write the wording after creating the draft.</div>'; return; }
+  try {
+    const r = await api(`/doc-templates/${tplId}/preview`, {
+      body: { parent_type: ($('[name=ndParentType]') || {}).value, parent_id: Number(($('[name=ndParentId]') || {}).value) }
+    });
+    out.innerHTML = `<div style="margin-top:14px">
+      ${r.missing.length ? `<div class="banner-warn small" style="color:var(--warn);margin-bottom:8px">
+        <i class="ti ti-alert-triangle"></i> ${r.missing.length} field(s) have no value: <span class="mono">${r.missing.map(esc).join(', ')}</span>.
+        They will print as visible markers. Fill them in on the record first, or edit the draft afterwards.</div>` : ''}
+      <pre class="mono" style="white-space:pre-wrap;background:var(--surface2);padding:12px;border-radius:8px;font-size:12px;max-height:40vh;overflow:auto">${esc(r.text)}</pre>
+    </div>`;
+  } catch (e) { out.innerHTML = `<div class="small" style="color:var(--danger);margin-top:10px">${esc(e.message)}</div>`; }
+}
+
+async function createDocument() {
+  const signers = collectSigners();
+  if (!signers.length) return toast('Add at least one signer');
+  const body = {
+    template_id: ($('[name=ndTemplate]') || {}).value || null,
+    title: ($('[name=ndTitle]') || {}).value,
+    parent_type: ($('[name=ndParentType]') || {}).value,
+    parent_id: Number(($('[name=ndParentId]') || {}).value),
+    signers
+  };
+  try {
+    const r = await api('/documents', { body });
+    if (r.missing && r.missing.length) toast(`Created — but ${r.missing.length} merge field(s) are unfilled`);
+    else toast('Draft created');
+    location.hash = '#/documents/' + r.id;
+  } catch (e) { toast(e.message); }
+}
+
+// ---- one document ----
+
+async function renderDocument(id) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  let d;
+  try { d = await api('/documents/' + id); }
+  catch (e) { view().innerHTML = `<div class="card" style="padding:20px">Couldn't load: ${esc(e.message)}</div>`; return; }
+
+  const isDraft = d.status === 'draft';
+  const canVoid = !['signed', 'voided'].includes(d.status);
+
+  view().innerHTML = `<div class="head">
+      <button class="btn sm" onclick="location.hash='#/documents'"><i class="ti ti-arrow-left"></i> Back</button>
+      <h1 style="flex:1;min-width:0">${esc(d.title)}</h1>${docBadge(d.status)}</div>
+    <div class="small sec-muted" style="margin-bottom:14px">
+      ${esc(d.parent_type)} · ${esc(d.parent_label)} · created ${esc((d.created_at || '').slice(0, 16))}${d.created_by ? ' by ' + esc(d.created_by) : ''}</div>
+
+    <div class="card" style="padding:16px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        ${isDraft ? `<button class="btn primary" onclick="sendDocument(${d.id})"><i class="ti ti-send"></i> Send for signature</button>` : ''}
+        ${d.stored_name ? `<a class="btn" href="/api/documents/${d.id}/pdf" target="_blank" rel="noopener"><i class="ti ti-file-text"></i> As sent (PDF)</a>` : ''}
+        ${d.signed_stored_name ? `<a class="btn primary" href="/api/documents/${d.id}/pdf?signed=1" target="_blank" rel="noopener"><i class="ti ti-file-certificate"></i> Signed copy + certificate</a>` : ''}
+        <button class="btn" onclick="verifyDocument(${d.id})"><i class="ti ti-shield-check"></i> Verify integrity</button>
+        ${canVoid ? `<div style="flex:1"></div><button class="btn" onclick="voidDocument(${d.id})"><i class="ti ti-ban"></i> Void</button>` : ''}
+      </div>
+      <div id="docVerify"></div>
+
+      ${isDraft ? `<div class="help"><i class="ti ti-info-circle"></i> Nothing has been sent yet. Once you send, the wording is frozen and hashed —
+        it cannot be edited afterwards, because a signature has to mean the exact text the signer saw. To change it after sending, void it and issue a new one.</div>` : ''}
+
+      <label class="fl" style="margin-top:12px">Wording</label>
+      ${isDraft
+        ? `<textarea id="docBody" rows="14" style="width:100%;font-family:var(--mono);font-size:12.5px">${esc(d.body || '')}</textarea>
+           <div style="display:flex;gap:8px;margin-top:8px"><button class="btn" onclick="saveDocumentBody(${d.id})"><i class="ti ti-check"></i> Save wording</button></div>`
+        : `<pre class="mono" style="white-space:pre-wrap;background:var(--surface2);padding:12px;border-radius:8px;font-size:12px;max-height:45vh;overflow:auto">${esc(d.body || '')}</pre>`}
+      ${d.content_sha256 ? `<div class="small sec-muted" style="margin-top:8px">Frozen at send · SHA-256 <span class="mono" style="word-break:break-all">${esc(d.content_sha256)}</span></div>` : ''}
+    </div>
+
+    <div class="card">
+      <div class="hd"><h2><i class="ti ti-users"></i> Signers</h2></div>
+      ${d.signers.map(s => `<div class="row">
+        <div style="flex:1;min-width:0">
+          <div>${esc(s.name)} <span class="tag">${esc(s.role)}</span> ${docBadge(s.status === 'pending' ? 'sent' : s.status)}</div>
+          <div class="small sec-muted">${esc(s.email || s.phone || 'in person')} · by ${esc(s.delivery)}
+            ${s.signed_at ? ` · signed ${esc(s.signed_at)} (${esc(s.signature_kind || '')})` : ''}
+            ${s.declined_reason ? ` · declined: ${esc(s.declined_reason)}` : ''}</div>
+          ${s.signed_ip ? `<div class="small sec-muted">from ${esc(s.signed_ip)}${s.consent_at ? ` · consented ${esc(s.consent_at)}` : ''}</div>` : ''}
+        </div>
+        ${!isDraft && s.status !== 'signed' && d.status !== 'voided'
+          ? `<button class="btn sm" onclick="resendSigner(${d.id}, ${s.id})"><i class="ti ti-refresh"></i> Resend link</button>` : ''}
+      </div>`).join('')}
+      <div id="docLinks"></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <div class="hd"><h2><i class="ti ti-history"></i> Audit trail</h2>
+        <span class="small ${d.chain.ok ? '' : 'sec-muted'}" style="color:${d.chain.ok ? 'var(--success)' : 'var(--danger)'}">
+          ${d.chain.ok ? '✓ chain intact' : '✗ ' + esc(d.chain.reason || 'chain broken')}</span></div>
+      ${d.events.map(e => `<div class="row">
+        <div class="small mono sec-muted" style="flex:none;width:130px">${esc(e.at)}</div>
+        <div style="flex:1;min-width:0"><div class="small"><b>${esc(e.kind)}</b> ${esc(e.detail || '')}</div>
+          <div class="small sec-muted">${esc(e.actor || '')}${e.ip ? ' · ' + esc(e.ip) : ''}</div></div>
+      </div>`).join('')}
+      <div class="help">Each entry carries a hash of the one before it, so an edit or a deletion anywhere in this list is detectable. Press Verify integrity to recompute the chain and re-hash the stored PDFs.</div>
+    </div>`;
+}
+
+async function saveDocumentBody(id) {
+  try {
+    await api('/documents/' + id, { method: 'PUT', body: { body: (document.getElementById('docBody') || {}).value } });
+    toast('Saved');
+  } catch (e) { toast(e.message); }
+}
+
+/**
+ * Send, then show every link.
+ *
+ * The links are displayed even when delivery succeeded, on purpose: an in-person signer has no
+ * delivery at all, and when SMTP or Gmail fails the alternative to showing the link is a document
+ * nobody can sign and no way to find out why.
+ */
+async function sendDocument(id) {
+  if (!confirm('Send this for signature?\n\nThe wording is frozen and hashed at this point and cannot be edited afterwards.')) return;
+  try {
+    const r = await api(`/documents/${id}/send`, { body: {} });
+    toast('Sent');
+    const out = $('#docLinks');
+    if (out) out.innerHTML = `<div style="padding:10px 14px">
+      ${r.public_base_set ? '' : `<div class="small" style="color:var(--warn);margin-bottom:8px">
+        <i class="ti ti-alert-triangle"></i> No public URL is set (Settings → Provisioning), so these links are relative and will not work in an email. Set it, then resend.</div>`}
+      ${r.deliveries.map(d => `<div class="small" style="margin:6px 0">
+        <b>${esc(d.name)}</b> (${esc(d.role)}) — ${d.sent ? `sent by ${esc(d.via || d.delivery)}${d.from ? ` as ${esc(d.from)}` : ''}` : `<span style="color:var(--danger)">not sent: ${esc(d.error || 'unknown')}</span>`}
+        <div class="mono" style="font-size:11px;word-break:break-all;opacity:.8">${esc(d.url)}</div></div>`).join('')}
+      <div class="help">Copy a link if you need to hand it over another way. Each is single-use and expires.</div>
+    </div>`;
+    renderDocument(id);
+  } catch (e) { toast(e.message); }
+}
+
+async function resendSigner(docId, signerId) {
+  try {
+    const r = await api(`/documents/${docId}/signers/${signerId}/resend`, { body: {} });
+    toast(r.sent ? `Resent by ${r.via || r.delivery}` : `Not sent: ${r.error || 'unknown'}`);
+    const out = $('#docLinks');
+    if (out) out.innerHTML = `<div style="padding:10px 14px"><div class="small"><b>${esc(r.name)}</b> — new link (the previous one no longer works)</div>
+      <div class="mono" style="font-size:11px;word-break:break-all">${esc(r.url)}</div></div>`;
+  } catch (e) { toast(e.message); }
+}
+
+async function voidDocument(id) {
+  const reason = prompt('Why is this being voided? Recorded in the audit trail.');
+  if (reason === null) return;
+  try { await api(`/documents/${id}/void`, { body: { reason } }); toast('Voided'); renderDocument(id); }
+  catch (e) { toast(e.message); }
+}
+
+async function verifyDocument(id) {
+  const out = $('#docVerify'); if (!out) return;
+  out.innerHTML = '<div class="small sec-muted">Recomputing…</div>';
+  try {
+    const r = await api(`/documents/${id}/verify`);
+    const fileLine = (k, f) => f
+      ? `<div class="small">${k} PDF: ${f.present
+          ? (f.matches ? '<span style="color:var(--success)">✓ matches its recorded hash</span>'
+                       : '<span style="color:var(--danger)">✗ the file on disk has CHANGED since it was recorded</span>')
+          : '<span style="color:var(--danger)">✗ missing from storage</span>'}</div>`
+      : '';
+    out.innerHTML = `<div class="box" style="margin-bottom:10px">
+      <div class="small">Audit chain across ${r.events} event(s):
+        ${r.chain.ok ? '<span style="color:var(--success)">✓ intact</span>'
+                     : `<span style="color:var(--danger)">✗ ${esc(r.chain.reason)}</span>`}</div>
+      ${fileLine('As-sent', r.files.sent)}${fileLine('Signed', r.files.signed)}
+    </div>`;
+  } catch (e) { out.innerHTML = `<div class="small" style="color:var(--danger)">${esc(e.message)}</div>`; }
+}
 
 // ---------- Support / trouble tickets ----------
 // ---------- Import from Invoice Ninja (JSON export) ----------

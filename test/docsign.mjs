@@ -341,5 +341,47 @@ let token = null;
     'deleting the template leaves the signed document intact and readable — what was signed stays signed');
 }
 
+// ---- the interface actually reaches all of it ----------------------------------------------------
+//
+// An API nobody can get to is not a feature. Everything above passed for a whole session while there
+// was no way to create a document from inside the application — which is worth catching with a
+// check rather than by someone asking "where is it?".
+{
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+
+  ok(/data-nav="documents"/.test(html), 'there is a Documents entry in the navigation');
+  ok(/p\[0\] === 'documents'/.test(app), 'and a route for it');
+  ok(/p\[0\] === 'documents' && p\[1\] === 'templates'/.test(app), 'plus one for templates');
+
+  for (const fn of ['renderDocuments', 'renderDocument', 'renderDocTemplates', 'newDocument',
+                    'createDocument', 'sendDocument', 'voidDocument', 'verifyDocument',
+                    'resendSigner', 'saveTemplate', 'loadDocumentsFor']) {
+    ok(new RegExp(`function ${fn}\\b`).test(app), `${fn}() exists`);
+  }
+
+  // Every endpoint the domain exposes should be reachable from the UI, or it is dead code.
+  for (const [path, why] of [
+    ['/documents', 'listing and creating'],
+    ['/doc-templates', 'templates'],
+    ['/preview', 'previewing a template against a real record before sending'],
+    ['/send', 'sending for signature'],
+    ['/void', 'voiding'],
+    ['/verify', 'verifying the audit chain'],
+    ['/resend', 'resending a signing link'],
+    ['/pdf?signed=1', 'downloading the signed copy']
+  ]) {
+    ok(app.includes(path), `the UI calls ${path} — ${why}`);
+  }
+
+  // Documents have to appear on the record they belong to, which is where someone looks when a
+  // customer disputes a term.
+  ok(/docsFor-customer-/.test(app) && /docsFor-site-/.test(app),
+    'signed documents surface on the customer AND the site — a rooftop lease belongs to the structure, not the subscriber');
+
+  // The freeze-on-send rule has to be visible before it bites, not discovered afterwards.
+  ok(/frozen and hashed/i.test(app), 'the interface warns that sending freezes the wording before you press it');
+}
+
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail) process.exitCode = 1;

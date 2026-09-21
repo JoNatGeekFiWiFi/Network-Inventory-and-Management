@@ -10,7 +10,7 @@
 // out under the wrong identity, the customer replies to somewhere unexpected, and no error is
 // raised anywhere. So send-as is verified against Gmail's own list at setup rather than trusted.
 import { parseServiceAccount, createTokenSource, ALL_SCOPES } from '../lib/googleauth.js';
-import { createGmailClient, addresses } from '../lib/gmail.js';
+import { createGmailClient, addresses, buildRawMessage } from '../lib/gmail.js';
 
 const PURPOSES = ['customer', 'vendor', 'billing', 'other'];
 
@@ -44,6 +44,63 @@ export default function registerMail(app, ctx) {
     return createGmailClient({ tokenSource: src, mailbox: mailbox.impersonate_as, scopes: ALL_SCOPES });
   }
   ctx.gmailClientFor = clientFor;
+
+  /**
+   * The mailbox to send a given kind of mail from.
+   *
+   * Prefers one that has actually passed a connection test. An unverified mailbox may work, but it
+   * may also be the one whose From address Gmail will silently rewrite — and finding that out by
+   * sending a customer a contract from the wrong address is the expensive way.
+   */
+  function pickMailbox(purpose = 'customer') {
+    const rows = db.prepare('SELECT * FROM mailboxes WHERE enabled=1 ORDER BY (verified_at IS NULL), id').all();
+    return rows.find(m => m.purpose === purpose) || rows.find(m => m.purpose === 'customer') || rows[0] || null;
+  }
+  ctx.pickMailbox = pickMailbox;
+
+  /**
+   * Send through Gmail, falling back to SMTP.
+   *
+   * Returns a result rather than throwing, and always says which transport carried it. A signing
+   * link that silently did not arrive is the worst outcome here: the customer waits, we think it is
+   * sent, and nobody finds out until someone chases. The caller records this in the audit trail.
+   */
+  ctx.sendMailBest = async function sendMailBest({ to, subject, text, html, purpose = 'customer', replyTo }) {
+    const mb = pickMailbox(purpose);
+    let gmailError = null;
+
+    if (mb) {
+      try {
+        const client = clientFor(mb);
+        const from = mb.send_as || mb.impersonate_as;
+        const raw = buildRawMessage({
+          from, fromName: getSetting('company_name') || null,
+          to: Array.isArray(to) ? to : [to],
+          subject, text, html,
+          headers: replyTo ? { 'Reply-To': replyTo } : {}
+        });
+        const sent = await client.send({ raw });
+        return { ok: true, via: 'gmail', from, id: sent && sent.id, mailbox: mb.label };
+      } catch (e) {
+        // Fall through to SMTP rather than failing outright — but keep the reason, because "it went
+        // by SMTP" is only reassuring if you can see why the better path did not work.
+        gmailError = e.message;
+      }
+    }
+
+    try {
+      const id = await ctx.sendMail({ to, subject, text, html, replyTo });
+      if (id) return { ok: true, via: 'smtp', id, gmail_error: gmailError };
+      return {
+        ok: false, via: null,
+        error: mb
+          ? `Gmail failed (${gmailError}) and SMTP is not configured as a fallback.`
+          : 'No Google Workspace mailbox is connected, and SMTP is not configured (Settings → Email).'
+      };
+    } catch (e) {
+      return { ok: false, via: null, error: `Gmail: ${gmailError || 'no mailbox connected'}. SMTP: ${e.message}` };
+    }
+  };
 
   // ---- the credential ------------------------------------------------------------------------------
 
