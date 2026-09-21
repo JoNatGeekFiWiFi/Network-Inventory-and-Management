@@ -20,8 +20,16 @@ export default function registerSupport(app, ctx) {
 
   // ---------- Omnichannel messaging (email / SMS / WhatsApp via Twilio or Telnyx) ----------
   // email Reply-To woven with a per-ticket token: support+<token>@domain  (so inbound replies thread back)
-  function emailReplyTo(token) {
-    const from = (getSetting('mail_from') || '').trim(); const m = from.match(/<([^>]+)>/); const addr = m ? m[1] : from;
+  function emailReplyTo(token, fromAddr) {
+    let addr = String(fromAddr || '').trim();
+    if (!addr.includes('@')) addr = (getSetting('mail_from') || '').trim();
+    const m = addr.match(/<([^>]+)>/);
+    if (m) addr = m[1];
+    // Workspace mail does not need an SMTP From address. Replies still have to land on a real mailbox.
+    if (!addr.includes('@') && ctx.pickMailbox) {
+      const mb = ctx.pickMailbox('customer');
+      addr = (mb && (mb.send_as || mb.impersonate_as)) || '';
+    }
     const at = addr.indexOf('@'); if (at < 0 || !token) return addr || '';
     return addr.slice(0, at) + '+' + token + addr.slice(at);
   }
@@ -137,9 +145,24 @@ export default function registerSupport(app, ctx) {
     const cust = db.prepare('SELECT billing_email, sms_number, whatsapp_number FROM customers WHERE id=?').get(t.customer_id) || {};
     if (channel === 'email') {
       const to = t.contact_email || cust.billing_email; if (!to) return { ok: false, error: 'No email on file', to: null };
-      const pub = pubBase(); const rt = emailReplyTo(t.reply_token);
-      const mid = await sendMail({ to, subject: `[${t.number}] ${t.subject}`, text: `${body}\n\nView your ticket: ${pub}/portal`, html: `<p>${nl2br(body)}</p><p style="color:#888;font-size:12px">Reply to this email to continue the conversation, or view it in the <a href="${pub}/portal">customer portal</a>.</p>`, replyTo: rt || undefined }).catch(e => ({ err: e.message }));
-      return mid && !mid.err ? { ok: true, external_id: typeof mid === 'string' ? mid : null, to } : { ok: false, error: (mid && mid.err) || 'send failed', to };
+      const pub = pubBase();
+      const chosen = String(t.from || '').trim().toLowerCase() || null;
+      const rt = emailReplyTo(t.reply_token, chosen);
+      const subject = `[${t.number}] ${t.subject}`;
+      const text = `${body}\n\nView your ticket: ${pub}/portal`;
+      const html = `<p>${nl2br(body)}</p><p style="color:#888;font-size:12px">Reply to this email to continue the conversation, or view it in the <a href="${pub}/portal">customer portal</a>.</p>`;
+      const replyTo = rt || undefined;
+      // Signing mail already prefers the connected Workspace mailbox. Customer messages were still
+      // SMTP-only, so with no SMTP host configured the send returned false and the page said
+      // "send failed" even though Gmail was ready.
+      if (ctx.sendMailBest) {
+        const sent = await ctx.sendMailBest({ to, subject, text, html, purpose: 'customer', replyTo, from: chosen || undefined });
+        return sent.ok
+          ? { ok: true, external_id: sent.id || null, to, from: sent.from || chosen }
+          : { ok: false, error: sent.error || 'send failed', to, from: chosen };
+      }
+      const mid = await sendMail({ to, subject, text, html, replyTo }).catch(e => ({ err: e.message }));
+      return mid && !mid.err ? { ok: true, external_id: typeof mid === 'string' ? mid : null, to } : { ok: false, error: (mid && mid.err) || 'Email is not configured. Connect a Workspace mailbox or set SMTP under Settings.', to };
     }
     if (channel === 'sms' || channel === 'whatsapp' || channel === 'imessage' || channel === 'facetime') {
       const to = normPhone(t.contact_phone || (channel === 'whatsapp' ? cust.whatsapp_number : cust.sms_number) || cust.sms_number || cust.whatsapp_number);
@@ -308,16 +331,18 @@ export default function registerSupport(app, ctx) {
     let channel = String((req.body || {}).channel || '').trim();
     if (!TICKET_CHANNELS.includes(channel)) channel = t.last_channel || t.channel || 'portal';
     let deliv = { ok: true, to: null };
+    const from = String((req.body || {}).from || '').trim().toLowerCase();
+    if (from) t.from = from;
     if (['email', 'sms', 'whatsapp', 'imessage', 'facetime'].includes(channel)) { try { deliv = await deliverOnChannel(t, channel, body); } catch (e) { deliv = { ok: false, error: e.message, to: null }; } }
     appendMessage(t.id, { author_type: 'staff', author: (req.user && req.user.email) || '', body, channel, direction: 'out',
-      external_id: deliv.external_id, to_addr: deliv.to,
+      external_id: deliv.external_id, to_addr: deliv.to, from_addr: deliv.from,
       delivery_status: deliv.ok ? (channel === 'portal' ? null : 'sent') : 'failed',
       // Often null at send time: Twilio resolves RCS-or-SMS after accepting. Recorded when known,
       // left blank when not, rather than claiming RCS because we asked for it.
       delivery_transport: deliv.transport || null });
     db.prepare("UPDATE tickets SET updated_at=datetime('now'), status=CASE WHEN status IN ('resolved','closed') THEN status ELSE 'waiting' END WHERE id=?").run(t.id);
     audit(req, 'reply', 'ticket#' + t.id, t.number + ' via ' + channel);
-    res.json({ ok: true, channel, delivered: deliv.ok, error: deliv.ok ? undefined : deliv.error });
+    res.json({ ok: true, channel, from: deliv.from || null, delivered: deliv.ok, error: deliv.ok ? undefined : deliv.error });
   });
   app.put('/api/tickets/:id', requireNoc, (req, res) => {
     const b = req.body || {}; const t = db.prepare('SELECT * FROM tickets WHERE id=?').get(req.params.id); if (!t) return res.status(404).json({ error: 'not found' });
@@ -390,7 +415,7 @@ export default function registerSupport(app, ctx) {
   app.get('/api/customers/:id/messages', requireNoc, (req, res) => {
     const c = db.prepare('SELECT id, name, billing_email, sms_number, whatsapp_number, preferred_channel FROM customers WHERE id=?').get(req.params.id);
     if (!c) return res.status(404).json({ error: 'not found' });
-    res.json({ customer: c, messages: customerTimeline(c.id) });
+    res.json({ customer: c, messages: customerTimeline(c.id), senders: ctx.listSenders ? ctx.listSenders() : [] });
   });
   app.post('/api/customers/:id/messages', requireNoc, async (req, res) => {
     const c = db.prepare('SELECT * FROM customers WHERE id=?').get(req.params.id);
@@ -402,18 +427,19 @@ export default function registerSupport(app, ctx) {
     const subject = String((req.body || {}).subject || '').trim().slice(0, 200) || null;
     const token = customerReplyToken(c);
     const phone = channel === 'whatsapp' ? (c.whatsapp_number || c.sms_number) : (c.sms_number || c.whatsapp_number);
-    const stub = { customer_id: c.id, contact_email: c.billing_email, contact_phone: phone, reply_token: token, number: c.name, subject: subject || c.name };
+    const from = String((req.body || {}).from || '').trim().toLowerCase();
+    const stub = { customer_id: c.id, contact_email: c.billing_email, contact_phone: phone, reply_token: token, number: c.name, subject: subject || c.name, from: from || null };
     let deliv = { ok: false, error: 'Nothing sent' };
     try {
       deliv = await deliverOnChannel(stub, channel, body);
     } catch (e) { deliv = { ok: false, error: e.message, to: null }; }
     recordCustomerMessage(c.id, {
       channel, direction: 'out', author: (req.user && req.user.email) || '', body, subject,
-      external_id: deliv.external_id, to_addr: deliv.to, delivery_status: deliv.ok ? 'sent' : 'failed'
+      external_id: deliv.external_id, to_addr: deliv.to, from_addr: deliv.from, delivery_status: deliv.ok ? 'sent' : 'failed'
     });
     db.prepare('UPDATE customers SET preferred_channel=? WHERE id=?').run(channel, c.id);
     audit(req, 'message', 'customer#' + c.id, channel + (deliv.ok ? '' : ' failed'));
-    res.json({ ok: true, channel, transport: deliv.transport || null, delivered: !!deliv.ok, error: deliv.ok ? undefined : deliv.error });
+    res.json({ ok: true, channel, from: deliv.from || null, transport: deliv.transport || null, delivered: !!deliv.ok, error: deliv.ok ? undefined : deliv.error });
   });
 
   // ---------- Inbound ingestion: email / SMS / WhatsApp all thread into a ticket ----------

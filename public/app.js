@@ -926,6 +926,17 @@ function commDest(c, ch) {
   if (ch === 'whatsapp') return c.whatsapp_number || c.sms_number || 'no WhatsApp number';
   return c.sms_number || c.whatsapp_number || 'no phone number';
 }
+function fromSelect(id, senders) {
+  if (!senders || !senders.length) return '';
+  const remembered = window._commFrom;
+  const dflt = senders.find(s => s.address === remembered)
+    || senders.find(s => s.preferred && s.purpose === 'customer')
+    || senders.find(s => s.preferred)
+    || senders[0];
+  return `<label class="fl" style="margin:0">From</label><select id="${id}" style="width:auto;max-width:320px" onchange="window._commFrom=this.value">${
+    senders.map(s => `<option value="${esc(s.address)}" ${s.address === dflt.address ? 'selected' : ''}>${esc(s.address)}${s.label ? ' · ' + esc(s.label) : ''}</option>`).join('')
+  }</select>`;
+}
 async function renderCustComms(id) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
   const data = await api('/customers/' + id + '/messages');
@@ -934,7 +945,7 @@ async function renderCustComms(id) {
   const msgs = (data.messages || []).map(m => {
     const failed = m.delivery_status === 'failed';
     return `<div class="card" style="margin-bottom:10px;padding:12px 14px;${m.direction === 'out' ? 'border-left:3px solid var(--accent)' : ''}">
-      <div class="small sec-muted" style="margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><b>${m.direction === 'out' ? 'Staff' : 'Customer'}</b>${m.author ? '· ' + esc(m.author) : ''} · ${esc(m.created_at)} ${chanBadge(m.channel)}${m.ticket_id ? `<a class="small" href="#/tickets/${m.ticket_id}">${esc(m.ticket_number || 'ticket')}</a>` : ''}${failed ? '<span class="pill s-down" style="padding:1px 8px;font-size:11px">not delivered</span>' : ''}</div>
+      <div class="small sec-muted" style="margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><b>${m.direction === 'out' ? 'Staff' : 'Customer'}</b>${m.author ? '· ' + esc(m.author) : ''} · ${esc(m.created_at)} ${chanBadge(m.channel)}${m.from_addr ? ' · from ' + esc(m.from_addr) : ''}${m.ticket_id ? `<a class="small" href="#/tickets/${m.ticket_id}">${esc(m.ticket_number || 'ticket')}</a>` : ''}${failed ? '<span class="pill s-down" style="padding:1px 8px;font-size:11px">not delivered</span>' : ''}</div>
       ${m.subject ? `<div class="small" style="margin-bottom:4px">${esc(m.subject)}</div>` : ''}
       <div style="white-space:pre-wrap">${esc(m.body)}</div></div>`;
   }).join('');
@@ -946,6 +957,7 @@ async function renderCustComms(id) {
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
         <label class="fl" style="margin:0">Send via</label>
         <select id="commchan" style="width:auto" onchange="commChanHint(${c.id})">${COMM_CHANS.map(x => `<option value="${x.v}" ${x.v === dflt ? 'selected' : ''}>${x.l}</option>`).join('')}</select>
+        <span id="commfromwrap" style="display:flex;gap:8px;align-items:center">${fromSelect('commfrom', data.senders || [])}</span>
         <span class="small sec-muted" id="commhint"></span>
       </div>
       <input id="commsubj" placeholder="Email subject (optional)" style="margin-bottom:8px"/>
@@ -960,6 +972,8 @@ function commChanHint() {
   const ch = $('#commchan').value;
   const subj = $('#commsubj');
   if (subj) subj.style.display = ch === 'email' ? '' : 'none';
+  const fromWrap = $('#commfromwrap');
+  if (fromWrap) fromWrap.style.display = ch === 'email' ? 'flex' : 'none';
   const el = $('#commhint');
   if (el) el.textContent = 'To ' + commDest(c, ch);
 }
@@ -968,10 +982,12 @@ async function sendCustComm(id) {
   if (!body) { toast('Enter a message'); return; }
   const channel = $('#commchan').value;
   const subject = channel === 'email' && $('#commsubj') ? $('#commsubj').value.trim() : '';
+  const from = channel === 'email' && $('#commfrom') ? $('#commfrom').value : '';
+  if (from) window._commFrom = from;
   try {
-    const r = await api('/customers/' + id + '/messages', { method: 'POST', body: JSON.stringify({ body, channel, subject }) });
+    const r = await api('/customers/' + id + '/messages', { method: 'POST', body: JSON.stringify({ body, channel, subject, from }) });
     const via = r.transport === 'rcs' ? 'RCS' : ((COMM_CHANS.find(x => x.v === r.channel) || {}).l || r.channel);
-    toast(r.delivered === false ? ('Saved, but delivery failed: ' + (r.error || '')) : ('Sent via ' + via));
+    toast(r.delivered === false ? ('Saved, but delivery failed: ' + (r.error || '')) : ('Sent via ' + via + (r.from ? ' as ' + r.from : '')));
     renderCustComms(id);
   } catch (e) { toast(e.message); }
 }
@@ -2578,9 +2594,15 @@ async function loadWorkspace() {
           <div>${esc(m.label)} <span class="tag">${esc(m.purpose)}</span>${m.enabled ? '' : ' <span class="tag">disabled</span>'}</div>
           <div class="small sec-muted">Signs in as <span class="mono">${esc(m.impersonate_as)}</span></div>
           <div class="small sec-muted">Sends as <span class="mono">${esc(m.send_as || m.impersonate_as)}</span>${m.send_as ? '' : ' (same)'}</div>
+          <div class="small" style="margin-top:4px">${Array.isArray(m.verified_send_as)
+            ? (m.verified_send_as.length
+              ? 'Aliases Gmail allows: ' + m.verified_send_as.map(a => `<span class="mono">${esc(a)}</span>`).join(', ')
+              : '<span class="sec-muted">Gmail returned no send-as addresses</span>')
+            : '<span class="sec-muted">Aliases not checked yet</span>'}</div>
           <div class="small ${m.verified_at ? '' : 'sec-muted'}">${m.verified_at ? '✓ verified ' + esc(m.verified_at) : 'not yet tested'}</div>
         </div>
-        <div style="display:flex;gap:6px;flex:none">
+        <div style="display:flex;gap:6px;flex:none;flex-wrap:wrap;justify-content:flex-end">
+          <button class="btn sm" onclick="recheckAliases(${m.id})" title="Ask Gmail again which addresses this mailbox may send as"><i class="ti ti-refresh"></i> Re-check aliases</button>
           <button class="btn sm" onclick="testMailbox(${m.id})"><i class="ti ti-plug"></i> Test connection</button>
           ${admin ? `<button class="btn sm" onclick="removeMailbox(${m.id})"><i class="ti ti-trash"></i> Remove</button>` : ''}
         </div>
@@ -2630,6 +2652,20 @@ async function removeMailbox(id) {
   if (!confirm('Remove this mailbox? Mail already filed against records is kept.')) return;
   try { await api('/mail/mailboxes/' + id, { method: 'DELETE' }); toast('Removed'); loadWorkspace(); }
   catch (e) { toast(e.message); }
+}
+
+async function recheckAliases(id) {
+  const out = document.getElementById('mbtest-' + id);
+  if (out) out.innerHTML = '<div class="small sec-muted" style="padding:6px 14px">Asking Gmail for send-as addresses…</div>';
+  try {
+    const r = await api('/mail/mailboxes/' + id + '/aliases', { body: {} });
+    const n = (r.aliases || []).length;
+    toast(n ? `Found ${n} send-as address${n === 1 ? '' : 'es'}` : 'Gmail returned no send-as addresses');
+    loadWorkspace();
+  } catch (e) {
+    if (out) out.innerHTML = `<div class="small" style="padding:6px 14px;color:var(--danger)">${esc(e.message)}</div>`;
+    else toast(e.message);
+  }
 }
 
 /**
@@ -4793,7 +4829,7 @@ async function loadTk() {
 }
 async function renderTicket(id) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
-  const [t, staff] = await Promise.all([api('/tickets/' + id), api('/staff').catch(() => [])]);
+  const [t, staff, senders] = await Promise.all([api('/tickets/' + id), api('/staff').catch(() => []), api('/mail/senders').catch(() => [])]);
   const msgs = t.messages.map(m => `<div class="card" style="margin-bottom:10px;padding:12px 14px;${m.author_type === 'staff' ? 'border-left:3px solid var(--accent)' : ''}">
     <div class="small sec-muted" style="margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><b>${m.author_type === 'staff' ? 'Staff' : 'Customer'}</b>${m.author ? '· ' + esc(m.author) : ''} · ${esc(m.created_at)} ${chanBadge(m.channel)}<span class="small sec-muted">${m.direction === 'in' ? '↓ in' : '↑ out'}</span>${m.delivery_status === 'failed' ? '<span class="pill s-down" style="padding:1px 8px;font-size:11px">delivery failed</span>' : ''}</div>
     <div style="white-space:pre-wrap">${esc(m.body)}</div></div>`).join('') || '<div class="card muted" style="padding:12px 14px">No messages</div>';
@@ -4812,15 +4848,23 @@ async function renderTicket(id) {
     ${msgs}
     <div class="box"><textarea id="tkreply" rows="3" placeholder="Reply to the customer…"></textarea>
       <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap"><label class="fl" style="margin:0">Send via</label>
-        <select id="tkchan" style="width:auto">${chOpts}</select>
+        <select id="tkchan" style="width:auto" onchange="tkChanHint()">${chOpts}</select>
+        <span id="tkfromwrap" style="display:none;gap:8px;align-items:center">${fromSelect('tkfrom', senders || [])}</span>
         <span class="small sec-muted" style="flex:1">Portal stays in the customer portal. Email/SMS/WhatsApp use the cloud providers. iMessage and FaceTime run on the Mac signed into 602-456-5656.</span>
         <button class="btn primary" onclick="replyTicket(${t.id})"><i class="ti ti-send"></i> Send reply</button></div></div>`;
+  tkChanHint();
+}
+function tkChanHint() {
+  const wrap = $('#tkfromwrap');
+  if (wrap) wrap.style.display = $('#tkchan') && $('#tkchan').value === 'email' ? 'inline-flex' : 'none';
 }
 async function saveTicketCtl(id) { const d = collect('#tkctl'); try { await api('/tickets/' + id, { method: 'PUT', body: JSON.stringify(d) }); toast('Updated'); renderTicket(id); } catch (e) { toast(e.message); } }
 async function replyTicket(id) {
   const body = $('#tkreply').value.trim(); if (!body) { toast('Enter a reply'); return; }
   const channel = $('#tkchan') ? $('#tkchan').value : undefined;
-  try { const r = await api('/tickets/' + id + '/reply', { method: 'POST', body: JSON.stringify({ body, channel }) }); toast(r.delivered === false ? ('Saved, but ' + channel + ' delivery failed: ' + (r.error || '')) : 'Reply sent'); renderTicket(id); }
+  const from = channel === 'email' && $('#tkfrom') ? $('#tkfrom').value : '';
+  if (from) window._commFrom = from;
+  try { const r = await api('/tickets/' + id + '/reply', { method: 'POST', body: JSON.stringify({ body, channel, from }) }); toast(r.delivered === false ? ('Saved, but ' + channel + ' delivery failed: ' + (r.error || '')) : ('Reply sent' + (r.from ? ' as ' + r.from : ''))); renderTicket(id); }
   catch (e) { toast(e.message); }
 }
 async function formTicket() {

@@ -46,6 +46,22 @@ export default function registerMail(app, ctx) {
   ctx.gmailClientFor = clientFor;
 
   /**
+   * Ask Gmail which From addresses this mailbox may use, and store them.
+   *
+   * Saved even when the rest of a connection test fails. The alias list is a fact about the
+   * account; throwing it away because the configured From is wrong is how someone ends up deleting
+   * the mailbox just to see a new address.
+   */
+  async function refreshAliases(m) {
+    const list = await clientFor(m).sendAs();
+    const rows = list.sendAs || [];
+    const permitted = rows.map(s => String(s.sendAsEmail || '').toLowerCase()).filter(Boolean);
+    const primary = (rows.find(s => s.isPrimary) || {}).sendAsEmail || null;
+    db.prepare('UPDATE mailboxes SET verified_send_as=? WHERE id=?').run(JSON.stringify(permitted), m.id);
+    return { permitted, primary };
+  }
+
+  /**
    * The mailbox to send a given kind of mail from.
    *
    * Prefers one that has actually passed a connection test. An unverified mailbox may work, but it
@@ -58,6 +74,31 @@ export default function registerMail(app, ctx) {
   }
   ctx.pickMailbox = pickMailbox;
 
+  /** Addresses this mailbox may put in the From header. Verified ones first, then the configured pair. */
+  function allowedFrom(m) {
+    let verified = [];
+    try { verified = m.verified_send_as ? JSON.parse(m.verified_send_as) : []; } catch { verified = []; }
+    const extra = [m.send_as, m.impersonate_as].filter(Boolean);
+    return [...new Set([...verified, ...extra].map(s => String(s).trim().toLowerCase()).filter(Boolean))];
+  }
+  function mailboxForFrom(from) {
+    const want = String(from || '').trim().toLowerCase();
+    if (!want) return null;
+    return db.prepare('SELECT * FROM mailboxes WHERE enabled=1 ORDER BY id').all()
+      .find(m => allowedFrom(m).includes(want)) || null;
+  }
+  ctx.listSenders = function listSenders() {
+    const out = [];
+    for (const m of db.prepare('SELECT * FROM mailboxes WHERE enabled=1 ORDER BY purpose, label, id').all()) {
+      const preferred = String(m.send_as || m.impersonate_as || '').trim().toLowerCase();
+      for (const address of allowedFrom(m)) {
+        out.push({ mailbox_id: m.id, address, label: m.label, purpose: m.purpose, preferred: address === preferred });
+      }
+    }
+    return out;
+  };
+  app.get('/api/mail/senders', requireNoc, (req, res) => res.json(ctx.listSenders()));
+
   /**
    * Send through Gmail, falling back to SMTP.
    *
@@ -65,26 +106,29 @@ export default function registerMail(app, ctx) {
    * link that silently did not arrive is the worst outcome here: the customer waits, we think it is
    * sent, and nobody finds out until someone chases. The caller records this in the audit trail.
    */
-  ctx.sendMailBest = async function sendMailBest({ to, subject, text, html, purpose = 'customer', replyTo }) {
-    const mb = pickMailbox(purpose);
+  ctx.sendMailBest = async function sendMailBest({ to, subject, text, html, purpose = 'customer', replyTo, from }) {
+    const explicit = String(from || '').trim().toLowerCase();
+    const mb = explicit ? mailboxForFrom(explicit) : pickMailbox(purpose);
+    // A chosen From that this account cannot use must fail here. Gmail's own behaviour is to accept
+    // the send and quietly rewrite the address, which is how mail leaves under the wrong name.
+    if (explicit && !mb) return { ok: false, error: `${explicit} is not a send-as address on a connected mailbox.` };
     let gmailError = null;
 
     if (mb) {
       try {
         const client = clientFor(mb);
-        const from = mb.send_as || mb.impersonate_as;
+        const fromAddr = explicit || mb.send_as || mb.impersonate_as;
         const raw = buildRawMessage({
-          from, fromName: getSetting('company_name') || null,
+          from: fromAddr, fromName: getSetting('company_name') || null,
           to: Array.isArray(to) ? to : [to],
           subject, text, html,
           headers: replyTo ? { 'Reply-To': replyTo } : {}
         });
         const sent = await client.send({ raw });
-        return { ok: true, via: 'gmail', from, id: sent && sent.id, mailbox: mb.label };
+        return { ok: true, via: 'gmail', from: fromAddr, id: sent && sent.id, mailbox: mb.label };
       } catch (e) {
-        // Fall through to SMTP rather than failing outright — but keep the reason, because "it went
-        // by SMTP" is only reassuring if you can see why the better path did not work.
         gmailError = e.message;
+        if (explicit) return { ok: false, error: `Gmail could not send as ${explicit}: ${e.message}` };
       }
     }
 
@@ -242,14 +286,15 @@ export default function registerMail(app, ctx) {
 
     // 2. Which From addresses are actually permitted.
     let permitted = null;
+    let primaryEmail = null;
     try {
-      const list = await client.sendAs();
-      permitted = (list.sendAs || []).map(s => String(s.sendAsEmail || '').toLowerCase()).filter(Boolean);
-      const primary = (list.sendAs || []).find(s => s.isPrimary);
+      const found = await refreshAliases(m);
+      permitted = found.permitted;
+      primaryEmail = found.primary;
       checks.push({
         name: 'Send-as addresses', ok: true,
         detail: permitted.length
-          ? `${permitted.join(', ')}${primary ? ` (default: ${primary.sendAsEmail})` : ''}`
+          ? `${permitted.join(', ')}${primaryEmail ? ` (default: ${primaryEmail})` : ''}`
           : 'Gmail returned no send-as addresses, which is unusual.'
       });
     } catch (e) {
@@ -271,12 +316,22 @@ export default function registerMail(app, ctx) {
     }
 
     const ok = checks.every(c => c.ok || c.warn);
-    if (ok) {
-      db.prepare("UPDATE mailboxes SET verified_at=datetime('now'), verified_send_as=? WHERE id=?")
-        .run(permitted ? JSON.stringify(permitted) : null, m.id);
-    }
+    if (ok) db.prepare("UPDATE mailboxes SET verified_at=datetime('now') WHERE id=?").run(m.id);
     audit(req, 'view', 'mailbox#' + m.id, `connection test: ${ok ? 'passed' : 'failed'}`);
     res.json({ ok, checks, profile: profile ? { emailAddress: profile.emailAddress, messagesTotal: profile.messagesTotal } : null });
+  });
+
+  app.post('/api/mail/mailboxes/:id/aliases', requireNoc, async (req, res) => {
+    const m = db.prepare('SELECT * FROM mailboxes WHERE id=?').get(req.params.id);
+    if (!m) return res.status(404).json({ error: 'not found' });
+    if (!serviceAccount()) return res.status(400).json({ error: 'No Google service account key has been saved yet (Settings → Email).' });
+    try {
+      const { permitted, primary } = await refreshAliases(m);
+      audit(req, 'view', 'mailbox#' + m.id, `send-as re-check: ${permitted.join(', ') || 'none'}`);
+      res.json({ ok: true, aliases: permitted, primary });
+    } catch (e) {
+      res.status(502).json({ error: e.message });
+    }
   });
 
   /**
