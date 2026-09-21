@@ -10,7 +10,7 @@
 // document, and forging the audit trail. Those are the tests that matter.
 import { readFileSync } from 'node:fs';
 import {
-  mergeBody, fieldsUsed, unknownFields, makeToken, tokenMatches, hashToken,
+  mergeBody, fieldsUsed, unknownFields, makeToken, tokenMatches, hashToken, MERGE_FIELDS,
   eventHash, verifyChain, signingState, canSign, longDate
 } from '../lib/docsign.js';
 
@@ -41,6 +41,15 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
   ok(unknownFields('{{customer.nmae}} and {{customer.name}}').join() === 'customer.nmae',
     'a misspelled field is identified — this is caught when the template is saved, not after signing');
   ok(fieldsUsed('{{a.b}} {{a.b}} {{c.d}}').length === 2, 'fields are deduplicated');
+
+  // Every offered field must be fillable. signer.name and signer.role were advertised and could
+  // never have a value: the body is merged once for a document that has several signers, so they
+  // printed "NOT SET" on every document that used them. A field the editor offers and the renderer
+  // cannot fill is worse than an absent one — it invites the mistake.
+  ok(!('signer.name' in MERGE_FIELDS) && !('signer.role' in MERGE_FIELDS),
+    'no per-signer field is offered for the shared body, because there is no single signer to fill it with');
+  ok(Object.keys(MERGE_FIELDS).every(k => /^(customer|site|pop|company|document)\./.test(k)),
+    'every offered field names a record the merge actually reads');
 
   const { token, hash } = makeToken();
   ok(token.length >= 40, `a signing token is long (${token.length} chars of base64url)`);

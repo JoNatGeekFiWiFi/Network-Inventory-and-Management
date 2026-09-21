@@ -81,20 +81,39 @@ export default function registerDocuments(app, ctx) {
       'company.phone': getSetting('company_phone') || '',
       'document.date': longDate(new Date())
     };
+    // The customers table has no `email` or `phone` column — contact details live in
+    // billing_email / sms_number, and the richer ones on account_contacts. Reading c.email
+    // returned undefined for every customer, so {{customer.email}} printed "NOT SET" on documents
+    // where the address was right there in the record.
+    const contactFor = (c) => {
+      if (!c) return;
+      v['customer.name'] = c.name;
+      v['customer.email'] = c.billing_email || '';
+      v['customer.phone'] = c.sms_number || c.whatsapp_number || '';
+      // Fall back to the primary contact on the account, which is where a named person and a
+      // direct line usually are.
+      const contact = db.prepare(`SELECT ct.* FROM account_contacts ct
+        JOIN account_customers ac ON ac.account_id = ct.account_id
+        WHERE ac.customer_id = ? ORDER BY ct.is_primary DESC, ct.id LIMIT 1`).get(c.id);
+      if (contact) {
+        if (!v['customer.email']) v['customer.email'] = contact.email || '';
+        if (!v['customer.phone']) v['customer.phone'] = contact.phone || '';
+      }
+    };
+
     if (parentType === 'customer') {
       const c = db.prepare('SELECT * FROM customers WHERE id=?').get(parentId);
-      if (c) {
-        v['customer.name'] = c.name; v['customer.email'] = c.email;
-        v['customer.phone'] = c.phone; v['customer.address'] = c.billing_address || '';
-      }
+      contactFor(c);
       const site = db.prepare('SELECT * FROM sites WHERE customer_id=? ORDER BY id LIMIT 1').get(parentId);
-      if (site) { v['site.name'] = site.name; v['site.address'] = site.service_address || ''; }
+      if (site) {
+        v['site.name'] = site.name; v['site.address'] = site.service_address || '';
+        v['customer.address'] = site.service_address || '';
+      }
     } else if (parentType === 'site') {
       const s = db.prepare('SELECT * FROM sites WHERE id=?').get(parentId);
       if (s) {
         v['site.name'] = s.name; v['site.address'] = s.service_address || '';
-        const c = s.customer_id && db.prepare('SELECT * FROM customers WHERE id=?').get(s.customer_id);
-        if (c) { v['customer.name'] = c.name; v['customer.email'] = c.email; v['customer.phone'] = c.phone; }
+        if (s.customer_id) contactFor(db.prepare('SELECT * FROM customers WHERE id=?').get(s.customer_id));
       }
     } else if (parentType === 'pop') {
       const p = db.prepare('SELECT * FROM pops WHERE id=?').get(parentId);

@@ -3493,17 +3493,24 @@ async function deleteTemplate(id) {
 // ---- creating a document ----
 
 async function newDocument(preset = {}) {
-  const [tpls, customers] = await Promise.all([api('/doc-templates'), api('/customers')]);
+  const [tpls, customers, sites, pops] = await Promise.all([
+    api('/doc-templates'), api('/customers'), api('/sites'), api('/pops').catch(() => [])
+  ]);
   const active = tpls.filter(t => t.active);
   if (!active.length && !preset.allowBlank) {
     if (!confirm('There are no templates yet. Templates are the wording you send repeatedly. Create one now?')) return;
     location.hash = '#/documents/templates'; return;
   }
-  window._docCustomers = customers;
+  // Kept for the picker to swap between, and for prefilling a signer from whichever record is chosen.
+  window._docRecords = {
+    customer: customers.map(c => ({ v: c.id, l: c.name + (c.email ? ` · ${c.email}` : ''), rec: c })),
+    site: sites.map(s => ({ v: s.id, l: s.name + (s.service_address ? ` · ${s.service_address}` : ''), rec: s })),
+    pop: (pops || []).map(p => ({ v: p.id, l: p.name + (p.address ? ` · ${p.address}` : ''), rec: p }))
+  };
 
   view().innerHTML = `<div class="head"><h1 style="flex:1">New document</h1>
       <button class="btn" onclick="location.hash='#/documents'">Cancel</button></div>
-    <div class="card" style="padding:16px">
+    <div class="card" style="padding:16px" id="ndForm">
       <div class="grid2">
         ${field('Template', 'ndTemplate', preset.template_id || '', { type: 'select',
           options: [{ v: '', l: '— write it directly —' }, ...active.map(t => ({ v: String(t.id), l: t.name }))] })}
@@ -3512,7 +3519,7 @@ async function newDocument(preset = {}) {
       <div class="grid2">
         ${field('Attach to', 'ndParentType', preset.parent_type || 'customer', { type: 'select', options: [
           { v: 'customer', l: 'Customer' }, { v: 'site', l: 'Site' }, { v: 'pop', l: 'POP' }] })}
-        ${field('Which one (id)', 'ndParentId', preset.parent_id || '', { mono: true, ph: 'numeric id' })}
+        <div class="fld"><label class="fl">Which one</label><div id="ndParentPick"></div></div>
       </div>
       <div class="help" style="margin-top:-4px">A service agreement belongs to the customer; a rooftop lease belongs to the site or POP, because the lease outlives whoever is served from it.</div>
 
@@ -3529,7 +3536,61 @@ async function newDocument(preset = {}) {
       <div class="help">Creating it does not send anything. You review the draft, then send.</div>
       <div id="ndPreview"></div>
     </div>`;
+
+  mountParentPicker(preset.parent_id || '');
+  const typeSel = $('[name=ndParentType]');
+  if (typeSel) typeSel.addEventListener('change', () => mountParentPicker(''));
   addSignerRow();
+  if (preset.parent_id) prefillSignerFromParent();
+}
+
+/** Swap the picker's list when the record type changes, so the search only offers real options. */
+function mountParentPicker(value) {
+  const host = document.getElementById('ndParentPick'); if (!host) return;
+  const type = (($('[name=ndParentType]') || {}).value) || 'customer';
+  const items = (window._docRecords || {})[type] || [];
+  attachSearch(host, items, 'ndParentId', value,
+    items.length ? `Search ${type}s…` : `No ${type}s on record`,
+    () => { prefillSignerFromParent(); previewDocument(); });
+}
+
+/**
+ * Fill the first empty signer from the record just chosen.
+ *
+ * Typing a customer's name and email by hand when the platform already holds both is how they end
+ * up subtly wrong — a typo'd address means a contract that silently never arrives. Only EMPTY
+ * fields are touched: someone who has already typed a different signer (a lessor is not the
+ * customer) must not have it overwritten underneath them.
+ */
+function prefillSignerFromParent() {
+  const type = (($('[name=ndParentType]') || {}).value) || 'customer';
+  const id = ($('[name=ndParentId]') || {}).value;
+  if (!id) return;
+  const entry = ((window._docRecords || {})[type] || []).find(i => String(i.v) === String(id));
+  if (!entry) return;
+  const rec = entry.rec || {};
+
+  // A SITE's signer is the customer served there, not the site — and the sites list does not carry
+  // their contact details, so it is resolved through customer_id. A POP has no counterparty on
+  // record at all: whoever leases us the rooftop is not a customer, so nothing is prefilled and the
+  // fields are left for a person to fill in.
+  let contact = null;
+  if (type === 'customer') contact = rec;
+  else if (type === 'site' && rec.customer_id) {
+    const c = (window._docRecords.customer || []).find(i => String(i.v) === String(rec.customer_id));
+    contact = c ? c.rec : null;
+  }
+  if (!contact) return;
+
+  const wrap = document.getElementById('ndSigners'); if (!wrap || !wrap.children.length) return;
+  const box = wrap.children[0];
+  const set = (prefix, v) => {
+    const el = box.querySelector(`[name^=${prefix}]`);
+    if (el && !el.value.trim() && v) el.value = v;      // never overwrite something already typed
+  };
+  set('sgName', contact.name);
+  set('sgEmail', contact.billing_email || contact.email);
+  set('sgPhone', contact.sms_number || contact.whatsapp_number || contact.phone);
 }
 
 function addSignerRow(v = {}) {
@@ -3569,9 +3630,16 @@ async function previewDocument() {
   const tplId = ($('[name=ndTemplate]') || {}).value;
   const out = $('#ndPreview'); if (!out) return;
   if (!tplId) { out.innerHTML = '<div class="help">Pick a template to preview it, or write the wording after creating the draft.</div>'; return; }
+  const parentId = Number(($('[name=ndParentId]') || {}).value);
+  if (!parentId) {
+    // The preview's whole value is showing which merge fields have no value for THIS record, so
+    // previewing without one would report every field as missing and teach the wrong thing.
+    out.innerHTML = '<div class="help">Choose the customer, site or POP first — the preview fills the wording in from that record.</div>';
+    return;
+  }
   try {
     const r = await api(`/doc-templates/${tplId}/preview`, {
-      body: { parent_type: ($('[name=ndParentType]') || {}).value, parent_id: Number(($('[name=ndParentId]') || {}).value) }
+      body: { parent_type: ($('[name=ndParentType]') || {}).value, parent_id: parentId }
     });
     out.innerHTML = `<div style="margin-top:14px">
       ${r.missing.length ? `<div class="banner-warn small" style="color:var(--warn);margin-bottom:8px">
@@ -3583,13 +3651,22 @@ async function previewDocument() {
 }
 
 async function createDocument() {
+  const type = ($('[name=ndParentType]') || {}).value;
+  const parentId = Number(($('[name=ndParentId]') || {}).value);
+  // Caught here so the message names what to do. The server's own "parent_id is required" is
+  // correct and useless to the person looking at the screen.
+  if (!parentId) return toast(`Choose which ${type} this document is for`);
+
   const signers = collectSigners();
-  if (!signers.length) return toast('Add at least one signer');
+  if (!signers.length) return toast('Add at least one signer — a document needs somebody to sign it');
+  const missingEmail = signers.find(s => s.delivery === 'email' && !s.email);
+  if (missingEmail) return toast(`${missingEmail.name} is set to sign by email but has no email address`);
+
   const body = {
     template_id: ($('[name=ndTemplate]') || {}).value || null,
     title: ($('[name=ndTitle]') || {}).value,
-    parent_type: ($('[name=ndParentType]') || {}).value,
-    parent_id: Number(($('[name=ndParentId]') || {}).value),
+    parent_type: type,
+    parent_id: parentId,
     signers
   };
   try {
