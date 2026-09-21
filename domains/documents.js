@@ -319,8 +319,11 @@ export default function registerDocuments(app, ctx) {
     };
     const pdf = renderDocument({ title: d.title, body: d.body || '', signers, company });
     const bytes = pdf.build();
-    const stored = `doc-${d.id}-${randomBytes(8).toString('hex')}.pdf`;
-    writeFileSync(join(UPLOADS_DIR, stored), bytes);
+    // Filed under the customer, site or POP this document belongs to.
+    const target = ctx.files.place(d.parent_type, d.parent_id, parentLabel(d.parent_type, d.parent_id), 'documents',
+      `${d.title}.pdf`, { prefix: `doc-${d.id}` });
+    writeFileSync(target.absolute, bytes);
+    const stored = target.stored;
     const hash = sha256(bytes);
 
     db.prepare(`UPDATE documents SET stored_name=?, content_sha256=?, status='sent', sent_at=datetime('now') WHERE id=?`)
@@ -425,7 +428,7 @@ export default function registerDocuments(app, ctx) {
     const wantSigned = req.query.signed === '1' && d.signed_stored_name;
     const name = wantSigned ? d.signed_stored_name : d.stored_name;
     if (!name) return res.status(404).json({ error: 'No PDF yet — send the document to generate it' });
-    const fp = join(UPLOADS_DIR, name);
+    const fp = ctx.files.resolveStored(name);
     if (!existsSync(fp)) return res.status(404).json({ error: 'The stored file is missing' });
     appendEvent({ document_id: d.id, kind: 'downloaded', detail: wantSigned ? 'signed copy' : 'unsigned copy', actor: (req.user && req.user.email) || null, req });
     res.setHeader('Content-Type', 'application/pdf');
@@ -442,7 +445,7 @@ export default function registerDocuments(app, ctx) {
     const files = {};
     for (const [key, name] of [['sent', d.stored_name], ['signed', d.signed_stored_name]]) {
       if (!name) continue;
-      const fp = join(UPLOADS_DIR, name);
+      const fp = ctx.files.resolveStored(name);
       const expected = key === 'sent' ? d.content_sha256 : d.signed_sha256;
       files[key] = existsSync(fp) ? { present: true, matches: sha256(readFileSync(fp)) === expected, expected } : { present: false };
     }
@@ -614,7 +617,7 @@ export default function registerDocuments(app, ctx) {
     const { doc } = found;
     const name = doc.signed_stored_name || doc.stored_name;
     if (!name) return pdfProblem(res, 404, 'There is no document to download yet.');
-    const fp = join(UPLOADS_DIR, name);
+    const fp = ctx.files.resolveStored(name);
     if (!existsSync(fp)) return pdfProblem(res, 404, 'The stored file could not be found.');
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${doc.title.replace(/[^\w.-]+/g, '-').toLowerCase()}.pdf"`);
@@ -663,8 +666,10 @@ export default function registerDocuments(app, ctx) {
     drawCertificate(pdf, { document: doc, signers, events, chain });
 
     const bytes = pdf.build();
-    const stored = `doc-${doc.id}-signed-${randomBytes(8).toString('hex')}.pdf`;
-    writeFileSync(join(UPLOADS_DIR, stored), bytes);
+    const target = ctx.files.place(doc.parent_type, doc.parent_id, parentLabel(doc.parent_type, doc.parent_id), 'documents',
+      `${doc.title}-signed.pdf`, { prefix: `doc-${doc.id}` });
+    writeFileSync(target.absolute, bytes);
+    const stored = target.stored;
     db.prepare(`UPDATE documents SET signed_stored_name=?, signed_sha256=?, status='signed', completed_at=datetime('now') WHERE id=?`)
       .run(stored, sha256(bytes), documentId);
     return stored;

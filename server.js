@@ -5,6 +5,36 @@ import { dirname, join, extname, sep } from 'node:path';
 import { readFileSync, writeFileSync, createReadStream, existsSync, statSync, unlinkSync, copyFileSync } from 'node:fs';
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, backfillAccountCustomers, UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR } from './db.js';
+import { createFileStore } from './lib/filestore.js';
+import { migrateFilesIntoRecordDirs } from './lib/filemigrate.js';
+
+/**
+ * Files on disk, grouped by the record they belong to.
+ *
+ * Every read goes through files.resolveStored(), which proves the resolved path sits inside the
+ * uploads root before anything opens it. Stored values now contain components derived from record
+ * names, so that check is not ceremony: it is the thing standing between a bad row and
+ * ../../etc/passwd.
+ */
+const files = createFileStore(UPLOADS_DIR);
+
+/**
+ * The record's own name, for the readable half of its directory.
+ *
+ * Only ever a label: the directory is found by its id, so a name that is missing, changed, or full
+ * of punctuation costs nothing. Never allowed to throw — a failure to look up a name must not stop
+ * a file being saved.
+ */
+function parentDisplayName(type, id) {
+  const table = {
+    customer: 'customers', site: 'sites', pop: 'pops',
+    cable: 'fiber_cables', splice: 'fiber_splices', structure: 'fiber_structures',
+    route: 'fiber_routes', device: 'devices'
+  }[type];
+  if (!table || !id) return '';
+  try { const r = db.prepare(`SELECT name FROM ${table} WHERE id=?`).get(id); return r ? r.name : ''; }
+  catch { return ''; }
+}
 import { importModelCatalog } from './model-catalog.js';
 import { createSession, destroySession, userForToken, parseCookies, setSessionCookie, clearSessionCookie, pruneSessions,
          createApiToken, userForApiToken, listApiTokens, revokeApiToken, allApiTokens } from './auth.js';
@@ -166,6 +196,16 @@ if (isEmpty()) { seed(); console.log('Database seeded on first run.'); }
 backfillCustomers();
 backfillAccountCustomers();
 { const n = importModelCatalog(db); if (n) console.log(`Model catalog: added ${n} device model(s).`); }
+
+// Group existing uploads under the record they belong to. Safe to run on every start: a stored
+// value that already contains a slash is skipped, so the second run does nothing.
+{
+  const r = migrateFilesIntoRecordDirs(db, files, UPLOADS_DIR);
+  if (r.moved) console.log(`Files: moved ${r.moved} into per-record directories` +
+    (r.orphaned ? `, ${r.orphaned} left flat (their record is gone)` : ''));
+  if (r.collisions.length) console.warn(`Files: ${r.collisions.length} left in place — something was already at the destination`);
+  for (const e of r.errors) console.warn('Files:', e.table, e.error);
+}
 
 /**
  * A stamp identifying exactly which build is running.
@@ -1858,7 +1898,7 @@ function attachmentsFor(parentType, parentId) {
 /** Remove every attachment for a record (called when the record itself is deleted). */
 function deleteAttachmentsFor(parentType, parentId) {
   const rows = db.prepare('SELECT id, stored_name FROM note_attachments WHERE parent_type=? AND parent_id=?').all(parentType, Number(parentId));
-  for (const a of rows) { try { unlinkSync(join(UPLOADS_DIR, a.stored_name)); } catch {} }
+  for (const a of rows) { try { unlinkSync(files.resolveStored(a.stored_name)); } catch {} }
   if (rows.length) db.prepare('DELETE FROM note_attachments WHERE parent_type=? AND parent_id=?').run(parentType, Number(parentId));
   return rows.length;
 }
@@ -1879,8 +1919,16 @@ app.post('/api/attachments', (req, res) => {
   // keep the real extension for octet-stream uploads (.sor OTDR traces, .dwg, …) so downloads open correctly
   let ext = ATT_MIME[b.mime];
   if (b.mime === 'application/octet-stream') { const m = String(b.filename || '').match(/(\.[A-Za-z0-9]{1,8})$/); if (m) ext = m[1].toLowerCase(); }
-  const stored = randomUUID() + ext;
-  try { writeFileSync(join(UPLOADS_DIR, stored), buf); } catch (e) { return res.status(500).json({ error: 'Could not save file' }); }
+  // Filed under the record it belongs to, not dumped in a shared folder.
+  let stored;
+  try {
+    const parentName = parentDisplayName(b.parent_type, b.parent_id);
+    // The extension comes from the MIME type, not from the supplied name — passing both produced
+    // "Cabinet-Photo.png-a1b2c3.png".
+    const target = files.place(b.parent_type, b.parent_id, parentName, 'attachments', b.filename || 'file', { ext });
+    writeFileSync(target.absolute, buf);
+    stored = target.stored;
+  } catch (e) { return res.status(500).json({ error: 'Could not save file: ' + e.message }); }
   const info = db.prepare('INSERT INTO note_attachments (parent_type,parent_id,note_id,filename,mime,size,stored_name,author,caption) VALUES (?,?,?,?,?,?,?,?,?)')
     .run(b.parent_type, b.parent_id, N(b.note_id), N(b.filename, 'file'), b.mime, buf.length, stored, (req.user && req.user.email) || '', N(b.caption) || null);
   audit(req, 'attach', b.parent_type + '#' + b.parent_id, b.filename || stored);
@@ -1896,7 +1944,7 @@ app.put('/api/attachments/:id', (req, res) => {
 app.get('/api/attachments/:id', (req, res) => {
   const a = db.prepare('SELECT * FROM note_attachments WHERE id=?').get(req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
-  const fp = join(UPLOADS_DIR, a.stored_name);
+  const fp = files.resolveStored(a.stored_name);
   if (!existsSync(fp)) return res.status(404).json({ error: 'file missing' });
   // Only images and PDFs render inline; everything else downloads, so an uploaded file can never
   // be interpreted as script in our origin. nosniff stops the browser second-guessing the type.
@@ -1911,7 +1959,7 @@ app.delete('/api/attachments/:id', requireNoc, (req, res) => {
   const a = db.prepare('SELECT * FROM note_attachments WHERE id=?').get(req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
   if (!isPriv(req) && a.author !== (req.user && req.user.email)) return res.status(403).json({ error: 'Only the author or NOC/Admin can delete' });
-  try { unlinkSync(join(UPLOADS_DIR, a.stored_name)); } catch {}
+  try { unlinkSync(files.resolveStored(a.stored_name)); } catch {}
   db.prepare('DELETE FROM note_attachments WHERE id=?').run(a.id);
   audit(req, 'delete', a.parent_type + '#' + a.parent_id, 'attachment#' + a.id);
   res.json({ ok: true });
@@ -1928,7 +1976,7 @@ app.post('/api/sites/:id/notes', (req, res) => {
 // delete a note (+ its attachment files); NOC/Admin only
 function deleteNoteAttachments(noteId) {
   for (const a of db.prepare('SELECT * FROM note_attachments WHERE note_id=?').all(noteId)) {
-    try { unlinkSync(join(UPLOADS_DIR, a.stored_name)); } catch {}
+    try { unlinkSync(files.resolveStored(a.stored_name)); } catch {}
     db.prepare('DELETE FROM note_attachments WHERE id=?').run(a.id);
   }
 }
@@ -1994,7 +2042,7 @@ const ctx = {
   customerAccounts, accountCustomers, setCustomerAccounts,
   verifyPassword, parseCookies, hashPassword,
   restReq, rosHeaders, rosErr, publicDevice, pollDeviceCore,
-  UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR,
+  UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR, files,
   harvestThreats, pushBlocklistToDevice, activeBlockIps, blocklistMinHits,
   attachmentsFor, deleteAttachmentsFor,
   geocode, normPhone,
@@ -2039,7 +2087,7 @@ app.get('/api/files/locator/:id/download', requireAdmin, (req, res) => {
   const r = db.prepare('SELECT * FROM locator_uploads WHERE id=?').get(req.params.id);
   if (!r) return res.status(404).json({ error: 'not found' });
   if (!r.stored_name) return res.status(410).json({ error: 'This upload was not retained — public uploads keep metadata only.' });
-  const fp = join(UPLOADS_DIR, r.stored_name);
+  const fp = files.resolveStored(r.stored_name);
   if (!existsSync(fp)) return res.status(404).json({ error: 'file missing from disk' });
   audit(req, 'file_read', 'locator_upload#' + r.id, r.filename || '');
   res.setHeader('Content-Type', 'application/octet-stream');
@@ -2051,7 +2099,7 @@ app.get('/api/files/locator/:id/download', requireAdmin, (req, res) => {
 app.delete('/api/files/locator/:id', requireAdmin, (req, res) => {
   const r = db.prepare('SELECT * FROM locator_uploads WHERE id=?').get(req.params.id);
   if (!r) return res.status(404).json({ error: 'not found' });
-  if (r.stored_name) { try { unlinkSync(join(UPLOADS_DIR, r.stored_name)); } catch {} }
+  if (r.stored_name) { try { unlinkSync(files.resolveStored(r.stored_name)); } catch {} }
   db.prepare('DELETE FROM locator_uploads WHERE id=?').run(r.id);
   audit(req, 'delete', 'locator_upload#' + r.id, r.filename || '');
   res.json({ ok: true });
@@ -2063,7 +2111,7 @@ app.get('/api/files/ids', requireAdmin, (req, res) => {
       reviewed_at, created_at, id_photo FROM access_requests
     WHERE id_photo IS NOT NULL ORDER BY datetime(created_at) DESC LIMIT 500`).all();
   res.json(rows.map(r => {
-    const fp = join(UPLOADS_DIR, r.id_photo);
+    const fp = files.resolveStored(r.id_photo);
     let size = null, missing = true;
     try { if (existsSync(fp)) { size = statSync(fp).size; missing = false; } } catch {}
     return {
@@ -2148,22 +2196,31 @@ app.get('/access/sites', (req, res) => {
   const rows = db.prepare('SELECT id, name FROM sites WHERE name LIKE ? ORDER BY name LIMIT 20').all(q);
   res.json(rows);
 });
+const store_placeIdPhoto = (mime) => files.placeSystem('access-id', 'idphoto' + ATT_MIME[mime], { ext: ATT_MIME[mime] });
+
 function saveIdPhoto(dataUrl) {
   let raw = String(dataUrl); const c = raw.indexOf(','); let mime = '';
   if (raw.startsWith('data:')) { mime = raw.slice(5, raw.indexOf(';')); if (c !== -1) raw = raw.slice(c + 1); }
   if (!ATT_MIME[mime]) return { error: 'ID photo must be an image or PDF', code: 400 };
   let buf; try { buf = Buffer.from(raw, 'base64'); } catch { return { error: 'bad photo data', code: 400 }; }
   if (buf.length > ATT_MAX) return { error: 'ID photo too large (max 25 MB)', code: 413 };
-  const stored = 'idphoto-' + randomUUID() + ATT_MIME[mime];
-  try { writeFileSync(join(UPLOADS_DIR, stored), buf); } catch { return { error: 'could not save photo', code: 500 }; }
+  // Identity documents live under _system/access-id/, not under a site: one access request can
+  // cover several sites, so filing the photo under one of them would be a guess. The path makes
+  // their sensitivity visible to anyone looking at the server.
+  let stored;
+  try {
+    const target = store_placeIdPhoto(mime);
+    writeFileSync(target.absolute, buf);
+    stored = target.stored;
+  } catch { return { error: 'could not save photo', code: 500 }; }
   return { stored };
 }
 // copy a prior visitor's ID photo to a new file so a returning visit reuses it without re-scanning
 function copyIdPhoto(srcStored) {
-  if (!srcStored || !existsSync(join(UPLOADS_DIR, srcStored))) return null;
+  if (!srcStored || !existsSync(files.resolveStored(srcStored))) return null;
   const ext = '.' + (srcStored.split('.').pop() || 'jpg');
   const stored = 'idphoto-' + randomUUID() + ext;
-  try { copyFileSync(join(UPLOADS_DIR, srcStored), join(UPLOADS_DIR, stored)); return stored; } catch { return null; }
+  try { copyFileSync(files.resolveStored(srcStored), files.resolveStored(stored)); return stored; } catch { return null; }
 }
 app.post('/access', (req, res) => {
   const b = req.body || {};
@@ -2253,7 +2310,7 @@ app.post('/api/access/manual', requireNoc, (req, res) => {
 app.get('/api/access/:id/photo', requireNoc, (req, res) => {
   const r = db.prepare('SELECT * FROM access_requests WHERE id=?').get(req.params.id);
   if (!r || !r.id_photo) return res.status(404).json({ error: 'no photo' });
-  const fp = join(UPLOADS_DIR, r.id_photo);
+  const fp = files.resolveStored(r.id_photo);
   if (!existsSync(fp)) return res.status(404).json({ error: 'file missing' });
   const ext = (r.id_photo.split('.').pop() || '').toLowerCase();
   const mime = ext === 'pdf' ? 'application/pdf' : (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : ext === 'heic' ? 'image/heic' : ext === 'heif' ? 'image/heif' : 'image/jpeg');
@@ -2290,7 +2347,7 @@ app.put('/api/access/:id', requireNoc, (req, res) => {
 app.delete('/api/access/:id', requireNoc, (req, res) => {
   const r = db.prepare('SELECT * FROM access_requests WHERE id=?').get(req.params.id);
   if (!r) return res.status(404).json({ error: 'not found' });
-  if (r.id_photo) { try { unlinkSync(join(UPLOADS_DIR, r.id_photo)); } catch {} }
+  if (r.id_photo) { try { unlinkSync(files.resolveStored(r.id_photo)); } catch {} }
   db.prepare('DELETE FROM access_request_sites WHERE request_id=?').run(r.id);
   db.prepare('DELETE FROM access_requests WHERE id=?').run(r.id);
   audit(req, 'delete', 'access#' + r.id);
