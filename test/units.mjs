@@ -108,13 +108,23 @@ ok(site && site.id, 'site created');
   ok(meta.accounts.some(a => a.id === acct.id), 'it appears in /api/meta straight away, with no reload');
 }
 
-// ---- deleting the site takes its units with it ----
+// ---- archiving the site keeps its units ----
+//
+// This used to assert the opposite: deleting a site CASCADED to its units, so they were not left
+// orphaned. That was the right answer while the row was being destroyed. Now the site is archived,
+// and the units must go with it intact — an MDU that comes back from the archive as an empty
+// building has lost the part of the record that took the longest to enter.
 {
   const s2 = (await call('/api/sites', { body: { customer_id: cust.id, name: 'UNIT-TEST Cascade', service_address: '7 Cascade Way, Tempe, AZ' } })).json;
   await call(`/api/sites/${s2.id}/units`, { body: { label: 'Unit 1' } });
   ok((await call(`/api/sites/${s2.id}/units`)).json.length === 1, 'unit created on the second site');
-  await call('/api/sites/' + s2.id, { method: 'DELETE' });
-  ok((await call(`/api/sites/${s2.id}/units`)).json.length === 0, 'deleting the site removes its units rather than orphaning them');
+  const arch = await call('/api/sites/' + s2.id, { method: 'DELETE' });
+  ok(arch.status === 200 && arch.json.archived === true, 'the site archives rather than being deleted');
+  ok((await call('/api/sites')).json.every(x => x.id !== s2.id), 'and leaves the site list');
+  ok((await call('/api/sites?archived=1')).json.some(x => x.id === s2.id), 'while staying findable with ?archived=1');
+  ok((await call(`/api/sites/${s2.id}/units`)).json.length === 1, 'its units go into the archive with it, rather than being destroyed');
+  ok((await call('/api/sites/' + s2.id + '/restore', { method: 'POST' })).status === 200, 'and the site can be restored');
+  ok((await call(`/api/sites/${s2.id}/units`)).json.length === 1, 'with the MDU whole — the unit is still there');
 }
 
 // ---- role gating ----

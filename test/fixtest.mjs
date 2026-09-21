@@ -4,19 +4,40 @@ let pass=0,fail=0;const ok=(c,m)=>{c?pass++:fail++;console.log(c?'PASS':'FAIL',m
 await call('/api/login',{body:{email:'admin@geekitek.test',password:'admin123'}});
 const acct=(await call('/api/meta')).json.accounts[0];
 
-// 1 customer delete now blocked when billing exists
+// 1 A customer is DEACTIVATED, never destroyed.
+//
+// This block used to assert a 409: delete refused while an invoice or a ticket still pointed at the
+// customer. The refusal protected the history, but it also meant the only customers you could
+// remove were the ones with no history — exactly the ones it costs nothing to keep. So the ones
+// you actually want out of the list, the ones who left after three years of service, were the ones
+// the guard kept in it.
+//
+// Archiving answers both questions at once: the row stays for as long as the company does, the
+// invoice it was guarding is untouched, and the customer leaves the list people work from.
 const c=(await call('/api/customers',{method:'POST',body:{name:'Guard Test',account_ids:[acct.id]}})).json;
-await call('/api/billing/invoices',{method:'POST',body:{customer_id:c.id,date:'2026-01-01',tax_rate:0,items:[{description:'x',quantity:1,unit_price:10,taxable:0}]}});
-let d=await call('/api/customers/'+c.id,{method:'DELETE'});
-ok(d.status===409 && /invoice/.test(d.json.error),'delete blocked w/ invoices: '+d.json.error);
-// ticket blocks too
+const inv=(await call('/api/billing/invoices',{method:'POST',body:{customer_id:c.id,date:'2026-01-01',tax_rate:0,items:[{description:'x',quantity:1,unit_price:10,taxable:0}]}})).json;
+let d=await call('/api/customers/'+c.id,{method:'DELETE',body:{reason:'Closed account'}});
+ok(d.status===200&&d.json.archived===true,'a customer with invoices archives instead of being refused');
+ok((await call('/api/customers')).json.every(x=>x.id!==c.id),'and drops out of the working list');
+ok((await call('/api/customers?archived=1')).json.some(x=>x.id===c.id),'but is findable with ?archived=1 — hidden, not gone');
+ok((await call('/api/customers?archived=all')).json.some(x=>x.id===c.id),'and ?archived=all shows both');
+const still=await call('/api/customers/'+c.id);
+ok(still.status===200&&still.json.archived_at,'the record itself still opens, and says when it was archived');
+ok(still.json.archived_reason==='Closed account','with the reason it was given');
+ok((await call('/api/billing/invoices')).json.some(i=>i.id===inv.id),'and the invoice the old guard existed to protect is untouched');
+// Archiving twice is a mistake, not a no-op: it would overwrite who archived it and why.
+ok((await call('/api/customers/'+c.id,{method:'DELETE'})).status===409,'archiving an archived customer is refused rather than rewriting its history');
+ok((await call('/api/customers/'+c.id+'/restore',{method:'POST'})).status===200,'and it can be brought back');
+ok((await call('/api/customers')).json.some(x=>x.id===c.id),'after which it is in the working list again');
+// tickets, same story
 const c2=(await call('/api/customers',{method:'POST',body:{name:'Guard Tix',account_ids:[acct.id]}})).json;
-await call('/api/tickets',{method:'POST',body:{customer_id:c2.id,subject:'t'}});
+const tix=(await call('/api/tickets',{method:'POST',body:{customer_id:c2.id,subject:'t'}})).json;
 d=await call('/api/customers/'+c2.id,{method:'DELETE'});
-ok(d.status===409&&/ticket/.test(d.json.error),'delete blocked w/ tickets');
-// clean customer still deletable
+ok(d.status===200&&d.json.archived===true,'a customer with tickets archives too');
+ok((await call('/api/tickets')).json.some(t=>t.id===tix.id),'and the ticket survives');
+// a customer with no history behaves the same way — one rule, not two
 const c3=(await call('/api/customers',{method:'POST',body:{name:'Clean',account_ids:[acct.id]}})).json;
-ok((await call('/api/customers/'+c3.id,{method:'DELETE'})).status===200,'clean customer still deletable');
+ok((await call('/api/customers/'+c3.id,{method:'DELETE'})).json.archived===true,'a customer with no history archives as well, rather than being a special case');
 
 // 2 circuit self-loop rejected
 const sites=(await call('/api/sites')).json;

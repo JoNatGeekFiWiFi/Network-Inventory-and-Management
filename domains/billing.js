@@ -145,7 +145,7 @@ export default function registerBilling(app, ctx) {
   // monthly recurring revenue per customer (pre-tax subtotal — tax is pass-through, not income)
   function customerMonthlyRevenue() {
     const map = {}; // customer_id -> monthly subtotal
-    for (const r of db.prepare('SELECT customer_id, frequency, items_json, tax_rate FROM bill_recurring WHERE active=1').all()) {
+    for (const r of db.prepare('SELECT r.customer_id, r.frequency, r.items_json, r.tax_rate FROM bill_recurring r JOIN customers c ON c.id=r.customer_id WHERE r.active=1 AND c.archived_at IS NULL').all()) {
       let items = []; try { items = JSON.parse(r.items_json || '[]'); } catch {}
       map[r.customer_id] = r2((map[r.customer_id] || 0) + monthlyize(computeTotals(items, 0).subtotal, r.frequency));
     }
@@ -517,7 +517,10 @@ export default function registerBilling(app, ctx) {
   });
   // Generate invoices for due schedules (sampler runs this hourly; button exposes it too)
   function runRecurringBilling() {
-    const due = db.prepare('SELECT * FROM bill_recurring WHERE active=1 AND next_date<=?').all(todayStr());
+    // Belt and braces: deactivating a customer pauses their schedules, but a schedule switched back on
+    // by hand while the customer is still deactivated must not start invoicing a closed account.
+    const due = db.prepare(`SELECT r.* FROM bill_recurring r JOIN customers c ON c.id=r.customer_id
+      WHERE r.active=1 AND r.next_date<=? AND c.archived_at IS NULL`).all(todayStr());
     let made = 0;
     for (const r of due) {
       let items = []; try { items = JSON.parse(r.items_json); } catch {}

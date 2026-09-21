@@ -315,8 +315,18 @@ export default function registerNetwork(app, ctx) {
     catch (e) { res.status(502).json({ error: e.http ? ('Device returned ' + e.http) : rosErr(e) }); }
   });
 
+  // AN ARCHIVED DEVICE IS NEVER CONTACTED.
+  //
+  // Every query in this file that reaches out to hardware — polling, backups, ZeroTier
+  // reconciliation, batch config — carries `archived_at IS NULL`. Archiving a device means it has
+  // left the network: pulled from a site, RMA'd, sitting in a box. Continuing to open SSH sessions
+  // to its old address is at best noise in the logs, and at worst a login attempt against whatever
+  // now answers on that IP.
+  //
+  // The credentials stay on the row, because a unit that comes back out of the box needs them.
+  // What stops is the platform going and looking for it.
   // ---- router config backups (RouterOS text export) ----
-  const backupDevices = () => db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
+  const backupDevices = () => db.prepare("SELECT * FROM devices WHERE archived_at IS NULL AND management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
   // Pull readable text out of whatever shape /rest/export or a file read returns
   function exportText(body) {
     let text = body || ''; const t = String(text).trim();
@@ -910,7 +920,7 @@ export default function registerNetwork(app, ctx) {
       if (!r.ok) { const t = await r.text().catch(() => ''); return res.status(502).json({ error: `ZeroTier API ${r.status}${t ? ': ' + t.slice(0, 160) : ''}` }); }
       let members = await r.json();
       if (!Array.isArray(members)) members = (members && Array.isArray(members.data)) ? members.data : [];
-      const devs = db.prepare("SELECT id, name, zt_node_id, assigned_site_id, assigned_pop_id FROM devices WHERE zt_node_id IS NOT NULL AND zt_node_id<>''").all();
+      const devs = db.prepare("SELECT id, name, zt_node_id, assigned_site_id, assigned_pop_id FROM devices WHERE archived_at IS NULL AND zt_node_id IS NOT NULL AND zt_node_id<>''").all();
       const map = {};
       for (const dv of devs) {
         let where = null;
@@ -947,7 +957,7 @@ export default function registerNetwork(app, ctx) {
       let members = await r.json();
       if (!Array.isArray(members)) members = (members && Array.isArray(members.data)) ? members.data : [];
       let updated = 0;
-      const devs = db.prepare("SELECT id, zt_node_id FROM devices WHERE zt_node_id IS NOT NULL AND zt_node_id<>''").all();
+      const devs = db.prepare("SELECT id, zt_node_id FROM devices WHERE archived_at IS NULL AND zt_node_id IS NOT NULL AND zt_node_id<>''").all();
       for (const d of devs) {
         const m = members.find(x => (x.nodeId || (x.config && x.config.nodeId) || x.id) === d.zt_node_id);
         const ip = m && m.config && Array.isArray(m.config.ipAssignments) ? m.config.ipAssignments[0] : null;
@@ -1068,7 +1078,7 @@ export default function registerNetwork(app, ctx) {
     return { id: jid, op, summary, total: results.length, ok, fail, results };
   }
   app.get('/api/batch/targets', requireNoc, (req, res) => {
-    const rows = db.prepare("SELECT id, name, mgmt_address, management_mode, assigned_type, assigned_site_id, assigned_pop_id, ros_version, fw_version, fw_upgrade, last_polled, (admin_password IS NOT NULL AND admin_password<>'') AS has_pw FROM devices WHERE management_mode='platform' ORDER BY name").all();
+    const rows = db.prepare("SELECT id, name, mgmt_address, management_mode, assigned_type, assigned_site_id, assigned_pop_id, ros_version, fw_version, fw_upgrade, last_polled, (admin_password IS NOT NULL AND admin_password<>'') AS has_pw FROM devices WHERE archived_at IS NULL AND management_mode='platform' ORDER BY name").all();
     for (const r of rows) {
       r.eligible = !!(r.mgmt_address && r.has_pw);
       r.fw_needs_update = !!(r.fw_version && r.fw_upgrade && r.fw_version !== r.fw_upgrade);
@@ -1166,10 +1176,33 @@ export default function registerNetwork(app, ctx) {
     res.json({ ok: true });
   });
 
+  /**
+   * Retiring a device, not erasing it.
+   *
+   * A router that left service still carries its serial, its MAC, which customer it sat with and
+   * what its configuration backups looked like. That is the answer to "have we seen this hardware
+   * before?" when it turns up in a box two years later, and to "what was deployed at this address
+   * in March?" when somebody disputes an outage. Deleting the row threw all of it away to save
+   * nothing.
+   */
   app.delete('/api/devices/:id', requireNoc, (req, res) => {
-    db.prepare('DELETE FROM devices WHERE id=?').run(req.params.id);
-    audit(req, 'delete', 'device#' + req.params.id);
-    res.json({ ok: true });
+    const d = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
+    if (!d) return res.status(404).json({ error: 'not found' });
+    if (d.archived_at) return res.status(409).json({ error: 'Already archived' });
+    const reason = String((req.body || {}).reason || '').trim() || null;
+    db.prepare(`UPDATE devices SET archived_at=datetime('now'), archived_by=?, archived_reason=?,
+      assigned_type=NULL, assigned_site_id=NULL, assigned_pop_id=NULL, associated_connection_id=NULL
+      WHERE id=?`).run((req.user && req.user.email) || null, reason, d.id);
+    audit(req, 'archive', 'device#' + d.id, `${d.name || ''}${reason ? ' — ' + reason : ''}`);
+    res.json({ ok: true, archived: true });
+  });
+
+  app.post('/api/devices/:id/restore', requireNoc, (req, res) => {
+    const d = db.prepare('SELECT * FROM devices WHERE id=?').get(req.params.id);
+    if (!d) return res.status(404).json({ error: 'not found' });
+    db.prepare('UPDATE devices SET archived_at=NULL, archived_by=NULL, archived_reason=NULL WHERE id=?').run(d.id);
+    audit(req, 'edit', 'device#' + d.id, 'restored from archive');
+    res.json({ ok: true, archived: false });
   });
 
 
@@ -1330,7 +1363,7 @@ export default function registerNetwork(app, ctx) {
   async function sampleTick() {
     if (_sampling) return; _sampling = true; _tickN++;
     try {
-      const devs = db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND COALESCE(platform,'routeros')<>'unknown' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
+      const devs = db.prepare("SELECT * FROM devices WHERE archived_at IS NULL AND management_mode='platform' AND COALESCE(platform,'routeros')<>'unknown' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
       // every minute: sample traffic/latency + harvest failed-login IPs
       //
       // Threat harvesting is gated on the capability rather than attempted and caught. Attempting
@@ -1442,7 +1475,7 @@ export default function registerNetwork(app, ctx) {
     res.json({ ok: true });
   });
   app.post('/api/blocklist/scan', requireNoc, async (req, res) => {
-    const devs = db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
+    const devs = db.prepare("SELECT * FROM devices WHERE archived_at IS NULL AND management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
     let scanned = 0, found = 0;
     for (const d of devs) { try { found += await harvestThreats(d); scanned++; } catch {} }
     audit(req, 'edit', 'blocklist', `scanned ${scanned} device(s)`);
@@ -1452,7 +1485,7 @@ export default function registerNetwork(app, ctx) {
     const b = req.body || {};
     const devs = b.device_id
       ? db.prepare('SELECT * FROM devices WHERE id=?').all(b.device_id)
-      : db.prepare("SELECT * FROM devices WHERE management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
+      : db.prepare("SELECT * FROM devices WHERE archived_at IS NULL AND management_mode='platform' AND mgmt_address IS NOT NULL AND mgmt_address<>'' AND admin_password IS NOT NULL AND admin_password<>''").all();
     const results = [];
     for (const d of devs) { try { const r = await pushBlocklistToDevice(d); results.push({ device: d.name, ...r }); } catch (e) { results.push({ device: d.name, error: e.code || e.message }); } }
     audit(req, 'config_push', 'blocklist', `pushed to ${results.length} device(s)`);

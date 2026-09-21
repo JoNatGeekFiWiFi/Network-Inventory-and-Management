@@ -179,10 +179,21 @@ export default function registerSupport(app, ctx) {
 
   // ---- customer portal (separate auth: password OR magic link) ----
   function portalCookie(res, token) { res.setHeader('Set-Cookie', `psid=${token}; HttpOnly; Path=/; Max-Age=${30 * 24 * 3600}; SameSite=Lax`); }
+  // AN ARCHIVED CUSTOMER CANNOT USE THE PORTAL.
+  //
+  // Archiving clears their sessions and login tokens, which ends the session they are sitting in.
+  // That alone is not enough: they could sign in again a minute later, because every route below
+  // finds them by email or by session and none of them asked whether the account was still open.
+  // So the check goes on the lookup itself — `archived_at IS NULL` in every query that turns a
+  // credential into a customer — rather than on each of the four entry points, where the fifth one
+  // added later would quietly not have it.
+  //
+  // It reads as "invalid email or password", not "this account is closed". A closed account is not
+  // the sign-in page's business to disclose.
   function portalCustomer(req) {
     const t = parseCookies(req).psid; if (!t) return null;
     const s = db.prepare("SELECT customer_id FROM portal_sessions WHERE token=? AND expires_at>datetime('now')").get(t);
-    return s ? db.prepare('SELECT * FROM customers WHERE id=?').get(s.customer_id) : null;
+    return s ? db.prepare('SELECT * FROM customers WHERE id=? AND archived_at IS NULL').get(s.customer_id) : null;
   }
   function requirePortal(req, res, next) { const c = portalCustomer(req); if (!c) return res.status(401).json({ error: 'Please sign in' }); req.pcust = c; next(); }
   /**
@@ -219,7 +230,7 @@ export default function registerSupport(app, ctx) {
     const b = req.body || {}; const email = String(b.email || '').trim().toLowerCase();
     const wait = loginThrottle(req, 'portal:' + email);
     if (wait) return res.status(429).json({ error: `Too many attempts — try again in ${wait} minute(s)` });
-    const c = db.prepare("SELECT * FROM customers WHERE lower(billing_email)=? AND portal_enabled=1 AND status!='Closed'").get(email);
+    const c = db.prepare("SELECT * FROM customers WHERE lower(billing_email)=? AND portal_enabled=1 AND archived_at IS NULL AND COALESCE(status,'')!='Closed'").get(email);
     if (!c || !c.portal_password || !verifyPassword(String(b.password || ''), c.portal_password)) return res.status(401).json({ error: 'Invalid email or password' });
     loginSucceeded(req, 'portal:' + email);
     const token = randomBytes(24).toString('hex');
@@ -229,7 +240,7 @@ export default function registerSupport(app, ctx) {
   app.post('/portal/login-link', (req, res) => {
     const email = String((req.body || {}).email || '').trim().toLowerCase();
     if (loginThrottle(req, 'magic:' + email, { max: 5 })) return res.json({ ok: true }); // silently drop; never reveal existence
-    const c = db.prepare("SELECT * FROM customers WHERE lower(billing_email)=? AND portal_enabled=1 AND status!='Closed'").get(email);
+    const c = db.prepare("SELECT * FROM customers WHERE lower(billing_email)=? AND portal_enabled=1 AND archived_at IS NULL AND COALESCE(status,'')!='Closed'").get(email);
     if (c && c.billing_email) {
       const token = randomBytes(24).toString('hex');
       db.prepare("INSERT INTO portal_login_tokens (token,customer_id,expires_at) VALUES (?,?,datetime('now','+30 minutes'))").run(token, c.id);
@@ -242,6 +253,9 @@ export default function registerSupport(app, ctx) {
     const row = db.prepare("SELECT customer_id FROM portal_login_tokens WHERE token=? AND expires_at>datetime('now')").get(req.params.token);
     if (!row) return res.status(400).type('text/plain').send('This login link is invalid or has expired.');
     db.prepare('DELETE FROM portal_login_tokens WHERE token=?').run(req.params.token);
+    // A link posted before the account was archived must not still open a session after it.
+    const live = db.prepare('SELECT id FROM customers WHERE id=? AND archived_at IS NULL AND portal_enabled=1').get(row.customer_id);
+    if (!live) return res.status(400).type('text/plain').send('This login link is invalid or has expired.');
     const token = randomBytes(24).toString('hex');
     db.prepare("INSERT INTO portal_sessions (token,customer_id,expires_at) VALUES (?,?,datetime('now','+30 days'))").run(token, row.customer_id);
     portalCookie(res, token); res.redirect('/portal');

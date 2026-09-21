@@ -690,6 +690,41 @@ export function migrate() {
     verified_at TEXT, verified_send_as TEXT,   -- JSON array of addresses Google says it may send as
     created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
   db.exec('CREATE INDEX IF NOT EXISTS idx_mailboxes_enabled ON mailboxes(enabled)');
+
+  // ---- Archiving: records are deactivated, never destroyed --------------------------------------
+  //
+  // A customer who leaves does not stop having existed. Their signed agreements, the sites they
+  // were served at, the tickets they raised and the invoices they were sent are the company's
+  // record of what happened, and they are wanted years later — for a dispute, an audit, a tax
+  // question, or simply "did we ever serve this address?".
+  //
+  // So the destructive deletes are gone. Archiving sets these three columns; nothing is removed.
+  //
+  // A DEDICATED COLUMN, not a status value. `status` already means the operational state — Active,
+  // Planned, Decommissioned — and those are different questions. A site can be Decommissioned and
+  // still very much on the books; a customer can be archived while their last site reads Active
+  // because nobody updated it. Overloading one column would make "show me everything still live"
+  // unanswerable without knowing which meaning was intended on each row.
+  //
+  // One exception, for customers only: archiving also sets status='Closed', and reactivating sets it
+  // back to Active, because for a customer the two really are the same fact and the pill on every
+  // screen should say so. archived_at stays the thing every query checks.
+  for (const t of ['customers', 'sites', 'pops', 'accounts', 'devices', 'circuits']) {
+    ensure(t, 'archived_at', 'TEXT');        // when; NULL means active
+    ensure(t, 'archived_by', 'TEXT');        // who
+    ensure(t, 'archived_reason', 'TEXT');    // why, in their words
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_customers_archived ON customers(archived_at)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_sites_archived ON sites(archived_at)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_devices_archived ON devices(archived_at)');
+
+  // Customers closed by the earlier version of this feature were marked status='Closed' and nothing
+  // else. Give them an archived_at so they drop out of the lists and stay locked out of the portal
+  // under the same rule as everything archived since. `archived_by` says where the stamp came from
+  // rather than inventing a person; the real who/when is in the audit log. Idempotent: rows that
+  // already have archived_at are untouched.
+  db.prepare(`UPDATE customers SET archived_at=datetime('now'), archived_by='migration: status was Closed'
+    WHERE COALESCE(status,'')='Closed' AND archived_at IS NULL`).run();
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

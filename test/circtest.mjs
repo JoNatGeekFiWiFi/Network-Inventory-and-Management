@@ -49,8 +49,19 @@ c=(await call('/api/circuits/'+cid)).json; ok(c.status==='Standby'&&c.bandwidth=
 // POP endpoint circuit (if pop exists)
 if(pop){ r=await call('/api/circuits',{method:'POST',body:{a_type:'pop',a_ref_id:pop.id,z_type:'site',z_ref_id:s1.id,ctype:'Fiber'}}); const pc=r.json.id; const pl=(await call('/api/circuits?ref=pop:'+pop.id)).json; ok(pl.some(x=>x.id===pc),'POP-endpoint circuit + ref=pop filter'); } else ok(true,'no POP (skipped)');
 
-// delete
-await call('/api/circuits/'+cid2,{method:'DELETE'});
-ok((await call('/api/circuits/'+cid2)).status===404,'delete works');
+// disconnect: archived, not destroyed
+//
+// This asserted a 404 after delete. A disconnected circuit is the record of what a carrier billed
+// for and what was in place when something broke, and the dispute about it arrives months later
+// quoting the circuit ID — so the row stays and the page still opens.
+const arch=await call('/api/circuits/'+cid2,{method:'DELETE',body:{reason:'Disconnected'}});
+ok(arch.status===200&&arch.json.archived===true,'a circuit archives rather than being deleted');
+ok((await call('/api/circuits')).json.every(x=>x.id!==cid2),'and leaves the circuit list');
+ok((await call('/api/circuits?archived=1')).json.some(x=>x.id===cid2),'while ?archived=1 still finds it');
+const gone=await call('/api/circuits/'+cid2);
+ok(gone.status===200&&gone.json.archived_at,'its page still opens, marked with when it was archived');
+ok(gone.json.archived_reason==='Disconnected','and why');
+ok((await call('/api/circuits/'+cid2+'/restore',{method:'POST'})).status===200,'and it can be restored');
+ok((await call('/api/circuits')).json.some(x=>x.id===cid2),'back in the list');
 
 console.log('\nRESULT:',pass,'passed,',fail,'failed'); process.exit(fail?1:0);

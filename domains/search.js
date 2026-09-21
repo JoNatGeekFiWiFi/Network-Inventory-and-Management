@@ -32,6 +32,19 @@ export default function registerSearch(app, ctx) {
   const { db, isPriv, geocode } = ctx;
 
   // Rank: exact match first, then prefix, then anywhere. Keeps "F21T" from burying "F21T-0119142".
+  /**
+   * SEARCH STILL FINDS ARCHIVED RECORDS. That is the point of keeping them.
+   *
+   * A customer who left in 2023 is exactly who somebody is looking for when a dispute, an audit or
+   * an old invoice comes up, and "type the name into the box" has to be the way to find them —
+   * otherwise the archive is a deletion that happens to leave rows behind.
+   *
+   * Two things make that safe: they sort BELOW everything active, so a search for a common name
+   * still puts the live customer first; and they carry a plain "archived" badge, so nobody starts
+   * work on a record that closed two years ago without noticing.
+   */
+  const ARCHIVED_LAST = (alias = '') => `(${alias ? alias + '.' : ''}archived_at IS NOT NULL)`;
+
   const RANK = (col) => `CASE WHEN LOWER(${col})=LOWER(:exact) THEN 0 WHEN ${col} LIKE :pre ESCAPE '\\' THEN 1 ELSE 2 END`;
 
   /**
@@ -78,45 +91,50 @@ export default function registerSearch(app, ctx) {
     },
     {
       type: 'site', label: 'Sites',
-      sql: `SELECT s.id, s.name, s.service_address, s.lat, s.lng, s.status, c.name AS customer
+      sql: `SELECT s.id, s.name, s.service_address, s.lat, s.lng, s.status, s.archived_at, c.name AS customer
             FROM sites s LEFT JOIN customers c ON c.id=s.customer_id
             WHERE s.name LIKE :q ESCAPE '\\' OR s.service_address LIKE :q ESCAPE '\\' OR c.name LIKE :q ESCAPE '\\'
-            ORDER BY ${RANK('s.name')}, s.name LIMIT ${CAP}`,
+            ORDER BY ${ARCHIVED_LAST('s')}, ${RANK('s.name')}, s.name LIMIT ${CAP}`,
       map: r => ({ id: r.id, title: t(r.name), subtitle: [t(r.customer), t(r.service_address)].filter(Boolean).join(' · '),
-                   badge: r.status, href: '#/site/' + r.id, lat: r.lat, lng: r.lng })
+                   badge: r.archived_at ? 'archived' : r.status, archived: !!r.archived_at,
+                   href: '#/site/' + r.id, lat: r.lat, lng: r.lng })
     },
     {
       type: 'pop', label: 'POPs',
-      sql: `SELECT id, name, code, address, lat, lng, status FROM pops
+      sql: `SELECT id, name, code, address, lat, lng, status, archived_at FROM pops
             WHERE name LIKE :q ESCAPE '\\' OR code LIKE :q ESCAPE '\\' OR address LIKE :q ESCAPE '\\'
-            ORDER BY ${RANK('name')}, name LIMIT ${CAP}`,
+            ORDER BY ${ARCHIVED_LAST()}, ${RANK('name')}, name LIMIT ${CAP}`,
       map: r => ({ id: r.id, title: t(r.name), subtitle: [t(r.code), t(r.address)].filter(Boolean).join(' · '),
-                   badge: r.status, href: '#/pop/' + r.id, lat: r.lat, lng: r.lng })
+                   badge: r.archived_at ? 'archived' : r.status, archived: !!r.archived_at,
+                   href: '#/pop/' + r.id, lat: r.lat, lng: r.lng })
     },
     {
       // Identity and location only — no credential columns are selected at all.
       type: 'device', label: 'Devices',
-      sql: `SELECT d.id, d.name, d.serial, d.mac, d.status, d.online, m.manufacturer, m.model
+      sql: `SELECT d.id, d.name, d.serial, d.mac, d.status, d.online, d.archived_at, m.manufacturer, m.model
             FROM devices d LEFT JOIN device_models m ON m.id=d.model_id
             WHERE d.name LIKE :q ESCAPE '\\' OR d.serial LIKE :q ESCAPE '\\' OR d.mac LIKE :q ESCAPE '\\'
                OR d.mgmt_address LIKE :q ESCAPE '\\'
-            ORDER BY ${RANK('d.name')}, d.name LIMIT ${CAP}`,
+            ORDER BY ${ARCHIVED_LAST('d')}, ${RANK('d.name')}, d.name LIMIT ${CAP}`,
       map: r => ({ id: r.id, title: t(r.name), subtitle: [[t(r.manufacturer), t(r.model)].filter(Boolean).join(' '), t(r.serial)].filter(Boolean).join(' · '),
-                   badge: r.online ? 'online' : (r.status || 'offline'), href: '#/device/' + r.id })
+                   badge: r.archived_at ? 'archived' : (r.online ? 'online' : (r.status || 'offline')), archived: !!r.archived_at,
+                   href: '#/device/' + r.id })
     },
     {
       type: 'customer', label: 'Customers',
-      sql: `SELECT id, name, status, billing_email FROM customers
+      sql: `SELECT id, name, status, billing_email, archived_at FROM customers
             WHERE name LIKE :q ESCAPE '\\' OR billing_email LIKE :q ESCAPE '\\' OR sms_number LIKE :q ESCAPE '\\'
-            ORDER BY ${RANK('name')}, name LIMIT ${CAP}`,
-      map: r => ({ id: r.id, title: t(r.name), subtitle: t(r.billing_email), badge: r.status, href: '#/customer/' + r.id })
+            ORDER BY ${ARCHIVED_LAST()}, ${RANK('name')}, name LIMIT ${CAP}`,
+      map: r => ({ id: r.id, title: t(r.name), subtitle: t(r.billing_email),
+                   badge: r.archived_at ? 'archived' : r.status, archived: !!r.archived_at, href: '#/customer/' + r.id })
     },
     {
       type: 'account', label: 'Accounts', priv: true,
-      sql: `SELECT id, name, account_number, status FROM accounts
+      sql: `SELECT id, name, account_number, status, archived_at FROM accounts
             WHERE name LIKE :q ESCAPE '\\' OR account_number LIKE :q ESCAPE '\\'
-            ORDER BY ${RANK('name')}, name LIMIT ${CAP}`,
-      map: r => ({ id: r.id, title: t(r.name), subtitle: t(r.account_number), badge: r.status, href: '#/account/' + r.id })
+            ORDER BY ${ARCHIVED_LAST()}, ${RANK('name')}, name LIMIT ${CAP}`,
+      map: r => ({ id: r.id, title: t(r.name), subtitle: t(r.account_number),
+                   badge: r.archived_at ? 'archived' : r.status, archived: !!r.archived_at, href: '#/account/' + r.id })
     }
   ];
 
@@ -168,8 +186,11 @@ export default function registerSearch(app, ctx) {
 
     const points = [
       ['structure', 'SELECT id, name, kind, lat, lng, status FROM fiber_structures WHERE lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?', r => ({ subtitle: t(r.kind).replace('_', ' '), href: '#/fiber/structure/' + r.id })],
-      ['site', 'SELECT id, name, service_address, lat, lng, status FROM sites WHERE lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?', r => ({ subtitle: t(r.service_address), href: '#/site/' + r.id })],
-      ['pop', 'SELECT id, name, code, address, lat, lng, status FROM pops WHERE lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?', r => ({ subtitle: [t(r.code), t(r.address)].filter(Boolean).join(' · '), href: '#/pop/' + r.id })]
+      // Unlike search, "what is near this point?" is an operational question asked by someone
+      // standing in the field. Archived plant on that map is noise at best and a wasted trip at
+      // worst, so it is left off — it remains findable by name.
+      ['site', 'SELECT id, name, service_address, lat, lng, status FROM sites WHERE archived_at IS NULL AND lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?', r => ({ subtitle: t(r.service_address), href: '#/site/' + r.id })],
+      ['pop', 'SELECT id, name, code, address, lat, lng, status FROM pops WHERE archived_at IS NULL AND lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?', r => ({ subtitle: [t(r.code), t(r.address)].filter(Boolean).join(' · '), href: '#/pop/' + r.id })]
     ];
     for (const [type, sql, extra] of points) {
       const found = [];

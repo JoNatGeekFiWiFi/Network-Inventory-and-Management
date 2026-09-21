@@ -265,13 +265,40 @@ async function route() {
   } catch (e) { if (e.message === 'auth') return; view().innerHTML = `<div class="card" style="padding:20px">Error: ${esc(e.message)}</div>`; }
 }
 
+// ---------- Showing deactivated records ----------
+//
+// Deactivated records are hidden from every list by default, which is the point — but a hidden
+// thing you cannot choose to see is indistinguishable from a deleted one. So every list that can
+// contain them gets the same switch, in the same place, with the same wording.
+//
+// The preference is deliberately NOT remembered across reloads. "Show deactivated" is something you
+// turn on to answer one question; leaving it on silently would put closed customers back in the
+// list that people read as their current book of business, which is the failure the archive exists
+// to prevent.
+let SHOW_ARCHIVED = false;
+function toggleArchived() { SHOW_ARCHIVED = !SHOW_ARCHIVED; route(); }
+
+/** Append to a list URL. `?archived=all` returns active and deactivated together. */
+const archQ = (sep = '?') => (SHOW_ARCHIVED ? sep + 'archived=all' : '');
+
+/** The switch itself. `noun` is plural — "customers", "sites". */
+const archivedToggle = (noun) => `<label class="small sec-muted" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:12px">
+  <input type="checkbox" ${SHOW_ARCHIVED ? 'checked' : ''} onchange="toggleArchived()"
+    aria-label="Also show deactivated ${esc(noun)}">
+  Show deactivated ${esc(noun)}</label>`;
+
+/** The marker on a deactivated row, so it never reads as live at a glance. */
+const archTag = (r) => (r && r.archived_at
+  ? `<span class="tag" style="background:var(--surface2);color:var(--warning);margin-left:6px" title="Deactivated${r.archived_reason ? ' — ' + esc(r.archived_reason) : ''}">deactivated</span>`
+  : '');
+
 // ---------- Sites ----------
 const sitesToggle = (active) => `<div class="seg" style="max-width:340px;margin-bottom:14px">
   <a class="segbtn ${active === 'customer' ? 'on' : ''}" href="#/sites"><i class="ti ti-home"></i> Customer sites</a>
   <a class="segbtn ${active === 'pop' ? 'on' : ''}" href="#/pops"><i class="ti ti-server-2"></i> POP sites</a></div>`;
 
 async function renderSites() {
-  const sites = await api('/sites');
+  const sites = await api('/sites' + archQ());
   const total = sites.length;
   const attention = sites.filter(s => s.needs_attention).length;
   const offline = sites.reduce((n, s) => n + (s.device_total - s.device_online), 0);
@@ -281,7 +308,7 @@ async function renderSites() {
     return `<div class="row rowlink" onclick="location.hash='#/site/${s.id}'">
       <span class="dot" style="background:${statCol};flex:none"></span>
       <div style="flex:1;min-width:0">
-        <div>${esc(s.name)}</div>
+        <div>${esc(s.name)}${archTag(s)}</div>
         <div class="small sec-muted">${esc(s.customer_name || s.account_name || '')}${s.customer_name && s.account_name ? ' · <span class="sec-muted">' + esc(s.account_name) + '</span>' : ''}${s.unit_count ? ` · <b>${s.unit_count} unit${s.unit_count > 1 ? 's' : ''}</b>` : ''}</div>
         <div class="small mono sec-muted">mgmt ${esc(s.current_mgmt_ip || '—')} · pub ${esc(s.current_public_ip || '—')}</div>
       </div>
@@ -291,6 +318,7 @@ async function renderSites() {
   view().innerHTML = `
     <div class="head"><h1 style="flex:1">Sites</h1><a class="btn" href="#/site/new"><i class="ti ti-plus"></i> Add site</a></div>
     ${sitesToggle('customer')}
+    ${archivedToggle('sites')}
     <div class="grid3" style="margin:16px 0">
       <div class="metric"><div class="l">Total sites</div><div class="v">${total}</div></div>
       <div class="metric"><div class="l">Needs attention</div><div class="v" style="color:var(--warning)">${attention}</div></div>
@@ -304,29 +332,106 @@ async function doDelete(path, okMsg, goto) {
   try { await api(path, { method: 'DELETE' }); toast(okMsg); if (typeof goto === 'function') goto(); else location.hash = goto; }
   catch (e) { toast(e.message); }
 }
-function delSite(id, name) {
-  if (confirm(`Delete site "${name}"?\n\nIts connections, notes and access info are removed. Hardware stays in Inventory as unassigned.`))
-    doDelete('/sites/' + id, 'Site deleted', '#/sites');
+
+// ---------- Deactivating a record ----------
+//
+// Business records are never destroyed. A customer who leaves, a site that disconnects, a router
+// that comes out of the field — all of it stays, marked with who deactivated it, when, and why.
+//
+// The dialog says what will happen in the words of the thing being done, because "Delete" followed
+// by a record that is still there is worse than either. It asks for a reason, and does not require
+// one: making the reason mandatory only teaches people to type "x".
+const ARCHIVABLE = {
+  site:     { path: '/sites',     label: 'site',     back: '#/sites',     effect: 'Any hardware here is unassigned and returns to Inventory. Connections, notes, units and access history stay with the site.' },
+  account:  { path: '/accounts',  label: 'account',  back: '#/accounts',  effect: 'Contacts and previous-ISP records stay attached. It stops appearing in pickers on new sites and customers.' },
+  customer: { path: '/customers', label: 'customer', back: '#/customers', effect: 'Portal access ends immediately and recurring billing is paused. Invoices, quotes, tickets, messages, signed documents and their sites are all kept.' },
+  pop:      { path: '/pops',      label: 'POP',      back: '#/pops',      effect: 'Its circuits, patch panels and documentation stay attached.' },
+  device:   { path: '/devices',   label: 'device',   back: '#/inventory', effect: 'It is unassigned from its site, and the platform stops polling and backing it up. Its credentials, telemetry and backup history are kept for when it comes back out of the box.' },
+  circuit:  { path: '/circuits',  label: 'circuit',  back: '#/circuits',  effect: 'Its endpoints, carrier details and history are kept — a billing dispute months from now arrives as a circuit ID.' }
+};
+
+function deactivate(kind, id, name) {
+  const k = ARCHIVABLE[kind]; if (!k) return;
+  const back = document.createElement('div');
+  back.className = 'sheet-back';
+  back.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" aria-label="Deactivate ${esc(k.label)}">
+      <div class="hd" style="padding:12px 14px">
+        <h2 style="min-width:0;overflow:hidden;text-overflow:ellipsis">Deactivate ${esc(k.label)}</h2>
+        <button class="btn sm" data-act="cancel" aria-label="Close without deactivating"><i class="ti ti-x"></i></button>
+      </div>
+      <div class="sheet-body">
+        <p style="margin:0 0 10px">Deactivate <b id="dact-name"></b>?</p>
+        <p class="small" style="margin:0 0 4px">${esc(k.effect)}</p>
+        <p class="small sec-muted" style="margin:0 0 14px">Nothing is deleted. It drops out of the lists and pickers, stays findable in search, and can be reactivated at any time.</p>
+        <label class="lbl" for="dact-reason">Reason <span class="sec-muted">(optional)</span></label>
+        <input id="dact-reason" class="inp" maxlength="200" placeholder="Moved out, disconnected, RMA'd…" autocomplete="off">
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <button class="btn sm primary" data-act="go"><i class="ti ti-archive"></i> Deactivate</button>
+          <button class="btn sm" data-act="cancel">Cancel</button>
+        </div>
+      </div>
+    </div>`;
+  // The name goes in as text: a customer called O'Brien & Sons must not be able to shape markup.
+  back.querySelector('#dact-name').textContent = name || ('#' + id);
+
+  const close = () => { back.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  back.addEventListener('click', async (e) => {
+    if (e.target === back || e.target.closest('[data-act=cancel]')) return close();
+    if (!e.target.closest('[data-act=go]')) return;
+    const reason = back.querySelector('#dact-reason').value.trim();
+    try {
+      await api(`${k.path}/${id}`, { method: 'DELETE', body: { reason } });
+      close();
+      toast(`Deactivated — ${k.label} kept and can be reactivated`);
+      location.hash = k.back;
+    } catch (err) { toast(err.message); }
+  });
+  document.body.appendChild(back);
+  back.querySelector('#dact-reason').focus();
 }
-function delAccount(id, name) {
-  if (confirm(`Delete account "${name}"?\n\nContacts and previous-ISP records go with it. (Blocked while customers or sites still use it.)`))
-    doDelete('/accounts/' + id, 'Account deleted', '#/accounts');
-}
-function deactivateCust(id, name) {
-  if (confirm(`Deactivate "${name}"?\n\nService stops and portal login is turned off. The customer, invoices, sites, tickets, and messages stay on record.`))
-    doDelete('/customers/' + id, 'Customer deactivated', '#/customers');
-}
-async function reactivateCust(id) {
-  try { await api('/customers/' + id, { method: 'PUT', body: JSON.stringify({ status: 'Active' }) }); toast('Customer reactivated'); renderCust(id); }
+
+async function reactivate(kind, id) {
+  const k = ARCHIVABLE[kind]; if (!k) return;
+  try { const r = await api(`${k.path}/${id}/restore`, { method: 'POST', body: {} }); toast(r && r.note ? 'Reactivated. ' + r.note : 'Reactivated'); route(); }
   catch (e) { toast(e.message); }
 }
-function delPop(id, name) {
-  if (confirm(`Delete POP "${name}"?\n\n(Blocked while devices or site connections still use it.)`))
-    doDelete('/pops/' + id, 'POP deleted', '#/pops');
+
+/**
+ * A SQLite timestamp, shown in the reader's own timezone.
+ *
+ * SQLite writes `datetime('now')` as "2026-09-21 18:04:33" — UTC, but with nothing in the string
+ * that says so. Handed to `new Date()` as-is, most browsers read it as LOCAL time, which in Phoenix
+ * puts every archive seven hours in the future. The T and the Z are what make it unambiguous.
+ */
+function archivedWhen(ts) {
+  if (!ts) return '';
+  const d = new Date(String(ts).includes('T') ? ts : String(ts).replace(' ', 'T') + 'Z');
+  return isNaN(d) ? String(ts) : d.toLocaleString();
 }
-function delDevice(id, name) {
-  if (confirm(`Delete device "${name}"?\n\nIts stored credentials, telemetry and backup history are removed. This cannot be undone.`))
-    doDelete('/devices/' + id, 'Device deleted', '#/inventory');
+
+/** The banner on an archived record's own page, so nobody works on it by mistake. */
+function archivedBanner(rec, kind) {
+  if (!rec || !rec.archived_at) return '';
+  const who = rec.archived_by ? ` by ${esc(rec.archived_by)}` : '';
+  const why = rec.archived_reason ? ` — ${esc(rec.archived_reason)}` : '';
+  return `<div class="card" style="border-left:3px solid var(--warning);margin-bottom:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:220px">
+        <b><i class="ti ti-archive"></i> Deactivated</b>
+        <div class="small sec-muted">${esc(archivedWhen(rec.archived_at))}${who}${why}</div>
+      </div>
+      ${isPriv() ? `<button class="btn sm" onclick="reactivate('${kind}', ${Number(rec.id)})" title="Put this ${esc(ARCHIVABLE[kind] ? ARCHIVABLE[kind].label : 'record')} back into the active lists"><i class="ti ti-arrow-back-up"></i> Reactivate</button>` : ''}
+    </div>`;
+}
+
+/** The button that opens the dialog above. One definition, so every record page words it the same. */
+function deactivateBtn(kind, rec) {
+  if (!isPriv() || !rec || rec.archived_at) return '';
+  const k = ARCHIVABLE[kind]; if (!k) return '';
+  const name = rec.name || rec.label || rec.circuit_id || '';
+  return `<button class="btn" onclick="deactivate('${kind}', ${Number(rec.id)}, ${esc(JSON.stringify(name))})"
+    title="Deactivate this ${esc(k.label)} — the record is kept and can be reactivated"><i class="ti ti-archive"></i> Deactivate</button>`;
 }
 function delConn(id, siteId) {
   if (confirm('Delete this connection?')) doDelete('/connections/' + id, 'Connection deleted', () => renderSite(siteId));
@@ -380,10 +485,11 @@ async function renderSite(id) {
   const note = s.notes[0];
   view().innerHTML = `
     <div class="crumb" onclick="location.hash='#/sites'"><i class="ti ti-chevron-left"></i> Sites</div>
+    ${archivedBanner(s, 'site')}
     <div class="head"><div class="t">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(s.name)}</h1>${statusPill(s.status)}</div>
       <div class="small sec-muted" style="margin-top:3px"><span id="custassign"><i class="ti ti-user"></i> ${s.customer ? `<a class="iplink" href="#/customer/${s.customer.id}">${esc(s.customer.name)}</a>` : '<span class="muted">no customer</span>'}${isPriv() ? ` <a class="iplink" style="cursor:pointer" onclick="assignCustomerUI(${s.id}, ${s.customer ? s.customer.id : 'null'})" title="Assign this site to a customer">(${s.customer ? 'change' : 'assign'})</a>` : ''}</span> &nbsp;·&nbsp; <i class="ti ti-building"></i> <a class="iplink" href="#/account/${s.account.id}">${esc(s.account.name)}</a>${s.subaccount ? ' &nbsp;·&nbsp; <i class="ti ti-list-tree"></i> ' + esc(s.subaccount.name) : ''} &nbsp;·&nbsp; <i class="ti ti-map-pin"></i> ${loc(s)}</div>
-    </div><a class="btn" href="#/site/${s.id}/edit"><i class="ti ti-edit"></i> Edit</a>${isPriv() ? `<button class="btn" onclick="delSite(${s.id}, ${esc(JSON.stringify(s.name))})" title="Delete this site — hardware becomes unassigned"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
+    </div><a class="btn" href="#/site/${s.id}/edit"><i class="ti ti-edit"></i> Edit</a>${deactivateBtn('site', s)}</div>
 
     <div class="grid2" style="margin:16px 0">
       <div class="metric"><div class="l"><i class="ti ti-shield-lock"></i> Management IP</div><div class="mono" style="font-size:15px;font-weight:500">${s.current_mgmt_ip ? `<a class="iplink" href="https://${esc(s.current_mgmt_ip)}" target="_blank">${esc(s.current_mgmt_ip)} <i class="ti ti-external-link" style="font-size:11px"></i></a>` : '—'}</div></div>
@@ -437,16 +543,17 @@ function initials(n) { return (n || '?').split(' ').map(x => x[0]).join('').slic
 
 // ---------- POP sites ----------
 async function renderPops() {
-  const pops = await api('/pops');
+  const pops = await api('/pops' + archQ());
   const rows = pops.map(p => `<div class="row rowlink" onclick="location.hash='#/pop/${p.id}'">
     <i class="ti ti-server-2 sec-muted"></i>
-    <div style="flex:1;min-width:0"><div>${esc(p.name)} ${p.code ? `<span class="tag">${esc(p.code)}</span>` : ''}</div>
+    <div style="flex:1;min-width:0"><div>${esc(p.name)} ${p.code ? `<span class="tag">${esc(p.code)}</span>` : ''}${archTag(p)}</div>
       <div class="small sec-muted">${p.address ? esc(p.address) : (p.lat != null ? `${p.lat}, ${p.lng} · GPS` : '—')}</div>
       <div class="small mono sec-muted">mgmt ${esc(p.current_mgmt_ip || '—')} · pub ${esc(p.current_public_ip || '—')}</div></div>
     <div class="stat">${statusPill(p.status)}<span class="small mono">${p.device_online}/${p.device_total} online</span></div>
     <i class="ti ti-chevron-right muted"></i></div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Sites</h1>${isPriv() ? '<a class="btn" href="#/pop/new"><i class="ti ti-plus"></i> Add POP</a>' : ''}</div>
     ${sitesToggle('pop')}
+    ${archivedToggle('POPs')}
     <div class="card">${rows || '<div class="row muted">No POP sites yet</div>'}</div>`;
 }
 async function renderPop(id) {
@@ -462,9 +569,10 @@ async function renderPop(id) {
   const served = p.served_sites.map(s => `<a class="tag" href="#/site/${s.id}" style="margin:2px 4px 2px 0;display:inline-block">${esc(s.name)}</a>`).join('') || '<span class="muted small">No customer sites served</span>';
   view().innerHTML = `
     <div class="crumb" onclick="location.hash='#/pops'"><i class="ti ti-chevron-left"></i> POP sites</div>
+    ${archivedBanner(p, 'pop')}
     <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(p.name)}</h1>${p.code ? `<span class="tag">${esc(p.code)}</span>` : ''}${statusPill(p.status)}</div>
       <div class="small sec-muted" style="margin-top:3px"><i class="ti ti-map-pin"></i> ${where}</div></div>
-      ${isPriv() ? `<a class="btn" href="#/pop/${p.id}/edit"><i class="ti ti-edit"></i> Edit</a><button class="btn" onclick="delPop(${p.id}, ${esc(JSON.stringify(p.name))})" title="Delete this POP (blocked while devices or connections use it)"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
+      ${isPriv() ? `<a class="btn" href="#/pop/${p.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}${deactivateBtn('pop', p)}</div>
     <div class="grid2" style="margin:16px 0">
       <div class="metric"><div class="l"><i class="ti ti-shield-lock"></i> Management IP</div><div class="mono" style="font-size:15px;font-weight:500">${p.current_mgmt_ip ? `<a class="iplink" href="https://${esc(p.current_mgmt_ip)}" target="_blank">${esc(p.current_mgmt_ip)} <i class="ti ti-external-link" style="font-size:11px"></i></a>` : '—'}</div></div>
       <div class="metric"><div class="l"><i class="ti ti-world"></i> Public IP</div><div class="mono" style="font-size:15px;font-weight:500">${esc(p.current_public_ip || '—')}</div></div>
@@ -660,7 +768,7 @@ async function postNote(id) {
 
 // ---------- Customers ----------
 async function renderCustomers() {
-  const list = await api('/accounts');
+  const list = await api('/accounts' + archQ());
   const carriers = await api('/carriers').catch(() => []);
 
   // Group under the carrier the account is with. Accounts with none collect at the bottom rather
@@ -676,7 +784,7 @@ async function renderCustomers() {
 
   const row = a => `<div class="row rowlink" onclick="location.hash='#/account/${a.id}'">
     <div class="av">${initials(a.name)}</div>
-    <div style="flex:1;min-width:0"><div>${esc(a.name)}</div><div class="small mono sec-muted">${esc(a.account_number || '')}</div></div>
+    <div style="flex:1;min-width:0"><div>${esc(a.name)}${archTag(a)}</div><div class="small mono sec-muted">${esc(a.account_number || '')}</div></div>
     <span class="small sec-muted">${a.site_count} site${a.site_count === 1 ? '' : 's'}</span>
     ${statusPill(a.status)}<i class="ti ti-chevron-right muted"></i></div>`;
 
@@ -694,7 +802,8 @@ async function renderCustomers() {
   view().innerHTML = `<div class="head"><h1 style="flex:1">Accounts</h1>
       ${isPriv() ? `<button class="btn" onclick="manageCarriers()"><i class="ti ti-building-broadcast-tower"></i> Carriers</button>
         <a class="btn" href="#/account/new"><i class="ti ti-plus"></i> Add account</a>` : ''}</div>
-    <div style="margin-top:14px">${body}</div>
+    <div style="margin-top:12px">${archivedToggle('accounts')}</div>
+    <div>${body}</div>
     ${empty.length ? `<div class="help">Carriers with no accounts yet: ${empty.map(c => esc(c.name)).join(', ')}.</div>` : ''}`;
 }
 
@@ -769,10 +878,11 @@ async function renderCustomer(id) {
     <i class="ti ti-chevron-right muted"></i></div>`).join('');
   view().innerHTML = `
     <div class="crumb" onclick="location.hash='#/accounts'"><i class="ti ti-chevron-left"></i> Accounts</div>
+    ${archivedBanner(a, 'account')}
     <div class="head"><div class="av" style="width:46px;height:46px;border-radius:8px;font-size:16px">${initials(a.name)}</div>
       <div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(a.name)}</h1>${statusPill(a.status)}</div>
       <div class="small mono sec-muted" style="margin-top:3px">${esc(a.account_number || '')}</div></div>
-      ${isPriv() ? `<a class="btn" href="#/account/${a.id}/edit"><i class="ti ti-edit"></i> Edit</a><button class="btn" onclick="delAccount(${a.id}, ${esc(JSON.stringify(a.name))})" title="Delete this account (blocked while customers or sites use it)"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
+      ${isPriv() ? `<a class="btn" href="#/account/${a.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}${deactivateBtn('account', a)}</div>
     <div class="grid3" style="margin:16px 0">
       <div class="metric"><div class="l">Customers</div><div class="v">${a.customers.length}</div></div>
       <div class="metric"><div class="l">Sites</div><div class="v">${a.sites.length}</div></div>
@@ -833,18 +943,18 @@ async function delSubacct(accountId, sid) {
 
 // ---------- Customers (end clients; served by one or more accounts) ----------
 async function renderCustomerList() {
-  const list = await api('/customers');
-  const showClosed = !!window._showClosedCust;
-  const visible = list.filter(c => showClosed || c.status !== 'Closed');
-  const closedN = list.filter(c => c.status === 'Closed').length;
-  const rows = visible.map(c => `<div class="row rowlink" onclick="location.hash='#/customer/${c.id}'" style="${c.status === 'Closed' ? 'opacity:.65' : ''}">
+  // The server hides deactivated customers unless asked (archQ), the same as every other list —
+  // filtering here instead would mean the "show closed" count was always zero once the server
+  // stopped sending them, which is exactly what happened when the two versions of this met.
+  const list = await api('/customers' + archQ());
+  const rows = list.map(c => `<div class="row rowlink" onclick="location.hash='#/customer/${c.id}'" style="${c.archived_at ? 'opacity:.65' : ''}">
     <div class="av">${initials(c.name)}</div>
-    <div style="flex:1;min-width:0"><div>${esc(c.name)}</div><div class="small sec-muted">${esc(c.account_names || 'no account')}</div></div>
+    <div style="flex:1;min-width:0"><div>${esc(c.name)}${archTag(c)}</div><div class="small sec-muted">${esc(c.account_names || 'no account')}</div></div>
     <span class="small sec-muted">${c.site_count} site${c.site_count == 1 ? '' : 's'}</span>
     ${statusPill(c.status)}<i class="ti ti-chevron-right muted"></i></div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Customers</h1>${isPriv() ? '<a class="btn" href="#/customer/new"><i class="ti ti-plus"></i> Add customer</a>' : ''}</div>
-    <div class="small sec-muted" style="margin:-6px 0 14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">End clients. A customer can be served by one or more accounts. Closed customers stay on record.
-      ${closedN ? `<label style="cursor:pointer"><input type="checkbox" ${showClosed ? 'checked' : ''} onchange="window._showClosedCust=this.checked;renderCustomerList()" style="width:auto"/> Show ${closedN} closed</label>` : ''}</div>
+    <div class="small sec-muted" style="margin:-6px 0 10px">End clients. A customer can be served by one or more accounts. Deactivated customers stay on record.</div>
+    ${archivedToggle('customers')}
     <div class="card">${rows || '<div class="row muted">No customers yet</div>'}</div>`;
 }
 async function renderCust(id) {
@@ -859,10 +969,11 @@ async function renderCust(id) {
   const acctLinks = (c.accounts || []).map(a => `<a class="tag" href="#/account/${a.id}" style="margin:0 4px 0 0">${esc(a.name)}${a.subaccount_name ? ' · ' + esc(a.subaccount_name) : ''}</a>`).join('') || '<span class="muted small">no accounts</span>';
   view().innerHTML = `
     <div class="crumb" onclick="location.hash='#/accounts'"><i class="ti ti-chevron-left"></i> Accounts</div>
+    ${archivedBanner(c, 'customer')}
     <div class="head"><div class="av" style="width:46px;height:46px;border-radius:8px;font-size:16px">${initials(c.name)}</div>
       <div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(c.name)}</h1>${statusPill(c.status)}</div>
       <div class="small sec-muted" style="margin-top:5px">Served by: ${acctLinks}</div></div>
-      ${isPriv() ? `<a class="btn primary" href="#/customer/${c.id}/messages"><i class="ti ti-messages"></i> Messages</a><a class="btn" href="#/customer/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a>${c.status === 'Closed' ? `<button class="btn" onclick="reactivateCust(${c.id})"><i class="ti ti-refresh"></i> Reactivate</button>` : `<button class="btn" onclick="deactivateCust(${c.id}, ${esc(JSON.stringify(c.name))})" title="Stop service. The record stays."><i class="ti ti-player-pause"></i> Deactivate</button>`}` : ''}</div>
+      ${isPriv() ? `<a class="btn primary" href="#/customer/${c.id}/messages"><i class="ti ti-messages"></i> Messages</a><a class="btn" href="#/customer/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a>` : ''}${deactivateBtn('customer', c)}</div>
     <div class="grid3" style="margin:16px 0">
       <div class="metric"><div class="l">Sites</div><div class="v">${c.sites.length}</div></div>
       <div class="metric"><div class="l">Devices</div><div class="v">${c.device_count}</div></div>
@@ -1116,7 +1227,7 @@ async function saveCust(id) {
 
 // ---------- Inventory ----------
 async function renderInventory() {
-  const devs = await api('/devices');
+  const devs = await api('/devices' + archQ());
   let pending = []; if (isPriv()) { try { pending = await api('/enrollments'); } catch {} }
   const pendCard = pending.length ? `<div class="card" style="margin-top:14px;border:1px solid var(--info)">
     <div class="hd"><h2><i class="ti ti-sparkles" style="color:var(--info)"></i> Pending enrollments · ${pending.length}</h2></div>
@@ -1129,12 +1240,13 @@ async function renderInventory() {
     <div class="help" style="padding:8px 14px">Auto-enrolled from the provisioning bench. Assign each to a site/POP and set its details; assigning (or clicking ✓) clears it from this list.</div></div>` : '';
   const rows = devs.map(d => `<div class="row rowlink" onclick="location.hash='#/device/${d.id}'">
     <i class="ti ti-${iconFor(d.device_type)} sec-muted"></i>
-    <div style="flex:1;min-width:0"><div>${esc(d.name)} · ${esc(d.manufacturer || '')} ${esc(d.model || '')} ${d.enroll_pending ? '<span class="tag" style="background:var(--info-bg);color:var(--info)">new</span>' : ''}</div>
+    <div style="flex:1;min-width:0"><div>${esc(d.name)} · ${esc(d.manufacturer || '')} ${esc(d.model || '')} ${d.enroll_pending ? '<span class="tag" style="background:var(--info-bg);color:var(--info)">new</span>' : ''}${archTag(d)}</div>
       <div class="small sec-muted">${esc(d.management_mode === 'provider' ? 'Provider-managed' : 'Platform-managed')} · owned by ${esc(d.ownership)}</div></div>
     <span class="tag">${esc(d.status)}</span>${statusPill(d.online ? 'Online' : 'Offline')}<i class="ti ti-chevron-right muted"></i></div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Inventory</h1><a class="btn" href="#/device/new"><i class="ti ti-plus"></i> Add hardware</a></div>
     ${pendCard}
-    <div class="card" style="margin-top:14px">${rows || '<div class="row muted">No devices</div>'}</div>`;
+    <div style="margin-top:14px">${archivedToggle('hardware')}</div>
+    <div class="card">${rows || '<div class="row muted">No devices</div>'}</div>`;
 }
 async function clearEnroll(id) {
   try { await api('/devices/' + id + '/enroll-clear', { method: 'POST' }); toast('Marked set up'); renderInventory(); } catch (e) { toast(e.message); }
@@ -1260,10 +1372,11 @@ async function renderDevice(id) {
 
   view().innerHTML = `
     <div class="crumb" onclick="history.back()"><i class="ti ti-chevron-left"></i> Back</div>
+    ${archivedBanner(d, 'device')}
     <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(d.name)}</h1>${statusPill(d.online ? 'Online' : 'Offline')}</div>
       <div class="small sec-muted" style="margin-top:3px">${esc(d.manufacturer || '')} ${esc(d.model || '')} · ${esc(d.assigned_label || 'unassigned')}</div></div>
       ${d.mgmt_address ? `<a class="btn" href="https://${esc(d.mgmt_address)}" target="_blank"><i class="ti ti-external-link"></i> Console</a>` : ''}
-      <a class="btn" href="#/device/${d.id}/edit"><i class="ti ti-edit"></i> Edit</a>${isPriv() ? `<button class="btn" onclick="delDevice(${d.id}, ${esc(JSON.stringify(d.name))})" title="Delete this device and its stored credentials/telemetry"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
+      <a class="btn" href="#/device/${d.id}/edit"><i class="ti ti-edit"></i> Edit</a>${deactivateBtn('device', d)}</div>
 
     ${d.management_mode === 'provider' ? '' : `
     <div class="card"><div class="hd"><h2><i class="ti ti-arrows-up-down"></i> WAN traffic</h2><div class="seg" style="flex:none" id="wanrng">

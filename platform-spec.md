@@ -29,6 +29,32 @@ Different departments see different layouts over the **same underlying data**. N
    link carries text or an `aria-label` — a `title` is a tooltip that does not exist on a touchscreen
    and is not a label. Enforced by `test/pwa.mjs`, which also checks that every icon name the app
    uses actually exists in the shipped font, since a missing one renders as nothing with no error.
+7. **Business records are deactivated, never deleted.** A customer who leaves, a site that
+   disconnects, a circuit that is cut over, a router that comes out of the field — the row stays,
+   marked `archived_at` / `archived_by` / `archived_reason`, for as long as the company exists.
+   Disputes, audits and tax questions arrive years later and arrive as a name or a circuit ID, which
+   is worth nothing if the row is gone. This replaced a delete that *refused* whenever anything
+   still pointed at the record: the only customers you could remove were the ones with no history,
+   which are the ones it costs nothing to keep.
+
+   The three rules that make it real, all covered by `test/archive.mjs`:
+
+   - **Hidden, not gone.** Deactivated records drop out of every list and every form picker, and
+     stay reachable by `?archived=1` (only archived) or `?archived=all` (both), by global search —
+     sorted below active records and badged *archived* — and on their own page, which carries a
+     banner and a Reactivate button. An archive you cannot search is a deletion with extra steps.
+   - **Hidden from everyone, not just staff.** A deactivated customer cannot sign in to the portal,
+     by password or by magic link, and the refusal reads as "invalid email or password" rather than
+     announcing that the account is closed. A deactivated device is never polled, backed up or
+     reconciled — the platform stops opening connections to hardware that has left the network,
+     while keeping its credentials for when it comes back out of the box.
+   - **The history stays with it.** Archiving a parent never cascades: invoices, tickets, signed
+     documents, MDU units and files all survive, and a restored record comes back whole. Live counts
+     (`site_count`, `device_count`) exclude archived children, so four closed sites and one open one
+     does not read as five.
+
+   `status` is a different question and is not overloaded for this: it is the operational state —
+   Active, Planned, Decommissioned — of a record that still exists.
 
 ## 3. Entities
 

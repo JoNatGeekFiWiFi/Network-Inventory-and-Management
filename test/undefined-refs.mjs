@@ -44,6 +44,23 @@ const files = [
   'server.js', 'db.js', 'auth.js', 'hash.js', 'wg.js'
 ];
 
+// What a browser supplies that Node does not. Kept deliberately short: every name added here is a
+// name the check stops guarding, so anything not genuinely provided by the browser belongs in the
+// file instead.
+const DOM_GLOBALS = new Set([
+  'window', 'document', 'location', 'history', 'navigator', 'localStorage', 'sessionStorage',
+  'alert', 'confirm', 'prompt', 'FileReader', 'Image', 'Audio', 'WebSocket', 'EventSource',
+  'IntersectionObserver', 'MutationObserver', 'ResizeObserver', 'requestAnimationFrame',
+  'cancelAnimationFrame', 'getComputedStyle', 'matchMedia', 'CustomEvent', 'DOMParser',
+  'HTMLElement', 'Node', 'NodeList', 'Notification', 'self',
+  // service-worker scope (public/sw.js)
+  'caches', 'clients', 'skipWaiting', 'registration', 'importScripts',
+  // libraries loaded from public/vendor by index.html before app.js
+  'L', 'Chart', 'jsQR'
+]);
+
+const KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'return', 'typeof', 'void', 'delete', 'new', 'do', 'try', 'catch', 'throw']);
+
 // ---- the browser files, which nothing was parsing ------------------------------------------------
 //
 // This was added after a syntax error in public/app.js — a stray escape inside a template literal —
@@ -73,20 +90,58 @@ const files = [
       ok(dupes.length === 0, dupes.length === 0
         ? `${file}: no duplicate top-level function declarations`
         : `${file}: ${dupes.join(', ')} declared more than once — the later one silently replaces the earlier`);
+
+      // The same undefined-name check the server files get.
+      //
+      // Added after calling a `fmtDate()` that did not exist. It parsed, it passed every test, and
+      // it would have thrown ReferenceError the first time anyone opened a deactivated record —
+      // blanking the page, because an exception mid-render leaves the view half-written.
+      const missing = undefinedNames(ast, DOM_GLOBALS);
+      const list = [...missing].map(([n, l]) => `${n} (line ${l})`).join(', ');
+      ok(missing.size === 0, `${file}: every name it uses is defined${missing.size ? ' — ' + list : ''}`);
+
+      // AND THE NAMES INSIDE INLINE HANDLERS, which no parser sees.
+      //
+      // `onclick="reactivate(3)"` is a STRING as far as acorn is concerned, so a typo or a renamed
+      // function there survives every static check and fails only when somebody clicks the button.
+      // Most of this interface is wired with inline handlers, so that is most of the buttons.
+      const declared = new Set();
+      walk.full(ast, n => {
+        if ((n.type === 'FunctionDeclaration' || n.type === 'ClassDeclaration') && n.id) declared.add(n.id.name);
+        if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier') declared.add(n.id.name);
+      });
+      const handlerCalls = new Map();
+      // on<event>="name(...)" — the first identifier is the function the browser will look up.
+      for (const m of src.matchAll(/\bon(?:click|change|input|submit|keyup|keydown|blur|focus)\s*=\s*(["'])\s*(?:await\s+)?([A-Za-z_$][\w$]*)\s*\(/g)) {
+        const name = m[2];
+        // A handler may open with a statement — onkeydown="if(event.key==='Enter')save()". The
+        // keyword is not a function call, and treating it as one reports a failure that is not there.
+        if (KEYWORDS.has(name)) continue;
+        if (declared.has(name) || DOM_GLOBALS.has(name) || GLOBALS.has(name)) continue;
+        if (!handlerCalls.has(name)) handlerCalls.set(name, src.slice(0, m.index).split('\n').length);
+      }
+      const bad = [...handlerCalls].map(([n, l]) => `${n} (line ${l})`).join(', ');
+      ok(handlerCalls.size === 0, handlerCalls.size === 0
+        ? `${file}: every inline on*= handler names a function that exists`
+        : `${file}: inline handlers call undefined functions — ${bad}`);
     } catch (e) {
-      ok(false, `${file} PARSES — ${e.message}. This file is the whole interface; a parse error here is a blank application.`);
+      // Only a genuine parse failure should read as one; anything thrown by the checks above says so.
+      const parsed = /parses \(/.test(String(e.message)) === false && e instanceof SyntaxError;
+      ok(false, parsed
+        ? `${file} PARSES — ${e.message}. This file is the whole interface; a parse error here is a blank application.`
+        : `${file}: the static checks threw — ${e.message}`);
     }
   }
 }
 
-for (const file of files) {
-  let src;
-  try { src = readFileSync(file, 'utf8'); } catch { continue; }
-
-  let ast;
-  try { ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'module', locations: true }); }
-  catch (e) { ok(false, `${file}: parses (${e.message})`); continue; }
-
+/**
+ * Every name a file READS but never binds. Returns a Map of name -> first line.
+ *
+ * `extraGlobals` is what the runtime supplies: Node builtins for the server files, the DOM for the
+ * browser ones. Passing the wrong set turns the check into noise, which is how a check like this
+ * ends up switched off.
+ */
+function undefinedNames(ast, extraGlobals = new Set()) {
   // Every binding introduced anywhere in the file. Deliberately not scope-aware: a name bound in
   // one function and used in another is legal at module level often enough that tracking scopes
   // would cost more in false positives than it buys.
@@ -124,14 +179,28 @@ for (const file of files) {
       if (['VariableDeclarator', 'FunctionDeclaration', 'ClassDeclaration'].includes(parent.type) && parent.id === node) return;
       if (parent.type === 'ImportSpecifier' || parent.type === 'ImportDefaultSpecifier' || parent.type === 'ExportSpecifier') return;
       if (['LabeledStatement', 'BreakStatement', 'ContinueStatement'].includes(parent.type)) return;
-      if (bound.has(node.name) || GLOBALS.has(node.name)) return;
+      if (bound.has(node.name) || GLOBALS.has(node.name) || extraGlobals.has(node.name)) return;
       if (!missing.has(node.name)) missing.set(node.name, node.loc.start.line);
     }
   });
 
+  return missing;
+}
+
+
+for (const file of files) {
+  let src;
+  try { src = readFileSync(file, 'utf8'); } catch { continue; }
+
+  let ast;
+  try { ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'module', locations: true }); }
+  catch (e) { ok(false, `${file}: parses (${e.message})`); continue; }
+
+  const missing = undefinedNames(ast);
   const list = [...missing].map(([n, l]) => `${n} (line ${l})`).join(', ');
   ok(missing.size === 0, `${file}: every name it uses is defined${missing.size ? ' — ' + list : ''}`);
 }
+
 
 console.log(`RESULT: ${pass} passed, ${fail} failed`);
 if (fail) process.exitCode = 1;

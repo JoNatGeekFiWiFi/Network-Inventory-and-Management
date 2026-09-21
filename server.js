@@ -993,13 +993,19 @@ function publicDevice(d) {
 }
 
 // ---- meta / lookups ----
+// What the forms build their pickers from.
+//
+// Archived records are left out: this is the list of things you can CHOOSE, and a closed account
+// is not a choice. Nothing here is a way to look a record up — every archived record stays
+// reachable through search and through its own page — so leaving them out costs nothing and stops
+// a new site being attached to a customer who left.
 app.get('/api/meta', (req, res) => {
   res.json({
-    pops: db.prepare('SELECT * FROM pops ORDER BY name').all(),
+    pops: db.prepare('SELECT * FROM pops WHERE archived_at IS NULL ORDER BY name').all(),
     providers: db.prepare('SELECT * FROM upstream_providers ORDER BY name').all(),
     models: db.prepare('SELECT * FROM device_models ORDER BY manufacturer, model').all(),
     controllers: db.prepare('SELECT * FROM controllers ORDER BY name').all(),
-    accounts: db.prepare('SELECT id, name FROM accounts ORDER BY name').all(),
+    accounts: db.prepare('SELECT id, name FROM accounts WHERE archived_at IS NULL ORDER BY name').all(),
     // The device form's Platform picker, built from the registry rather than hardcoded in the page,
     // so adding a driver later does not need a matching edit in the front end.
     platforms: Object.entries(PLATFORMS).map(([key, p]) => ({
@@ -1053,12 +1059,34 @@ app.get('/api/geocode', async (req, res) => {
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 
+/**
+ * Archived records are hidden from the lists people work from, and reachable on request.
+ *
+ * Default: active only. `?archived=1` returns only archived; `?archived=all` returns both.
+ *
+ * Hidden, never gone. Someone looking for a customer who left last year must be able to find them
+ * without a database client — that is the whole point of keeping the record. An archive you cannot
+ * search is a deletion with extra steps.
+ */
+function archiveFilter(req, alias = '') {
+  const col = (alias ? alias + '.' : '') + 'archived_at';
+  const mode = String((req.query || {}).archived || '').toLowerCase();
+  if (mode === 'all') return '';
+  if (mode === '1' || mode === 'true' || mode === 'only') return `${col} IS NOT NULL`;
+  return `${col} IS NULL`;
+}
+function andWhere(...parts) {
+  const p = parts.filter(Boolean);
+  return p.length ? ' WHERE ' + p.join(' AND ') : '';
+}
+
+
 // ---- accounts ----
 app.get('/api/accounts', (req, res) => {
   const rows = db.prepare(`
     SELECT a.*, p.name AS carrier_name,
-      (SELECT COUNT(*) FROM sites s WHERE s.account_id=a.id) AS site_count
-    FROM accounts a LEFT JOIN upstream_providers p ON p.id = a.carrier_id
+      (SELECT COUNT(*) FROM sites s WHERE s.account_id=a.id AND s.archived_at IS NULL) AS site_count
+    FROM accounts a LEFT JOIN upstream_providers p ON p.id = a.carrier_id${andWhere(archiveFilter(req, 'a'))}
     ORDER BY COALESCE(p.name, CHAR(255)), a.name`).all();
   rows.forEach(r => { delete r.pin; delete r.portal_password; delete r.portal_username; delete r.security_questions; }); // never expose secrets in the list
   res.json(rows);
@@ -1107,9 +1135,9 @@ app.get('/api/accounts/:id', (req, res) => {
   a.carrier_name = a.carrier ? a.carrier.name : null;   // the list endpoint exposes this; match it
   a.contacts = db.prepare('SELECT * FROM account_contacts WHERE account_id=?').all(a.id);
   a.previous_isps = db.prepare('SELECT * FROM previous_isps WHERE account_id=?').all(a.id);
-  a.customers = accountCustomers(a.id).map(c => ({ ...c, site_count: db.prepare('SELECT COUNT(*) AS n FROM sites WHERE customer_id=?').get(c.id).n }));
-  a.sites = db.prepare('SELECT * FROM sites WHERE account_id=?').all(a.id).map(withSiteSummary);
-  a.device_count = a.sites.reduce((n, s) => n + s.device_total, 0);
+  a.customers = accountCustomers(a.id).map(c => ({ ...c, site_count: db.prepare('SELECT COUNT(*) AS n FROM sites WHERE customer_id=? AND archived_at IS NULL').get(c.id).n }));
+  a.sites = db.prepare('SELECT * FROM sites WHERE account_id=? ORDER BY (archived_at IS NOT NULL), name').all(a.id).map(withSiteSummary);
+  a.device_count = a.sites.filter(s => !s.archived_at).reduce((n, s) => n + s.device_total, 0);
   a.needs_attention = a.sites.filter(s => s.needs_attention).length;
   a.has_pin = !!a.pin;
   a.has_portal_password = !!a.portal_password;
@@ -1160,16 +1188,11 @@ app.put('/api/accounts/:id', requireNoc, (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete('/api/accounts/:id', requireNoc, (req, res) => {
-  // deleting an account would cascade to its sites — refuse while anything still depends on it
-  const ns = db.prepare('SELECT COUNT(*) AS n FROM sites WHERE account_id=?').get(req.params.id).n;
-  const nc = db.prepare('SELECT COUNT(*) AS n FROM account_customers WHERE account_id=?').get(req.params.id).n;
-  if (ns + nc > 0) return res.status(409).json({ error: `In use by ${nc} customer(s) and ${ns} site(s) — reassign or delete those first` });
-  db.prepare('DELETE FROM accounts WHERE id=?').run(req.params.id);
-  db.prepare('DELETE FROM account_subaccounts WHERE account_id=?').run(req.params.id);
-  audit(req, 'delete', 'account#' + req.params.id);
-  res.json({ ok: true });
-});
+app.delete('/api/accounts/:id', requireNoc, (req, res) =>
+  archiveRecord(req, res, { table: 'accounts', id: req.params.id, label: 'account' }));
+
+app.post('/api/accounts/:id/restore', requireNoc, (req, res) =>
+  restoreRecord(req, res, { table: 'accounts', id: req.params.id, label: 'account' }));
 
 // ---- sub-accounts (many per account; each with its own PIN, status, monthly bill) ----
 const SUBACCT_STATUS = ['active', 'suspended', 'closed'];
@@ -1239,7 +1262,7 @@ function withSiteSummary(s) {
 }
 
 app.get('/api/sites', (req, res) => {
-  const rows = db.prepare('SELECT * FROM sites ORDER BY name').all().map(withSiteSummary);
+  const rows = db.prepare(`SELECT * FROM sites${andWhere(archiveFilter(req))} ORDER BY name`).all().map(withSiteSummary);
   res.json(rows);
 });
 
@@ -1440,9 +1463,11 @@ app.delete('/api/units/:id', requireNoc, (req, res) => {
 const accountIdsFrom = b => { const ids = b.account_ids || (b.account_id ? [b.account_id] : []); return [...new Set(ids.map(Number).filter(Boolean))]; };
 app.get('/api/customers', (req, res) => {
   const acct = req.query.account_id ? Number(req.query.account_id) : null;
-  const where = acct ? ' WHERE c.id IN (SELECT customer_id FROM account_customers WHERE account_id=' + acct + ')' : '';
+  const where = andWhere(
+    acct ? 'c.id IN (SELECT customer_id FROM account_customers WHERE account_id=' + acct + ')' : '',
+    archiveFilter(req, 'c'));
   const rows = db.prepare(`SELECT c.*,
-      (SELECT COUNT(*) FROM sites s WHERE s.customer_id=c.id) AS site_count,
+      (SELECT COUNT(*) FROM sites s WHERE s.customer_id=c.id AND s.archived_at IS NULL) AS site_count,
       (SELECT GROUP_CONCAT(a.name, ', ') FROM account_customers ac JOIN accounts a ON a.id=ac.account_id WHERE ac.customer_id=c.id) AS account_names
     FROM customers c${where} ORDER BY c.name`).all();
   res.json(rows);
@@ -1562,9 +1587,16 @@ app.get('/api/customers/:id', (req, res) => {
   if (!c) return res.status(404).json({ error: 'not found' });
   c.accounts = customerAccounts(c.id);
   c.account = c.accounts[0] || null; // legacy convenience
-  c.sites = db.prepare('SELECT * FROM sites WHERE customer_id=?').all(c.id).map(withSiteSummary);
-  c.device_count = c.sites.reduce((n, s) => n + s.device_total, 0);
-  c.needs_attention = c.sites.filter(s => s.needs_attention).length;
+// A RECORD'S OWN PAGE SHOWS EVERYTHING THAT EVER BELONGED TO IT, archived children included,
+// sorted last. The lists people work from hide archived records; the record's own page is the one
+// place where "what did we ever have here?" is the question being asked, and hiding half the answer
+// there would make the archive useless exactly where it matters. The counts above stay live-only,
+// so a customer with four closed sites and one open one does not read as five.
+  c.sites = db.prepare('SELECT * FROM sites WHERE customer_id=? ORDER BY (archived_at IS NOT NULL), name').all(c.id).map(withSiteSummary);
+  const liveSites = c.sites.filter(s => !s.archived_at);
+  c.device_count = liveSites.reduce((n, s) => n + s.device_total, 0);
+  c.needs_attention = liveSites.filter(s => s.needs_attention).length;
+  c.archived_site_count = c.sites.length - liveSites.length;
   c.has_portal_password = !!c.portal_password; delete c.portal_password;
   c.service = customerServiceLines(c.id);
   res.json(c);
@@ -1596,37 +1628,122 @@ app.put('/api/customers/:id', requireNoc, (req, res) => {
   }
   if (b.portal_enabled !== undefined && nextStatus !== 'Closed') db.prepare('UPDATE customers SET portal_enabled=? WHERE id=?').run(b.portal_enabled ? 1 : 0, req.params.id);
   if (b.portal_password) db.prepare('UPDATE customers SET portal_password=? WHERE id=?').run(hashPassword(String(b.portal_password)), req.params.id);
-  if (nextStatus === 'Closed') deactivateCustomer(req.params.id);
-  audit(req, 'edit', 'customer#' + req.params.id, nextStatus === 'Closed' && ex.status !== 'Closed' ? 'deactivated' : b.name);
+  // Setting the status by hand is the same act as the Deactivate / Reactivate buttons, and must do
+  // the same things — otherwise "Closed" typed into the edit form would leave the portal open and the
+  // recurring invoices running, and the two ways of closing a customer would quietly disagree.
+  const closing = nextStatus === 'Closed' && !ex.archived_at;
+  const reopening = nextStatus !== 'Closed' && ex.archived_at;
+  if (closing) {
+    db.prepare("UPDATE customers SET archived_at=datetime('now'), archived_by=?, archived_reason=COALESCE(?, archived_reason) WHERE id=?")
+      .run((req.user && req.user.email) || null, N(b.archived_reason), ex.id);
+    customerDeactivateEffects(ex.id);
+  } else if (reopening) {
+    db.prepare('UPDATE customers SET archived_at=NULL, archived_by=NULL, archived_reason=NULL WHERE id=?').run(ex.id);
+  }
+  audit(req, closing ? 'archive' : 'edit', 'customer#' + req.params.id,
+    closing ? `${ex.name} — deactivated from the edit form` : reopening ? `restored from archive: ${ex.name}` : b.name);
   res.json({ ok: true });
 });
-// A customer is a business record. Closing one ends service; it does not erase invoices, sites,
-// tickets, or messages. Those stay for the life of the company.
-function deactivateCustomer(id) {
-  const c = db.prepare('SELECT * FROM customers WHERE id=?').get(id);
-  if (!c) return null;
-  db.prepare("UPDATE customers SET status='Closed', portal_enabled=0 WHERE id=?").run(id);
+/**
+ * Archiving, which is what "delete" means here.
+ *
+ * A customer who leaves does not stop having existed. Their signed agreements, the sites they were
+ * served at, the tickets they raised and the invoices they were sent are the company's record of
+ * what happened, and somebody will want them years later — for a dispute, an audit, a tax question,
+ * or just "did we ever serve this address?".
+ *
+ * So nothing is destroyed. The record is marked archived with who, when and why, and drops out of
+ * the lists people work from. Everything hanging off it — documents, files, history — stays exactly
+ * where it is and stays readable.
+ *
+ * This also removes a real problem the old delete had: it REFUSED whenever anything still pointed at
+ * the customer, which is precisely the case for any customer worth keeping. The only customers you
+ * could delete were ones with no history, and those are the ones it costs nothing to keep.
+ */
+function archiveRecord(req, res, { table, id, label, extra = () => {} }) {
+  const row = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  if (row.archived_at) return res.status(409).json({ error: 'Already archived' });
+
+  const reason = String((req.body || {}).reason || '').trim() || null;
+  db.prepare(`UPDATE ${table} SET archived_at=datetime('now'), archived_by=?, archived_reason=? WHERE id=?`)
+    .run((req.user && req.user.email) || null, reason, id);
+  try { extra(row); } catch (e) { console.warn('archive side-effect:', e.message); }
+  audit(req, 'archive', `${label}#${id}`, `${displayOf(row)}${reason ? ' — ' + reason : ''}`);
+  return res.json({ ok: true, archived: true });
+}
+
+/**
+ * Something readable for the audit line.
+ *
+ * Not every archivable table has a `name`: a circuit is identified by its label or its carrier
+ * circuit ID. An audit entry reading "archived circuit#412 —" tells you nothing a year later, which
+ * is the only time anybody reads it.
+ */
+function displayOf(row) {
+  return row.name || row.label || row.circuit_id || row.code || row.serial || '';
+}
+
+function restoreRecord(req, res, { table, id, label, extra = () => {}, note = null }) {
+  const row = db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  db.prepare(`UPDATE ${table} SET archived_at=NULL, archived_by=NULL, archived_reason=NULL WHERE id=?`).run(id);
+  try { extra(row); } catch (e) { console.warn('restore side-effect:', e.message); }
+  audit(req, 'edit', `${label}#${id}`, `restored from archive: ${displayOf(row)}`);
+  return res.json(note ? { ok: true, archived: false, note } : { ok: true, archived: false });
+}
+
+// What deactivating a customer STOPS, as opposed to what it keeps.
+//
+// Two versions of this were written in parallel and merged here. One ended portal access and marked
+// the customer Closed; the other kept who/when/why and hid the record from lists. Both were right,
+// and this does all of it:
+//
+//   * status = 'Closed', so the pill on every screen says so;
+//   * portal sessions and login tokens are revoked, so access ends now rather than when a cookie expires;
+//   * RECURRING BILLING IS PAUSED. A deactivated customer who keeps getting invoiced every month is
+//     the most expensive way this feature could be wrong.
+//
+// portal_enabled is left as it was, so reactivating brings the portal back without anyone having to
+// remember it was on. Access is refused by `archived_at` on every login path instead.
+function customerDeactivateEffects(id) {
+  db.prepare("UPDATE customers SET status='Closed' WHERE id=?").run(id);
   db.prepare('DELETE FROM portal_sessions WHERE customer_id=?').run(id);
   db.prepare('DELETE FROM portal_login_tokens WHERE customer_id=?').run(id);
   db.prepare('UPDATE bill_recurring SET active=0 WHERE customer_id=? AND active=1').run(id);
-  return c;
 }
-app.delete('/api/customers/:id', requireNoc, (req, res) => {
-  const c = deactivateCustomer(req.params.id);
-  if (!c) return res.status(404).json({ error: 'not found' });
-  audit(req, 'edit', 'customer#' + c.id, 'deactivated');
-  res.json({ ok: true, status: 'Closed' });
-});
 
-app.delete('/api/sites/:id', requireNoc, (req, res) => {
-  const s = db.prepare('SELECT * FROM sites WHERE id=?').get(req.params.id);
-  if (!s) return res.status(404).json({ error: 'not found' });
-  // hardware survives the site: back to unassigned (connections/notes/access cascade away)
-  db.prepare("UPDATE devices SET assigned_type=NULL, assigned_site_id=NULL, associated_connection_id=NULL WHERE assigned_type='site' AND assigned_site_id=?").run(s.id);
-  db.prepare('DELETE FROM sites WHERE id=?').run(req.params.id);
-  audit(req, 'delete', 'site#' + req.params.id, s.name);
-  res.json({ ok: true });
-});
+app.delete('/api/customers/:id', requireNoc, (req, res) =>
+  archiveRecord(req, res, {
+    table: 'customers', id: req.params.id, label: 'customer',
+    extra: (c) => customerDeactivateEffects(c.id)
+  }));
+
+// Reactivating does NOT restart recurring billing. Which schedules should resume, and from when, is a
+// decision about money that a Reactivate button should not make on someone's behalf; they are left
+// paused and visible on the Billing page.
+function customerReactivateEffects(id) {
+  db.prepare("UPDATE customers SET status='Active' WHERE id=? AND COALESCE(status,'')='Closed'").run(id);
+}
+app.post('/api/customers/:id/restore', requireNoc, (req, res) =>
+  restoreRecord(req, res, {
+    table: 'customers', id: req.params.id, label: 'customer',
+    extra: (c) => customerReactivateEffects(c.id),
+    note: 'Recurring billing stays paused — resume it on the Billing page if it should continue.'
+  }));
+
+app.delete('/api/sites/:id', requireNoc, (req, res) =>
+  archiveRecord(req, res, {
+    table: 'sites', id: req.params.id, label: 'site',
+    extra: (s) => {
+      // Hardware comes back to the pool — a router does not stay assigned to a site nobody serves —
+      // but the site record, its notes, its access history and its documents all stay.
+      db.prepare("UPDATE devices SET assigned_type=NULL, assigned_site_id=NULL, associated_connection_id=NULL WHERE assigned_type='site' AND assigned_site_id=?").run(s.id);
+    }
+  }));
+
+app.post('/api/sites/:id/restore', requireNoc, (req, res) =>
+  restoreRecord(req, res, { table: 'sites', id: req.params.id, label: 'site' }));
 
 app.delete('/api/connections/:id', requireNoc, (req, res) => {
   const c = db.prepare('SELECT * FROM connections WHERE id=?').get(req.params.id);
@@ -1643,7 +1760,7 @@ function withPopSummary(p) {
   return { ...p, device_online: devs.filter(d => d.online).length, device_total: devs.length };
 }
 app.get('/api/pops', (req, res) => {
-  res.json(db.prepare('SELECT * FROM pops ORDER BY name').all().map(withPopSummary));
+  res.json(db.prepare(`SELECT * FROM pops${andWhere(archiveFilter(req))} ORDER BY name`).all().map(withPopSummary));
 });
 app.get('/api/pops/:id', (req, res) => {
   const p = db.prepare('SELECT * FROM pops WHERE id=?').get(req.params.id);
@@ -1698,7 +1815,7 @@ app.get('/api/circuits-options', (req, res) => {
 });
 app.get('/api/circuits', (req, res) => {
   const q = '%' + String(req.query.q || '').trim() + '%'; const st = String(req.query.status || '');
-  let rows = db.prepare('SELECT * FROM circuits ORDER BY id DESC').all().map(decorateCircuit);
+  let rows = db.prepare(`SELECT * FROM circuits${andWhere(archiveFilter(req))} ORDER BY id DESC`).all().map(decorateCircuit);
   if (req.query.ref) { const [t, idr] = String(req.query.ref).split(':'); const rid = Number(idr); rows = rows.filter(c => (c.a_type === t && c.a_ref_id === rid) || (c.z_type === t && c.z_ref_id === rid)); }
   if (st) rows = rows.filter(c => c.status === st);
   if (req.query.q) { const needle = String(req.query.q).toLowerCase(); rows = rows.filter(c => [c.label, c.circuit_id, c.a_name, c.z_name, c.provider_name, c.bandwidth, c.ctype].some(x => (x || '').toLowerCase().includes(needle))); }
@@ -1740,11 +1857,15 @@ app.put('/api/circuits/:id', requireNoc, (req, res) => {
   audit(req, 'edit', 'circuit#' + req.params.id, v.label || '');
   res.json({ ok: true });
 });
-app.delete('/api/circuits/:id', requireNoc, (req, res) => {
-  db.prepare('DELETE FROM circuits WHERE id=?').run(req.params.id);
-  audit(req, 'delete', 'circuit#' + req.params.id);
-  res.json({ ok: true });
-});
+// A disconnected circuit is archived, not deleted.
+//
+// The circuit record is what tells you what a carrier billed for, which strands were lit, and what
+// was in place on the day something broke. Disputes about circuits arrive months after the
+// disconnect, and they arrive as a circuit ID — which is worth nothing if the row is gone.
+app.delete('/api/circuits/:id', requireNoc, (req, res) =>
+  archiveRecord(req, res, { table: 'circuits', id: req.params.id, label: 'circuit' }));
+app.post('/api/circuits/:id/restore', requireNoc, (req, res) =>
+  restoreRecord(req, res, { table: 'circuits', id: req.params.id, label: 'circuit' }));
 
 // ---- patch panel documentation (per site or POP; opt-in) ----
 const PATCH_PORT_STATUS = ['free', 'used', 'reserved'];
@@ -1862,14 +1983,11 @@ app.put('/api/pops/:id', requireNoc, (req, res) => {
   audit(req, 'edit', 'pop#' + req.params.id, b.name);
   res.json({ ok: true });
 });
-app.delete('/api/pops/:id', requireNoc, (req, res) => {
-  const d = db.prepare("SELECT COUNT(*) AS n FROM devices WHERE assigned_type='pop' AND assigned_pop_id=?").get(req.params.id);
-  const c = db.prepare("SELECT COUNT(*) AS n FROM connections WHERE served_type='pop' AND served_pop_id=?").get(req.params.id);
-  if (d.n + c.n > 0) return res.status(409).json({ error: `In use by ${d.n} device(s) and ${c.n} connection(s)` });
-  db.prepare('DELETE FROM pops WHERE id=?').run(req.params.id);
-  audit(req, 'delete', 'pop#' + req.params.id);
-  res.json({ ok: true });
-});
+app.delete('/api/pops/:id', requireNoc, (req, res) =>
+  archiveRecord(req, res, { table: 'pops', id: req.params.id, label: 'pop' }));
+
+app.post('/api/pops/:id/restore', requireNoc, (req, res) =>
+  restoreRecord(req, res, { table: 'pops', id: req.params.id, label: 'pop' }));
 
 // ---- note attachments (pictures + PDFs) ----
 // Photos render inline; documents are download-only (see the GET handler) so nothing
@@ -2034,7 +2152,7 @@ app.post('/api/sites/:id/connections', (req, res) => {
 
 // ---- devices ----
 app.get('/api/devices', (req, res) => {
-  const rows = db.prepare('SELECT d.*, m.manufacturer, m.model, m.device_type FROM devices d LEFT JOIN device_models m ON m.id=d.model_id ORDER BY d.name').all().map(publicDevice);
+  const rows = db.prepare(`SELECT d.*, m.manufacturer, m.model, m.device_type FROM devices d LEFT JOIN device_models m ON m.id=d.model_id${andWhere(archiveFilter(req, 'd'))} ORDER BY d.name`).all().map(publicDevice);
   res.json(rows);
 });
 
