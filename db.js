@@ -185,7 +185,7 @@ export function migrate() {
   db.exec("CREATE TABLE IF NOT EXISTS ticket_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL, author_type TEXT NOT NULL, author TEXT, body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))");
   db.exec('CREATE INDEX IF NOT EXISTS idx_ticketmsg ON ticket_messages(ticket_id)');
   // Omnichannel tickets: every message carries a channel + direction so email/SMS/WhatsApp all thread into one ticket
-  ensure('ticket_messages', 'channel', "TEXT NOT NULL DEFAULT 'portal'");   // portal|email|sms|whatsapp|note
+  ensure('ticket_messages', 'channel', "TEXT NOT NULL DEFAULT 'portal'");   // portal|email|sms|whatsapp|imessage|facetime|rcs|note
   ensure('ticket_messages', 'direction', "TEXT NOT NULL DEFAULT 'out'");    // in|out
   ensure('ticket_messages', 'external_id', 'TEXT');                          // provider msg id / email Message-ID (dedupe)
   ensure('ticket_messages', 'delivery_status', 'TEXT');                      // queued|sent|delivered|failed
@@ -205,7 +205,16 @@ export function migrate() {
   // Customer contact points for outbound SMS/WhatsApp + inbound number->customer matching
   ensure('customers', 'sms_number', 'TEXT');
   ensure('customers', 'whatsapp_number', 'TEXT');
-  ensure('customers', 'preferred_channel', 'TEXT');                          // email|sms|whatsapp (fallback for staff-initiated)
+  ensure('customers', 'preferred_channel', 'TEXT');                          // email|sms|whatsapp|imessage (default on the customer Messages page)
+  ensure('customers', 'comm_reply_token', 'TEXT');                           // Reply-To token so email replies land on the customer timeline
+  db.exec('CREATE INDEX IF NOT EXISTS idx_cust_comm_reply ON customers(comm_reply_token)');
+  db.exec(`CREATE TABLE IF NOT EXISTS customer_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL,
+    channel TEXT NOT NULL, direction TEXT NOT NULL DEFAULT 'out', author TEXT, body TEXT NOT NULL, subject TEXT,
+    external_id TEXT, to_addr TEXT, from_addr TEXT, delivery_status TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_custmsg ON customer_messages(customer_id, id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_custmsg_ext ON customer_messages(external_id)');
   // Patch panel documentation — opt-in per site/POP, one+ panels each with labelled ports
   ensure('sites', 'patch_enabled', 'INTEGER NOT NULL DEFAULT 0');
   ensure('pops', 'patch_enabled', 'INTEGER NOT NULL DEFAULT 0');

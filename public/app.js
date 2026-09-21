@@ -219,6 +219,7 @@ async function route() {
     if (p[0] === 'account') { setNav('accounts'); return await renderCustomer(p[1]); }
     if (p[0] === 'customer' && p[1] === 'new') { setNav('accounts'); return await formCust(q); }
     if (p[0] === 'customer' && p[2] === 'edit') { setNav('accounts'); return await formCust({ id: p[1] }); }
+    if (p[0] === 'customer' && p[2] === 'messages') { setNav('customers'); return await renderCustComms(p[1]); }
     if (p[0] === 'customer') { setNav('accounts'); return await renderCust(p[1]); }
     if (p[0] === 'inventory') { setNav('inventory'); return await renderInventory(); }
     if (p[0] === 'device' && p[1] === 'new') { setNav('inventory'); return await formDevice(q); }
@@ -853,7 +854,7 @@ async function renderCust(id) {
     <div class="head"><div class="av" style="width:46px;height:46px;border-radius:8px;font-size:16px">${initials(c.name)}</div>
       <div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(c.name)}</h1>${statusPill(c.status)}</div>
       <div class="small sec-muted" style="margin-top:5px">Served by: ${acctLinks}</div></div>
-      ${isPriv() ? `<a class="btn" href="#/customer/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a><button class="btn" onclick="delCust(${c.id}, ${esc(JSON.stringify(c.name))})" title="Delete this customer (blocked while it has sites)"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
+      ${isPriv() ? `<a class="btn primary" href="#/customer/${c.id}/messages"><i class="ti ti-messages"></i> Messages</a><a class="btn" href="#/customer/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a><button class="btn" onclick="delCust(${c.id}, ${esc(JSON.stringify(c.name))})" title="Delete this customer (blocked while it has sites)"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
     <div class="grid3" style="margin:16px 0">
       <div class="metric"><div class="l">Sites</div><div class="v">${c.sites.length}</div></div>
       <div class="metric"><div class="l">Devices</div><div class="v">${c.device_count}</div></div>
@@ -905,6 +906,66 @@ async function loadDocumentsFor(parentType, parentId) {
 
 function newDocumentFor(parentType, parentId) {
   newDocument({ parent_type: parentType, parent_id: parentId });
+}
+const COMM_CHANS = [
+  { v: 'email', l: 'Email' },
+  { v: 'sms', l: 'SMS / RCS' },
+  { v: 'whatsapp', l: 'WhatsApp' },
+  { v: 'imessage', l: 'iMessage' }
+];
+function commDest(c, ch) {
+  if (ch === 'email') return c.billing_email || 'no billing email';
+  if (ch === 'whatsapp') return c.whatsapp_number || c.sms_number || 'no WhatsApp number';
+  return c.sms_number || c.whatsapp_number || 'no phone number';
+}
+async function renderCustComms(id) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  const data = await api('/customers/' + id + '/messages');
+  const c = data.customer;
+  const dflt = COMM_CHANS.some(x => x.v === c.preferred_channel) ? c.preferred_channel : 'email';
+  const msgs = (data.messages || []).map(m => {
+    const failed = m.delivery_status === 'failed';
+    return `<div class="card" style="margin-bottom:10px;padding:12px 14px;${m.direction === 'out' ? 'border-left:3px solid var(--accent)' : ''}">
+      <div class="small sec-muted" style="margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><b>${m.direction === 'out' ? 'Staff' : 'Customer'}</b>${m.author ? '· ' + esc(m.author) : ''} · ${esc(m.created_at)} ${chanBadge(m.channel)}${m.ticket_id ? `<a class="small" href="#/tickets/${m.ticket_id}">${esc(m.ticket_number || 'ticket')}</a>` : ''}${failed ? '<span class="pill s-down" style="padding:1px 8px;font-size:11px">not delivered</span>' : ''}</div>
+      ${m.subject ? `<div class="small" style="margin-bottom:4px">${esc(m.subject)}</div>` : ''}
+      <div style="white-space:pre-wrap">${esc(m.body)}</div></div>`;
+  }).join('');
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/customer/${c.id}'"><i class="ti ti-chevron-left"></i> ${esc(c.name)}</div>
+    <div class="head"><div class="t"><h1>Messages</h1>
+      <div class="small sec-muted" style="margin-top:3px">${esc(c.name)} · one history. Switching the channel only changes how the next message is sent.</div></div></div>
+    <div style="margin-top:14px">${msgs || '<div class="card muted" style="padding:14px">No messages yet. Send the first one below.</div>'}</div>
+    <div class="box" style="margin-top:14px" id="commbox">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <label class="fl" style="margin:0">Send via</label>
+        <select id="commchan" style="width:auto" onchange="commChanHint(${c.id})">${COMM_CHANS.map(x => `<option value="${x.v}" ${x.v === dflt ? 'selected' : ''}>${x.l}</option>`).join('')}</select>
+        <span class="small sec-muted" id="commhint"></span>
+      </div>
+      <input id="commsubj" placeholder="Email subject (optional)" style="margin-bottom:8px"/>
+      <textarea id="commbody" rows="3" placeholder="Message to ${esc(c.name)}…"></textarea>
+      <div style="display:flex;justify-content:flex-end;margin-top:8px"><button class="btn primary" onclick="sendCustComm(${c.id})"><i class="ti ti-send"></i> Send</button></div>
+    </div>`;
+  window._commCust = c;
+  commChanHint();
+}
+function commChanHint() {
+  const c = window._commCust; if (!c || !$('#commchan')) return;
+  const ch = $('#commchan').value;
+  const subj = $('#commsubj');
+  if (subj) subj.style.display = ch === 'email' ? '' : 'none';
+  const el = $('#commhint');
+  if (el) el.textContent = 'To ' + commDest(c, ch);
+}
+async function sendCustComm(id) {
+  const body = $('#commbody').value.trim();
+  if (!body) { toast('Enter a message'); return; }
+  const channel = $('#commchan').value;
+  const subject = channel === 'email' && $('#commsubj') ? $('#commsubj').value.trim() : '';
+  try {
+    const r = await api('/customers/' + id + '/messages', { method: 'POST', body: JSON.stringify({ body, channel, subject }) });
+    const via = r.transport === 'rcs' ? 'RCS' : ((COMM_CHANS.find(x => x.v === r.channel) || {}).l || r.channel);
+    toast(r.delivered === false ? ('Saved, but delivery failed: ' + (r.error || '')) : ('Sent via ' + via));
+    renderCustComms(id);
+  } catch (e) { toast(e.message); }
 }
 // Inline pickers: assign a site to a customer (from either end)
 async function assignCustomerUI(siteId, currentId) {
@@ -960,7 +1021,8 @@ async function formCust(q) {
       ${field('Billing email (invoices + portal login)', 'billing_email', c.billing_email || '', { mono: true, ph: 'billing@customer.com' })}
       <div class="grid2">${field('SMS number', 'sms_number', c.sms_number || '', { mono: true, ph: '+15551234567' })}${field('WhatsApp number', 'whatsapp_number', c.whatsapp_number || '', { mono: true, ph: '+15551234567' })}</div>
       <div class="help">Used to send &amp; receive ticket messages by text. Include the country code (E.164).</div>
-      ${field('Preferred channel (staff-started messages)', 'preferred_channel', c.preferred_channel || '', { type: 'select', options: [{ v: '', l: 'Auto (reply on their channel)' }, { v: 'email', l: 'Email' }, { v: 'sms', l: 'SMS' }, { v: 'whatsapp', l: 'WhatsApp' }] })}
+      ${field('Preferred channel (staff-started messages)', 'preferred_channel', c.preferred_channel || '', { type: 'select', options: [{ v: '', l: 'Auto (reply on their channel)' }, { v: 'email', l: 'Email' }, { v: 'sms', l: 'SMS' }, { v: 'whatsapp', l: 'WhatsApp' }, { v: 'imessage', l: 'iMessage' }] })}
+      <div class="help">The Messages page remembers this as the default. Staff can switch email, SMS/RCS, WhatsApp, or iMessage on any send; the history stays one thread.</div>
       ${field('Notes', 'notes', c.notes, { type: 'textarea' })}
       ${q.id ? `<div class="fld" style="border-top:.5px solid var(--border);padding-top:12px;margin-top:6px">
         <label class="row" style="cursor:pointer;padding:0"><input type="checkbox" id="portalEnabled" ${c.portal_enabled ? 'checked' : ''} style="width:auto"/>
@@ -2371,8 +2433,8 @@ async function renderSettings() {
       <div class="help">New site-access requests email the "notify" address; approving/denying a request emails the requester. Requires a working SMTP server + From address. Save before sending a test.</div>
     </div>
     <div class="card" style="padding:16px" id="messaging">
-      <h2 style="margin-bottom:12px"><i class="ti ti-messages"></i> Ticket messaging (SMS · WhatsApp · inbound email)</h2>
-      <div class="small sec-muted" style="margin:-6px 0 12px">Two-way ticket messaging. Outbound email uses the SMTP settings above; configure SMS/WhatsApp providers and inbound email here.</div>
+      <h2 style="margin-bottom:12px"><i class="ti ti-messages"></i> Ticket messaging (SMS · WhatsApp · iMessage · FaceTime)</h2>
+      <div class="small sec-muted" style="margin:-6px 0 12px">Two-way ticket messaging. Outbound email uses the SMTP settings above; SMS/WhatsApp use Twilio or Telnyx; iMessage and FaceTime go through the Mac signed into 602-456-5656.</div>
       <div class="grid2">${field('SMS provider', 'sms_provider', s.sms_provider, { type: 'select', options: [{ v: 'twilio', l: 'Twilio' }, { v: 'telnyx', l: 'Telnyx' }] })}${field('WhatsApp provider', 'whatsapp_provider', s.whatsapp_provider, { type: 'select', options: [{ v: 'twilio', l: 'Twilio' }, { v: 'telnyx', l: 'Telnyx' }] })}</div>
       <div style="border-top:.5px solid var(--border);margin:10px 0;padding-top:10px"><b class="small">Twilio</b></div>
       ${field('Account SID', 'twilio_sid', s.twilio_sid, { mono: true, ph: 'ACxxxx…' })}
@@ -2390,13 +2452,17 @@ async function renderSettings() {
       <div class="grid2">${field('IMAP username', 'imap_user', s.imap_user, { mono: true, ph: 'support@geekitek.com' })}${field('IMAP password', 'imap_pass', '', { mono: true, ph: s.has_imap_pass ? 'unchanged' : 'mailbox / app password' })}</div>
       <label class="row" style="cursor:pointer;padding:6px 0"><input type="checkbox" id="imapTls" ${s.imap_tls ? 'checked' : ''} style="width:auto"/>
         <div style="flex:1"><div>Use TLS (port 993)</div><div class="small sec-muted">The mailbox is polled about once a minute for unseen mail.</div></div></label>
+      <div style="border-top:.5px solid var(--border);margin:10px 0;padding-top:10px"><b class="small">Mac iMessage / FaceTime bridge</b></div>
+      <div class="small sec-muted" style="margin:0 0 10px">Runs on the Mac that stays signed into Messages as +1 (602) 456-5656. Put that Mac on the same ZeroTier network or WireGuard overlay as this server, and use its overlay address. Do not expose it on the public internet.</div>
+      <div class="grid2">${field('Bridge URL', 'imessage_bridge_url', s.imessage_bridge_url, { mono: true, ph: 'http://10.20.1.50:8787' })}${field('Bridge token', 'imessage_bridge_token', '', { mono: true, ph: s.has_imessage_bridge_token ? 'unchanged' : 'from the Mac config.json' })}</div>
       <div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" onclick="saveMessaging()"><i class="ti ti-check"></i> Save</button></div>
       <div class="box" style="margin-top:12px"><div class="small" style="margin-bottom:6px"><b>Inbound webhook URLs</b> — paste these into your provider consoles${s.inbound_secret ? '' : ' (save once to generate the secret)'}:</div>
         ${s.inbound_secret && s.public_base_url_effective ? `
         <div class="fld"><label class="fl">Twilio (SMS + WhatsApp)</label><input readonly value="${esc(s.public_base_url_effective + '/inbound/twilio/' + s.inbound_secret)}" style="font-family:var(--mono);background:var(--surface2)"/></div>
         <div class="fld"><label class="fl">Telnyx (SMS + WhatsApp)</label><input readonly value="${esc(s.public_base_url_effective + '/inbound/telnyx/' + s.inbound_secret)}" style="font-family:var(--mono);background:var(--surface2)"/></div>
-        <div class="fld"><label class="fl">Email (Mailgun / Postmark / SendGrid parse)</label><input readonly value="${esc(s.public_base_url_effective + '/inbound/email/' + s.inbound_secret)}" style="font-family:var(--mono);background:var(--surface2)"/></div>` : '<div class="small sec-muted">Set the Public server URL (in Zero-touch provisioning) and save this section to generate your webhook URLs.</div>'}
-        <div class="help">For email replies to thread automatically, keep the <span class="mono">[TKT-####]</span> subject tag and the <span class="mono">Reply-To</span> address intact (both are set on outgoing mail). IMAP polling needs no webhooks — just the mailbox login above.</div></div>
+        <div class="fld"><label class="fl">Email (Mailgun / Postmark / SendGrid parse)</label><input readonly value="${esc(s.public_base_url_effective + '/inbound/email/' + s.inbound_secret)}" style="font-family:var(--mono);background:var(--surface2)"/></div>
+        <div class="fld"><label class="fl">Mac bridge (iMessage · FaceTime · RCS/SMS from Messages.app)</label><input readonly value="${esc(s.public_base_url_effective + '/inbound/imessage/' + s.inbound_secret)}" style="font-family:var(--mono);background:var(--surface2)"/></div>` : '<div class="small sec-muted">Set the Public server URL (in Zero-touch provisioning) and save this section to generate your webhook URLs.</div>'}
+        <div class="help">For email replies to thread automatically, keep the <span class="mono">[TKT-####]</span> subject tag and the <span class="mono">Reply-To</span> address intact (both are set on outgoing mail). IMAP polling needs no webhooks — just the mailbox login above. On the Mac, set <span class="mono">webhookUrl</span> to this server’s ZeroTier or WireGuard address plus <span class="mono">/inbound/imessage/…</span>, so that traffic stays on the management overlay.</div></div>
     </div>
     <div class="card"><div class="row rowlink" onclick="location.hash='#/importwiz'">
       <i class="ti ti-table-import sec-muted"></i>
@@ -2612,7 +2678,7 @@ async function saveMail() {
 async function saveMessaging() {
   const d = collect('#messaging');
   d.imap_tls = $('#imapTls').checked;
-  for (const k of ['twilio_token', 'telnyx_key', 'imap_pass']) if (!d[k]) delete d[k]; // blank = keep existing secret
+  for (const k of ['twilio_token', 'telnyx_key', 'imap_pass', 'imessage_bridge_token']) if (!d[k]) delete d[k]; // blank = keep existing secret
   try { await api('/settings', { method: 'PUT', body: JSON.stringify(d) }); toast('Messaging settings saved'); renderSettings(); } catch (e) { toast(e.message); }
 }
 async function loadTokens() {
@@ -4685,7 +4751,7 @@ async function savePort(panelId, n, clear) {
 
 const TICKET_PILL = { open: 's-warn', in_progress: 's-warn', waiting: '', resolved: 's-up', closed: '' };
 const TICKET_PRIO_COL = { low: 'var(--muted)', normal: 'var(--text2)', high: 'var(--warning)', urgent: 'var(--danger)' };
-const CHAN = { portal: { i: 'ti-browser', l: 'Portal' }, email: { i: 'ti-mail', l: 'Email' }, sms: { i: 'ti-message', l: 'SMS' }, whatsapp: { i: 'ti-brand-whatsapp', l: 'WhatsApp' }, note: { i: 'ti-note', l: 'Note' } };
+const CHAN = { portal: { i: 'ti-browser', l: 'Portal' }, email: { i: 'ti-mail', l: 'Email' }, sms: { i: 'ti-message', l: 'SMS' }, whatsapp: { i: 'ti-brand-whatsapp', l: 'WhatsApp' }, imessage: { i: 'ti-brand-apple', l: 'iMessage' }, facetime: { i: 'ti-video', l: 'FaceTime' }, rcs: { i: 'ti-message-2', l: 'RCS' }, note: { i: 'ti-note', l: 'Note' } };
 function chanBadge(ch) { const c = CHAN[ch] || CHAN.portal; return `<span class="pill" style="padding:1px 8px;font-size:11px"><i class="ti ${c.i}"></i> ${c.l}</span>`; }
 function ticketPill(s) { return `<span class="pill ${TICKET_PILL[s] || ''}">${esc((s || '').replace('_', ' '))}</span>`; }
 async function renderTickets() {
@@ -4724,7 +4790,7 @@ async function renderTicket(id) {
     <div style="white-space:pre-wrap">${esc(m.body)}</div></div>`).join('') || '<div class="card muted" style="padding:12px 14px">No messages</div>';
   // default the reply channel to the customer's last-used channel (portal has no external delivery)
   const dflt = t.last_channel || t.channel || 'portal';
-  const chOpts = ['portal', 'email', 'sms', 'whatsapp'].map(c => `<option value="${c}" ${c === dflt ? 'selected' : ''}>${CHAN[c].l}</option>`).join('');
+  const chOpts = ['portal', 'email', 'sms', 'whatsapp', 'imessage', 'facetime'].map(c => `<option value="${c}" ${c === dflt ? 'selected' : ''}>${CHAN[c].l}</option>`).join('');
   const contact = [t.contact_email, t.contact_phone].filter(Boolean).join(' · ');
   view().innerHTML = `<div class="crumb" onclick="location.hash='#/tickets'"><i class="ti ti-chevron-left"></i> Support</div>
     <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(t.number)}</h1>${ticketPill(t.status)}${chanBadge(t.channel)}</div>
@@ -4738,7 +4804,7 @@ async function renderTicket(id) {
     <div class="box"><textarea id="tkreply" rows="3" placeholder="Reply to the customer…"></textarea>
       <div style="display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap"><label class="fl" style="margin:0">Send via</label>
         <select id="tkchan" style="width:auto">${chOpts}</select>
-        <span class="small sec-muted" style="flex:1">Portal-only messages show in the customer portal; email/SMS/WhatsApp are delivered to their contact info.</span>
+        <span class="small sec-muted" style="flex:1">Portal stays in the customer portal. Email/SMS/WhatsApp use the cloud providers. iMessage and FaceTime run on the Mac signed into 602-456-5656.</span>
         <button class="btn primary" onclick="replyTicket(${t.id})"><i class="ti ti-send"></i> Send reply</button></div></div>`;
 }
 async function saveTicketCtl(id) { const d = collect('#tkctl'); try { await api('/tickets/' + id, { method: 'PUT', body: JSON.stringify(d) }); toast('Updated'); renderTicket(id); } catch (e) { toast(e.message); } }

@@ -508,6 +508,8 @@ app.get('/api/settings', requireNoc, (req, res) => {
     telnyx_wa_from: getSetting('telnyx_wa_from') || '',
     telnyx_profile: getSetting('telnyx_profile') || '',
     has_telnyx_key: !!getSetting('telnyx_key'),
+    imessage_bridge_url: getSetting('imessage_bridge_url') || '',
+    has_imessage_bridge_token: !!getSetting('imessage_bridge_token'),
     email_inbound_method: getSetting('email_inbound_method') || 'imap',
     imap_host: getSetting('imap_host') || '',
     imap_port: getSetting('imap_port') || '993',
@@ -537,7 +539,7 @@ app.put('/api/settings', requireNoc, (req, res) => {
   if (b.prov_admin_password) setSetting('prov_admin_password', String(b.prov_admin_password));
   if (b.prov_wifi_password) setSetting('prov_wifi_password', String(b.prov_wifi_password));
   // omnichannel messaging config
-  for (const k of ['twilio_sid', 'twilio_sms_from', 'twilio_wa_from', 'twilio_messaging_service_sid', 'twilio_rcs_fallback_from', 'telnyx_sms_from', 'telnyx_wa_from', 'telnyx_profile', 'imap_host', 'imap_port', 'imap_user']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
+  for (const k of ['twilio_sid', 'twilio_sms_from', 'twilio_wa_from', 'twilio_messaging_service_sid', 'twilio_rcs_fallback_from', 'telnyx_sms_from', 'telnyx_wa_from', 'telnyx_profile', 'imap_host', 'imap_port', 'imap_user', 'imessage_bridge_url']) if (b[k] !== undefined) setSetting(k, String(b[k]).trim());
   if (b.sms_provider !== undefined) setSetting('sms_provider', b.sms_provider === 'telnyx' ? 'telnyx' : 'twilio');
   if (b.whatsapp_provider !== undefined) {
     setSetting('whatsapp_provider', ['telnyx', 'meta'].includes(b.whatsapp_provider) ? b.whatsapp_provider : 'twilio');
@@ -551,6 +553,7 @@ app.put('/api/settings', requireNoc, (req, res) => {
   if (b.twilio_token) setSetting('twilio_token', String(b.twilio_token).trim());
   if (b.telnyx_key) setSetting('telnyx_key', String(b.telnyx_key).trim());
   if (b.imap_pass) setSetting('imap_pass', String(b.imap_pass));
+  if (b.imessage_bridge_token) setSetting('imessage_bridge_token', String(b.imessage_bridge_token).trim());
   if (!getSetting('inbound_secret')) setSetting('inbound_secret', randomUUID().replace(/-/g, '')); // path-gate secret for inbound webhooks
   if (!getSetting('provision_token')) setSetting('provision_token', randomUUID().replace(/-/g, '')); // shared secret for phone-home restore
   if (!getSetting('wg_server_priv')) { const kp = wgKeypair(); setSetting('wg_server_priv', kp.privateKey); setSetting('wg_server_pub', kp.publicKey); }
@@ -1572,7 +1575,7 @@ app.post('/api/customers', requireNoc, (req, res) => {
   if (!ids.length) return res.status(400).json({ error: 'Pick at least one account' });
   if (!b.name) return res.status(400).json({ error: 'Customer name required' });
   const info = db.prepare('INSERT INTO customers (account_id,name,status,notes,billing_email,sms_number,whatsapp_number,preferred_channel) VALUES (?,?,?,?,?,?,?,?)')
-    .run(ids[0], N(b.name), b.status || 'Active', N(b.notes), N(b.billing_email), N(normPhone(b.sms_number) || null), N(normPhone(b.whatsapp_number) || null), N(['email', 'sms', 'whatsapp'].includes(b.preferred_channel) ? b.preferred_channel : null));
+    .run(ids[0], N(b.name), b.status || 'Active', N(b.notes), N(b.billing_email), N(normPhone(b.sms_number) || null), N(normPhone(b.whatsapp_number) || null), N(['email', 'sms', 'whatsapp', 'imessage'].includes(b.preferred_channel) ? b.preferred_channel : null));
   setCustomerAccounts(info.lastInsertRowid, ids, b.account_subaccounts);
   audit(req, 'create', 'customer#' + info.lastInsertRowid, b.name);
   res.json({ id: info.lastInsertRowid });
@@ -1584,7 +1587,7 @@ app.put('/api/customers/:id', requireNoc, (req, res) => {
   db.prepare('UPDATE customers SET name=?, status=?, notes=?, billing_email=? WHERE id=?').run(N(b.name, ex.name), N(b.status, ex.status), N(b.notes), N(b.billing_email, ex.billing_email), req.params.id);
   if (b.sms_number !== undefined) db.prepare('UPDATE customers SET sms_number=? WHERE id=?').run(normPhone(b.sms_number) || null, req.params.id);
   if (b.whatsapp_number !== undefined) db.prepare('UPDATE customers SET whatsapp_number=? WHERE id=?').run(normPhone(b.whatsapp_number) || null, req.params.id);
-  if (b.preferred_channel !== undefined) db.prepare('UPDATE customers SET preferred_channel=? WHERE id=?').run(['email', 'sms', 'whatsapp'].includes(b.preferred_channel) ? b.preferred_channel : null, req.params.id);
+  if (b.preferred_channel !== undefined) db.prepare('UPDATE customers SET preferred_channel=? WHERE id=?').run(['email', 'sms', 'whatsapp', 'imessage'].includes(b.preferred_channel) ? b.preferred_channel : null, req.params.id);
   if (b.account_ids !== undefined || b.account_id !== undefined) {
     const ids = accountIdsFrom(b);
     if (!ids.length) return res.status(400).json({ error: 'A customer must have at least one account' });
@@ -1610,6 +1613,7 @@ app.delete('/api/customers/:id', requireNoc, (req, res) => {
   db.prepare('DELETE FROM account_customers WHERE customer_id=?').run(id);
   db.prepare('DELETE FROM portal_sessions WHERE customer_id=?').run(id);
   db.prepare('DELETE FROM portal_login_tokens WHERE customer_id=?').run(id);
+  db.prepare('DELETE FROM customer_messages WHERE customer_id=?').run(id);
   db.prepare('DELETE FROM customers WHERE id=?').run(id);
   audit(req, 'delete', 'customer#' + id);
   res.json({ ok: true });

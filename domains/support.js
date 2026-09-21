@@ -1,5 +1,6 @@
 // Support domain: the customer portal, trouble tickets, and the omnichannel messaging layer
-// (outbound email/SMS/WhatsApp via Twilio or Telnyx, plus inbound webhooks and the IMAP poller).
+// (outbound email/SMS/WhatsApp via Twilio or Telnyx, iMessage/FaceTime via the Mac bridge,
+// plus inbound webhooks and the IMAP poller).
 // Registered from server.js; shared services arrive via ctx.
 import { randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -116,7 +117,22 @@ export default function registerSupport(app, ctx) {
     if (!from) return { ok: false, error: 'No WhatsApp sender configured' };
     return prov === 'telnyx' ? telnyxSendMessage({ to, from, body, whatsapp: true }) : twilioSendMessage({ to, from, body, whatsapp: true });
   }
-  // Dispatch one outbound message on a given channel. Returns {ok, external_id, to, error}.
+  async function bridgeRequest(path, payload) {
+    const base = (getSetting('imessage_bridge_url') || '').replace(/\/+$/, '');
+    const token = getSetting('imessage_bridge_token') || '';
+    if (!base) return { ok: false, error: 'Mac iMessage bridge URL is not configured' };
+    if (!token) return { ok: false, error: 'Mac iMessage bridge token is not configured' };
+    const r = await fetch(base + path, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const j = await r.json().catch(() => ({}));
+    return r.ok ? { ok: true, id: j.chatGuid || j.url || j.method || null } : { ok: false, error: j.error || ('Bridge HTTP ' + r.status) };
+  }
+  async function sendIMessage(to, body) { return bridgeRequest('/api/send', { to, body, service: 'iMessage' }); }
+  async function startFaceTime(to) { return bridgeRequest('/api/facetime', { to }); }
+  // Dispatch one outbound message on a given channel. Returns {ok, external_id, to, error, transport}.
   async function deliverOnChannel(t, channel, body) {
     const cust = db.prepare('SELECT billing_email, sms_number, whatsapp_number FROM customers WHERE id=?').get(t.customer_id) || {};
     if (channel === 'email') {
@@ -125,10 +141,14 @@ export default function registerSupport(app, ctx) {
       const mid = await sendMail({ to, subject: `[${t.number}] ${t.subject}`, text: `${body}\n\nView your ticket: ${pub}/portal`, html: `<p>${nl2br(body)}</p><p style="color:#888;font-size:12px">Reply to this email to continue the conversation, or view it in the <a href="${pub}/portal">customer portal</a>.</p>`, replyTo: rt || undefined }).catch(e => ({ err: e.message }));
       return mid && !mid.err ? { ok: true, external_id: typeof mid === 'string' ? mid : null, to } : { ok: false, error: (mid && mid.err) || 'send failed', to };
     }
-    if (channel === 'sms' || channel === 'whatsapp') {
-      const to = normPhone(t.contact_phone || (channel === 'sms' ? cust.sms_number : cust.whatsapp_number) || cust.sms_number || cust.whatsapp_number);
+    if (channel === 'sms' || channel === 'whatsapp' || channel === 'imessage' || channel === 'facetime') {
+      const to = normPhone(t.contact_phone || (channel === 'whatsapp' ? cust.whatsapp_number : cust.sms_number) || cust.sms_number || cust.whatsapp_number);
       if (!to) return { ok: false, error: 'No phone number on file', to: null };
-      const r = channel === 'sms' ? await sendSms(to, body) : await sendWhatsApp(to, body);
+      let r;
+      if (channel === 'sms') r = await sendSms(to, body);
+      else if (channel === 'whatsapp') r = await sendWhatsApp(to, body);
+      else if (channel === 'facetime') r = await startFaceTime(to);
+      else r = await sendIMessage(to, body);
       return { ok: r.ok, external_id: r.id || null, error: r.error, to, transport: r.transport || null };
     }
     return { ok: true, to: null }; // portal/note: nothing to send externally
@@ -228,7 +248,7 @@ export default function registerSupport(app, ctx) {
   const TICKET_PRIO = ['low', 'normal', 'high', 'urgent'];
   const nl2br = s => esc2(s).replace(/\n/g, '<br>');
   function ticketNotify(subject, text, html) { const to = getSetting('access_notify_email') || getSetting('mail_from'); if (to) mailSafe({ to, subject, text, html }); }
-  const TICKET_CHANNELS = ['portal', 'email', 'sms', 'whatsapp', 'note'];
+  const TICKET_CHANNELS = ['portal', 'email', 'sms', 'whatsapp', 'imessage', 'facetime', 'note'];
   function appendMessage(ticketId, { author_type, author, body, channel, direction, external_id, to_addr, from_addr, delivery_status, delivery_transport }) {
     return db.prepare("INSERT INTO ticket_messages (ticket_id,author_type,author,body,channel,direction,external_id,to_addr,from_addr,delivery_status,delivery_transport) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
       .run(ticketId, author_type, author || '', body, TICKET_CHANNELS.includes(channel) ? channel : 'portal', direction === 'in' ? 'in' : 'out', N(external_id), N(to_addr), N(from_addr), N(delivery_status), N(delivery_transport)).lastInsertRowid;
@@ -288,7 +308,7 @@ export default function registerSupport(app, ctx) {
     let channel = String((req.body || {}).channel || '').trim();
     if (!TICKET_CHANNELS.includes(channel)) channel = t.last_channel || t.channel || 'portal';
     let deliv = { ok: true, to: null };
-    if (['email', 'sms', 'whatsapp'].includes(channel)) { try { deliv = await deliverOnChannel(t, channel, body); } catch (e) { deliv = { ok: false, error: e.message, to: null }; } }
+    if (['email', 'sms', 'whatsapp', 'imessage', 'facetime'].includes(channel)) { try { deliv = await deliverOnChannel(t, channel, body); } catch (e) { deliv = { ok: false, error: e.message, to: null }; } }
     appendMessage(t.id, { author_type: 'staff', author: (req.user && req.user.email) || '', body, channel, direction: 'out',
       external_id: deliv.external_id, to_addr: deliv.to,
       delivery_status: deliv.ok ? (channel === 'portal' ? null : 'sent') : 'failed',
@@ -338,6 +358,64 @@ export default function registerSupport(app, ctx) {
     res.json({ ok: true });
   });
 
+  // ---------- Customer communications (one timeline; channel is only how the next message is sent) ----------
+  const COMM_CHANNELS = ['email', 'sms', 'whatsapp', 'imessage'];
+  function recordCustomerMessage(customerId, { channel, direction, author, body, subject, external_id, to_addr, from_addr, delivery_status }) {
+    if (!customerId || !body) return null;
+    if (external_id) {
+      const dup = db.prepare('SELECT id FROM customer_messages WHERE external_id=?').get(external_id);
+      if (dup) return dup.id;
+    }
+    return db.prepare(`INSERT INTO customer_messages (customer_id,channel,direction,author,body,subject,external_id,to_addr,from_addr,delivery_status)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(customerId, channel || 'email', direction === 'in' ? 'in' : 'out', author || '', body, N(subject), N(external_id), N(to_addr), N(from_addr), N(delivery_status)).lastInsertRowid;
+  }
+  function customerReplyToken(c) {
+    if (c.comm_reply_token) return c.comm_reply_token;
+    const token = randomUUID().replace(/-/g, '');
+    db.prepare('UPDATE customers SET comm_reply_token=? WHERE id=?').run(token, c.id);
+    c.comm_reply_token = token;
+    return token;
+  }
+  function customerTimeline(customerId) {
+    const direct = db.prepare(`SELECT id, channel, direction, author, body, subject, external_id, to_addr, from_addr, delivery_status, created_at, NULL AS ticket_id, NULL AS ticket_number
+      FROM customer_messages WHERE customer_id=?`).all(customerId);
+    const seen = new Set(direct.map(m => m.external_id).filter(Boolean));
+    const loose = new Set(direct.map(m => m.channel + '|' + m.direction + '|' + m.body));
+    const fromTickets = db.prepare(`SELECT m.id, m.channel, m.direction, m.author, m.body, NULL AS subject, m.external_id, m.to_addr, m.from_addr, m.delivery_status, m.created_at, t.id AS ticket_id, t.number AS ticket_number
+      FROM ticket_messages m JOIN tickets t ON t.id=m.ticket_id
+      WHERE t.customer_id=? AND m.channel!='note' ORDER BY m.id`).all(customerId)
+      .filter(m => (!m.external_id || !seen.has(m.external_id)) && !loose.has(m.channel + '|' + m.direction + '|' + m.body));
+    return [...direct, ...fromTickets].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)) || (a.id - b.id));
+  }
+  app.get('/api/customers/:id/messages', requireNoc, (req, res) => {
+    const c = db.prepare('SELECT id, name, billing_email, sms_number, whatsapp_number, preferred_channel FROM customers WHERE id=?').get(req.params.id);
+    if (!c) return res.status(404).json({ error: 'not found' });
+    res.json({ customer: c, messages: customerTimeline(c.id) });
+  });
+  app.post('/api/customers/:id/messages', requireNoc, async (req, res) => {
+    const c = db.prepare('SELECT * FROM customers WHERE id=?').get(req.params.id);
+    if (!c) return res.status(404).json({ error: 'not found' });
+    const body = String((req.body || {}).body || '').trim();
+    if (!body) return res.status(400).json({ error: 'Enter a message' });
+    let channel = String((req.body || {}).channel || c.preferred_channel || 'email');
+    if (!COMM_CHANNELS.includes(channel)) channel = 'email';
+    const subject = String((req.body || {}).subject || '').trim().slice(0, 200) || null;
+    const token = customerReplyToken(c);
+    const phone = channel === 'whatsapp' ? (c.whatsapp_number || c.sms_number) : (c.sms_number || c.whatsapp_number);
+    const stub = { customer_id: c.id, contact_email: c.billing_email, contact_phone: phone, reply_token: token, number: c.name, subject: subject || c.name };
+    let deliv = { ok: false, error: 'Nothing sent' };
+    try {
+      deliv = await deliverOnChannel(stub, channel, body);
+    } catch (e) { deliv = { ok: false, error: e.message, to: null }; }
+    recordCustomerMessage(c.id, {
+      channel, direction: 'out', author: (req.user && req.user.email) || '', body, subject,
+      external_id: deliv.external_id, to_addr: deliv.to, delivery_status: deliv.ok ? 'sent' : 'failed'
+    });
+    db.prepare('UPDATE customers SET preferred_channel=? WHERE id=?').run(channel, c.id);
+    audit(req, 'message', 'customer#' + c.id, channel + (deliv.ok ? '' : ' failed'));
+    res.json({ ok: true, channel, transport: deliv.transport || null, delivered: !!deliv.ok, error: deliv.ok ? undefined : deliv.error });
+  });
+
   // ---------- Inbound ingestion: email / SMS / WhatsApp all thread into a ticket ----------
   const emailAddr = (s) => { const m = String(s || '').match(/<([^>]+)>/); return (m ? m[1] : String(s || '')).trim().toLowerCase(); };
   const findCustomerByEmail = (email) => { email = emailAddr(email); return email ? (db.prepare('SELECT * FROM customers WHERE lower(billing_email)=? ORDER BY id LIMIT 1').get(email) || null) : null; };
@@ -345,11 +423,25 @@ export default function registerSupport(app, ctx) {
   const openTicketForCustomer = (cid) => db.prepare("SELECT * FROM tickets WHERE customer_id=? AND status NOT IN ('resolved','closed') ORDER BY updated_at DESC LIMIT 1").get(cid) || null;
   function ingestInbound({ channel, from, to, subject, body, external_id, transport }) {
     body = String(body || '').trim(); if (!body && !subject) return { skipped: 'empty' };
-    if (external_id) { const dup = db.prepare('SELECT id FROM ticket_messages WHERE external_id=?').get(external_id); if (dup) return { skipped: 'duplicate' }; }
+    if (external_id) {
+      const dupTicket = db.prepare('SELECT id FROM ticket_messages WHERE external_id=?').get(external_id);
+      const dupCust = db.prepare('SELECT id FROM customer_messages WHERE external_id=?').get(external_id);
+      if (dupTicket || dupCust) return { skipped: 'duplicate' };
+    }
     let t = null, cust = null;
     if (channel === 'email') {
       const rt = (String(to || '') + ' ' + String(subject || '')).match(/\+([0-9a-f]{24,})@/i);
-      if (rt) t = db.prepare('SELECT * FROM tickets WHERE reply_token=?').get(rt[1]);
+      if (rt) {
+        t = db.prepare('SELECT * FROM tickets WHERE reply_token=?').get(rt[1]);
+        if (!t) {
+          cust = db.prepare('SELECT * FROM customers WHERE comm_reply_token=?').get(rt[1]);
+          if (cust) {
+            recordCustomerMessage(cust.id, { channel, direction: 'in', author: from, body, subject, external_id, from_addr: emailAddr(from) });
+            ticketNotify(`Reply from ${cust.name}`, `${from} via email:\n\n${body}`, `<p><b>${esc2(cust.name)}</b> replied by email:</p><p>${nl2br(body)}</p>`);
+            return { customer_id: cust.id };
+          }
+        }
+      }
       if (!t) { const m = String(subject || '').match(/TKT-(\d+)/i); if (m) t = db.prepare('SELECT * FROM tickets WHERE number=?').get('TKT-' + m[1]); }
       if (!t) cust = findCustomerByEmail(from);
     } else {
@@ -385,6 +477,21 @@ export default function registerSupport(app, ctx) {
     }); }
     catch (e) { console.warn('twilio inbound failed:', e.message); }
     res.type('text/xml').send('<Response/>');
+  });
+  // Mac Messages.app / FaceTime helper (JSON from the always-on Mac signed into 602-456-5656)
+  app.post('/inbound/imessage/:secret', (req, res) => {
+    if (!inboundSecretOk(req)) return res.status(403).json({ error: 'forbidden' });
+    const b = req.body || {};
+    // RCS from Messages.app is still the SMS conversation. Record the transport, don't open a second channel.
+    const raw = ['imessage', 'facetime', 'sms', 'rcs'].includes(b.channel) ? b.channel : 'imessage';
+    const channel = raw === 'rcs' ? 'sms' : raw;
+    try {
+      const r = ingestInbound({ channel, from: b.from, to: b.to, body: b.body || '', external_id: b.external_id || null, transport: raw === 'rcs' ? 'rcs' : null });
+      res.json({ ok: true, ...r });
+    } catch (e) {
+      console.warn('imessage inbound failed:', e.message);
+      res.status(500).json({ error: e.message });
+    }
   });
   // Telnyx SMS + WhatsApp inbound (JSON; registered with raw body up top). Secret path-gated.
   function inboundTelnyx(req, res) {
