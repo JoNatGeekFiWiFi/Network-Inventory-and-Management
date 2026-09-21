@@ -198,10 +198,10 @@ let token = null;
   // so it stays out of the server's own access log, out of Referer headers, and out of any proxy in
   // between. A bearer credential in a path is a bearer credential in every log it passes through.
   ok(!url.split('#')[0].includes(token), 'and the token appears nowhere in the path or query');
-  ok(url.split('#')[0].endsWith('/docs'), `the signing page is at a clean /docs path (${url.split('#')[0]})`);
+  ok(url.split('#')[0].endsWith('/sign'), `the signing page is at a clean /sign path (${url.split('#')[0]})`);
 
   // The public URL is derived from the request when it is not configured. Requiring a setting for
-  // this produced links like "/docs#token" — dead in an email — because nobody had filled in a
+  // this produced links like "/sign#token" — dead in an email — because nobody had filled in a
   // field buried on the Settings page.
   ok(/^https?:\/\//.test(url),
     `the link is absolute even with no public URL configured, derived from the request (${url.split('#')[0]})`);

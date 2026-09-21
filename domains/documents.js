@@ -331,10 +331,10 @@ export default function registerDocuments(app, ctx) {
     const expires = new Date(Date.now() + days * 86400e3).toISOString();
     db.prepare('UPDATE doc_signers SET token_hash=?, token_expires_at=? WHERE id=?').run(hash, expires, signer.id);
 
-    // /docs rather than /sign.html, to match /locator and /portal. What a signer sees in their
-    // address bar is part of whether they trust the link enough to open it, and a bare .html file
-    // reads like something that got left on a server.
-    const url = base ? `${base}/docs#${token}` : `/docs#${token}`;
+    // A clean path, matching /locator and /portal. What a signer sees in their address bar is part
+    // of whether they trust the link enough to open it, and a bare .html reads like something left
+    // on a server by accident. /sign also says what the page is for, which /docs did not.
+    const url = base ? `${base}/sign#${token}` : `/sign#${token}`;
     const result = { signer_id: signer.id, name: signer.name, role: signer.role, delivery: signer.delivery, url, sent: false, error: null };
 
     const subject = `Please sign: ${doc.title}`;
