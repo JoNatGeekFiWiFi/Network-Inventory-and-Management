@@ -196,7 +196,7 @@ export default function registerSupport(app, ctx) {
     const b = req.body || {}; const email = String(b.email || '').trim().toLowerCase();
     const wait = loginThrottle(req, 'portal:' + email);
     if (wait) return res.status(429).json({ error: `Too many attempts — try again in ${wait} minute(s)` });
-    const c = db.prepare("SELECT * FROM customers WHERE lower(billing_email)=? AND portal_enabled=1").get(email);
+    const c = db.prepare("SELECT * FROM customers WHERE lower(billing_email)=? AND portal_enabled=1 AND status!='Closed'").get(email);
     if (!c || !c.portal_password || !verifyPassword(String(b.password || ''), c.portal_password)) return res.status(401).json({ error: 'Invalid email or password' });
     loginSucceeded(req, 'portal:' + email);
     const token = randomBytes(24).toString('hex');
@@ -206,7 +206,7 @@ export default function registerSupport(app, ctx) {
   app.post('/portal/login-link', (req, res) => {
     const email = String((req.body || {}).email || '').trim().toLowerCase();
     if (loginThrottle(req, 'magic:' + email, { max: 5 })) return res.json({ ok: true }); // silently drop; never reveal existence
-    const c = db.prepare("SELECT * FROM customers WHERE lower(billing_email)=? AND portal_enabled=1").get(email);
+    const c = db.prepare("SELECT * FROM customers WHERE lower(billing_email)=? AND portal_enabled=1 AND status!='Closed'").get(email);
     if (c && c.billing_email) {
       const token = randomBytes(24).toString('hex');
       db.prepare("INSERT INTO portal_login_tokens (token,customer_id,expires_at) VALUES (?,?,datetime('now','+30 minutes'))").run(token, c.id);

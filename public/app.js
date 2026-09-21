@@ -312,9 +312,13 @@ function delAccount(id, name) {
   if (confirm(`Delete account "${name}"?\n\nContacts and previous-ISP records go with it. (Blocked while customers or sites still use it.)`))
     doDelete('/accounts/' + id, 'Account deleted', '#/accounts');
 }
-function delCust(id, name) {
-  if (confirm(`Delete customer "${name}"?\n\n(Blocked while it still has sites.)`))
-    doDelete('/customers/' + id, 'Customer deleted', '#/customers');
+function deactivateCust(id, name) {
+  if (confirm(`Deactivate "${name}"?\n\nService stops and portal login is turned off. The customer, invoices, sites, tickets, and messages stay on record.`))
+    doDelete('/customers/' + id, 'Customer deactivated', '#/customers');
+}
+async function reactivateCust(id) {
+  try { await api('/customers/' + id, { method: 'PUT', body: JSON.stringify({ status: 'Active' }) }); toast('Customer reactivated'); renderCust(id); }
+  catch (e) { toast(e.message); }
 }
 function delPop(id, name) {
   if (confirm(`Delete POP "${name}"?\n\n(Blocked while devices or site connections still use it.)`))
@@ -830,13 +834,17 @@ async function delSubacct(accountId, sid) {
 // ---------- Customers (end clients; served by one or more accounts) ----------
 async function renderCustomerList() {
   const list = await api('/customers');
-  const rows = list.map(c => `<div class="row rowlink" onclick="location.hash='#/customer/${c.id}'">
+  const showClosed = !!window._showClosedCust;
+  const visible = list.filter(c => showClosed || c.status !== 'Closed');
+  const closedN = list.filter(c => c.status === 'Closed').length;
+  const rows = visible.map(c => `<div class="row rowlink" onclick="location.hash='#/customer/${c.id}'" style="${c.status === 'Closed' ? 'opacity:.65' : ''}">
     <div class="av">${initials(c.name)}</div>
     <div style="flex:1;min-width:0"><div>${esc(c.name)}</div><div class="small sec-muted">${esc(c.account_names || 'no account')}</div></div>
     <span class="small sec-muted">${c.site_count} site${c.site_count == 1 ? '' : 's'}</span>
     ${statusPill(c.status)}<i class="ti ti-chevron-right muted"></i></div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Customers</h1>${isPriv() ? '<a class="btn" href="#/customer/new"><i class="ti ti-plus"></i> Add customer</a>' : ''}</div>
-    <div class="small sec-muted" style="margin:-6px 0 14px">End clients. A customer can be served by one or more accounts.</div>
+    <div class="small sec-muted" style="margin:-6px 0 14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">End clients. A customer can be served by one or more accounts. Closed customers stay on record.
+      ${closedN ? `<label style="cursor:pointer"><input type="checkbox" ${showClosed ? 'checked' : ''} onchange="window._showClosedCust=this.checked;renderCustomerList()" style="width:auto"/> Show ${closedN} closed</label>` : ''}</div>
     <div class="card">${rows || '<div class="row muted">No customers yet</div>'}</div>`;
 }
 async function renderCust(id) {
@@ -854,7 +862,7 @@ async function renderCust(id) {
     <div class="head"><div class="av" style="width:46px;height:46px;border-radius:8px;font-size:16px">${initials(c.name)}</div>
       <div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(c.name)}</h1>${statusPill(c.status)}</div>
       <div class="small sec-muted" style="margin-top:5px">Served by: ${acctLinks}</div></div>
-      ${isPriv() ? `<a class="btn primary" href="#/customer/${c.id}/messages"><i class="ti ti-messages"></i> Messages</a><a class="btn" href="#/customer/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a><button class="btn" onclick="delCust(${c.id}, ${esc(JSON.stringify(c.name))})" title="Delete this customer (blocked while it has sites)"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
+      ${isPriv() ? `<a class="btn primary" href="#/customer/${c.id}/messages"><i class="ti ti-messages"></i> Messages</a><a class="btn" href="#/customer/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a>${c.status === 'Closed' ? `<button class="btn" onclick="reactivateCust(${c.id})"><i class="ti ti-refresh"></i> Reactivate</button>` : `<button class="btn" onclick="deactivateCust(${c.id}, ${esc(JSON.stringify(c.name))})" title="Stop service. The record stays."><i class="ti ti-player-pause"></i> Deactivate</button>`}` : ''}</div>
     <div class="grid3" style="margin:16px 0">
       <div class="metric"><div class="l">Sites</div><div class="v">${c.sites.length}</div></div>
       <div class="metric"><div class="l">Devices</div><div class="v">${c.device_count}</div></div>
@@ -3776,6 +3784,7 @@ async function renderDocument(id) {
       <label class="fl" style="margin-top:12px">Wording</label>
       ${isDraft
         ? `<textarea id="docBody" rows="14" style="width:100%;font-family:var(--mono);font-size:12.5px">${esc(d.body || '')}</textarea>
+           <div class="help">A line starting with # is a heading, - is a bullet, and **words** are bold on the PDF.</div>
            <div style="display:flex;gap:8px;margin-top:8px"><button class="btn" onclick="saveDocumentBody(${d.id})"><i class="ti ti-check"></i> Save wording</button></div>`
         : `<pre class="mono" style="white-space:pre-wrap;background:var(--surface2);padding:12px;border-radius:8px;font-size:12px;max-height:45vh;overflow:auto">${esc(d.body || '')}</pre>`}
       ${d.content_sha256 ? `<div class="small sec-muted" style="margin-top:8px">Frozen at send · SHA-256 <span class="mono" style="word-break:break-all">${esc(d.content_sha256)}</span></div>` : ''}
@@ -3787,9 +3796,9 @@ async function renderDocument(id) {
         <div style="flex:1;min-width:0">
           <div>${esc(s.name)} <span class="tag">${esc(s.role)}</span> ${docBadge(s.status === 'pending' ? 'sent' : s.status)}</div>
           <div class="small sec-muted">${esc(s.email || s.phone || 'in person')} · by ${esc(s.delivery)}
-            ${s.signed_at ? ` · signed ${esc(s.signed_at)} (${esc(s.signature_kind || '')})` : ''}
+            ${s.signed_at ? ` · signed ${esc(s.signed_at)} UTC (${esc(s.signature_kind || '')})` : ''}
             ${s.declined_reason ? ` · declined: ${esc(s.declined_reason)}` : ''}</div>
-          ${s.signed_ip ? `<div class="small sec-muted">from ${esc(s.signed_ip)}${s.consent_at ? ` · consented ${esc(s.consent_at)}` : ''}</div>` : ''}
+          ${s.signed_ip ? `<div class="small sec-muted">from ${esc(s.signed_ip)}${s.consent_at ? ` · consented ${esc(s.consent_at)}` : ''}${s.signed_lat != null ? ` · ${Number(s.signed_lat).toFixed(5)}, ${Number(s.signed_lng).toFixed(5)}` : (s.signed_geo ? ` · location ${esc(s.signed_geo)}` : '')}</div>` : ''}
         </div>
         ${!isDraft && s.status !== 'signed' && d.status !== 'voided'
           ? `<button class="btn sm" onclick="resendSigner(${d.id}, ${s.id})"><i class="ti ti-refresh"></i> Resend link</button>` : ''}
@@ -4939,7 +4948,8 @@ async function toggleInvoice(id) {
     const pays = i.payments.map(p => `<div class="kv"><span class="small" style="color:var(--success)">Payment · ${esc(p.date)} · ${esc(p.method)}${p.reference ? ' · ' + esc(p.reference) : ''}</span><span class="mono small" style="color:var(--success)">-${fmtMoney(p.amount)}</span></div>`).join('');
     const actions = [];
     if (i.status === 'draft') actions.push(`<a class="btn sm" href="#/billing/invoice/${i.id}/edit"><i class="ti ti-edit"></i> Edit</a>`);
-    if (!['paid', 'void'].includes(i.status)) actions.push(`<button class="btn sm" onclick="sendInvoice(${i.id})" title="Email it to the customer with the pay link (marks it Sent)"><i class="ti ti-send"></i> ${i.status === 'draft' ? 'Send' : 'Resend'}</button>`);
+    actions.push(`<a class="btn sm" href="/api/billing/invoices/${i.id}/pdf" target="_blank" rel="noopener"><i class="ti ti-file-type-pdf"></i> PDF</a>`);
+    if (!['paid', 'void'].includes(i.status)) actions.push(`<button class="btn sm" onclick="sendInvoice(${i.id})" title="Email it to the customer with the pay link and a PDF (marks it Sent)"><i class="ti ti-send"></i> ${i.status === 'draft' ? 'Send' : 'Resend'}</button>`);
     if (i.balance > 0 && i.status !== 'void') actions.push(`<button class="btn sm" onclick="recordPayment(${i.id}, ${i.balance})" title="Record a check/cash/manual payment"><i class="ti ti-cash"></i> Record payment</button>`);
     if (i.pay_url && i.balance > 0 && i.status !== 'void') actions.push(`<button class="btn sm" onclick="copyText(${esc(JSON.stringify(i.pay_url))})" title="Copy the public payment link (card / ACH via Stripe)"><i class="ti ti-link"></i> Copy pay link</button>`);
     if (!['paid', 'void'].includes(i.status)) actions.push(`<button class="btn sm" onclick="voidInvoice(${i.id})" title="Cancel this invoice (kept for records)">Void</button>`);
@@ -5072,6 +5082,7 @@ async function toggleQuote(id) {
     const qr = await api('/billing/quotes/' + id);
     const items = qr.items.map(it => `<div class="kv"><span class="small">${esc(it.description)} <span class="muted">× ${it.quantity}${it.taxable === 0 && qr.tax_rate > 0 ? ' · no tax' : ''}</span></span><span class="mono small">${fmtMoney(it.amount)}</span></div>`).join('');
     const actions = [];
+    actions.push(`<a class="btn sm" href="/api/billing/quotes/${qr.id}/pdf" target="_blank" rel="noopener"><i class="ti ti-file-type-pdf"></i> PDF</a>`);
     if (!['converted', 'accepted'].includes(qr.status)) actions.push(`<a class="btn sm" href="#/billing/quote/${qr.id}/edit"><i class="ti ti-edit"></i> Edit</a>`);
     if (qr.status !== 'converted') actions.push(`<button class="btn sm" onclick="sendQuote(${qr.id})" title="Email the quote to the customer"><i class="ti ti-send"></i> ${qr.status === 'draft' ? 'Send' : 'Resend'}</button>`);
     if (qr.view_url) actions.push(`<button class="btn sm" onclick="copyText(${esc(JSON.stringify(qr.view_url))})" title="Copy the public quote link"><i class="ti ti-link"></i> Copy link</button>`);

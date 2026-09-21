@@ -16,6 +16,7 @@
 // dependency, so its findings are encoded as the structural invariants below.
 import { inflateSync } from 'node:zlib';
 import { createPdf, wrapText, textWidth, encodeText, pdfDate, FONTS } from '../lib/pdf.js';
+import { pageText } from '../lib/pdfread.js';
 
 let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(c ? 'PASS' : 'FAIL', m); };
 
@@ -145,6 +146,7 @@ function extractText(doc) {
   ok(encodeText('a\u00A0b') === 'a b', 'a non-breaking space — which hides inside copied addresses — becomes a real space');
   ok(encodeText('e\u2026') === 'e...', 'and an ellipsis expands');
   ok(!encodeText('caf\u00E9 \u4E2D\u6587').includes('\u4E2D'), 'anything genuinely unrepresentable becomes a visible placeholder, never silent loss');
+  ok(encodeText('caf\u00E9').includes('\u00E9'), 'a latin-1 letter such as e-acute is kept for WinAnsi, not replaced with ?');
 
   const d = createPdf({});
   d.text('Rate (per month) \\ clause (3)(a)', { top: 72 });
@@ -195,8 +197,8 @@ function extractText(doc) {
     const lead = body[start] === '\r' ? 2 : 1;
     try { ops += inflateSync(Buffer.from(body.slice(start + lead, start + lead + len), 'latin1')).toString('latin1'); } catch {}
   }
-  ok(/\d+(\.\d+)? \d+(\.\d+)? m/.test(ops) && / l\b/.test(ops) && /\bS\b/.test(ops),
-    'a drawn signature becomes real PDF path operators, not an embedded image');
+  ok(/\d+(\.\d+)? \d+(\.\d+)? m/.test(ops) && / l\b/.test(ops) && /\bS\b/.test(ops) && / c\b/.test(ops),
+    'a drawn signature becomes real PDF path operators, curves for a stroke and a line for a dot');
 
   // A single tap — dotting an i, a full stop — must still mark the page.
   const dotOnly = createPdf({});
@@ -231,6 +233,12 @@ function extractText(doc) {
   const doc = readPdf(createPdf({ title: 'Lease (Rooftop)', author: 'GeekiTek' }).build());
   const info = [...doc.objects.values()].find(o => o.includes('/Producer'));
   ok(info && info.includes('Lease \\(Rooftop\\)'), 'a title containing parentheses is escaped in the metadata too');
+}
+
+{
+  const bytes = createPdf({ title: 'Readable' }).text('Fiber at the handhole', { top: 80 }).build();
+  const pages = pageText(bytes);
+  ok(pages.length === 1 && pages[0].includes('Fiber at the handhole'), 'page text can be read back out of a file this writer produced');
 }
 
 console.log(`RESULT: ${pass} passed, ${fail} failed`);

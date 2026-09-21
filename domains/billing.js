@@ -4,6 +4,7 @@
 import express from "express";
 import { randomBytes, createHmac, timingSafeEqual } from "node:crypto";
 import { r2, todayStr, esc2, normPhone } from "../lib/core.js";
+import { renderStatement } from "../lib/billpdf.js";
 
 export default function registerBilling(app, ctx) {
   const { db, N, audit, requireNoc, role, getSetting, setSetting, mailSafe,
@@ -241,6 +242,31 @@ export default function registerBilling(app, ctx) {
     db.prepare('UPDATE bill_invoices SET balance=?, status=? WHERE id=?').run(balance, status, invId);
     return { balance, status };
   }
+  function billCompany() {
+    return {
+      name: getSetting('bill_company') || getSetting('company_name') || 'Network Inventory',
+      address: getSetting('company_address') || '',
+      email: getSetting('mail_from') || '',
+      phone: getSetting('company_phone') || ''
+    };
+  }
+  function statementBytes(kind, doc) {
+    const company = billCompany();
+    return renderStatement({
+      kind, number: doc.number, company,
+      customer: doc.customer_name || '',
+      email: doc.email || doc.billing_email || '',
+      date: doc.date, due: kind === 'Quote' ? doc.expiry_date : doc.due_date,
+      lines: doc.items || [],
+      subtotal: doc.subtotal, taxRate: doc.tax_rate, tax: doc.tax, total: doc.total,
+      balance: kind === 'Invoice' ? doc.balance : null,
+      notes: doc.notes, terms: doc.terms,
+      payUrl: kind === 'Invoice' ? doc.pay_url : (doc.view_url || '')
+    }).build();
+  }
+  function pdfAttachment(filename, bytes) {
+    return { filename, content: bytes, contentType: 'application/pdf' };
+  }
   // Email an invoice (uses the SMTP settings) with the public pay link when available
   function emailInvoice(inv) {
     const to = inv.email || inv.billing_email;
@@ -255,7 +281,8 @@ export default function registerBilling(app, ctx) {
       text: `Invoice ${inv.number} from ${company}\nDate: ${inv.date}${inv.due_date ? '\nDue: ' + inv.due_date : ''}\n\n${lines}\n\nTotal: $${inv.total.toFixed(2)}\nBalance due: $${inv.balance.toFixed(2)}${payBit}${inv.notes ? '\n\n' + inv.notes : ''}`,
       html: `<h2>Invoice ${esc2(inv.number)}</h2><p>${esc2(company)} · ${esc2(inv.date)}${inv.due_date ? ' · due <b>' + esc2(inv.due_date) + '</b>' : ''}</p>
         <table style="border-collapse:collapse">${rows}<tr><td style="padding:8px 12px 0 0"><b>Total</b></td><td></td><td align="right"><b>$${inv.total.toFixed(2)}</b></td></tr></table>
-        ${payBtn}${inv.notes ? `<p style="color:#555">${esc2(inv.notes)}</p>` : ''}`
+        ${payBtn}${inv.notes ? `<p style="color:#555">${esc2(inv.notes)}</p>` : ''}`,
+      attachments: [pdfAttachment(`Invoice-${inv.number}.pdf`, statementBytes('Invoice', inv))]
     });
     return true;
   }
@@ -358,6 +385,14 @@ export default function registerBilling(app, ctx) {
     const inv = loadInvoice(req.params.id);
     if (!inv) return res.status(404).json({ error: 'not found' });
     res.json(inv);
+  });
+  app.get('/api/billing/invoices/:id/pdf', requireNoc, (req, res) => {
+    const inv = loadInvoice(req.params.id);
+    if (!inv) return res.status(404).json({ error: 'not found' });
+    const bytes = statementBytes('Invoice', inv);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Invoice-${String(inv.number).replace(/[^\w.-]+/g, '-')}.pdf"`);
+    res.send(bytes);
   });
   app.post('/api/billing/invoices', requireNoc, (req, res) => {
     const b = req.body || {};
@@ -487,10 +522,10 @@ export default function registerBilling(app, ctx) {
     for (const r of due) {
       let items = []; try { items = JSON.parse(r.items_json); } catch {}
       if (!items.length) continue;
-      const cust = db.prepare('SELECT billing_email FROM customers WHERE id=?').get(r.customer_id);
-      if (!cust) { // customer is gone (legacy orphan) — deactivate instead of billing into the void
+      const cust = db.prepare('SELECT billing_email, status FROM customers WHERE id=?').get(r.customer_id);
+      if (!cust || cust.status === 'Closed') {
         db.prepare('UPDATE bill_recurring SET active=0 WHERE id=?').run(r.id);
-        db.prepare("INSERT INTO audit_log (actor,role,action,target,details) VALUES ('system','system','edit',?,?)").run('recurring#' + r.id, 'deactivated: customer no longer exists');
+        db.prepare("INSERT INTO audit_log (actor,role,action,target,details) VALUES ('system','system','edit',?,?)").run('recurring#' + r.id, cust ? 'deactivated: customer is closed' : 'deactivated: customer no longer exists');
         continue;
       }
       const id = insertInvoice({ customer_id: r.customer_id, email: cust.billing_email, date: r.next_date, due_date: advanceDate(r.next_date, 'monthly'), tax_rate: r.tax_rate, items, status: r.auto_send ? 'sent' : 'draft', terms: getSetting('recurring_invoice_terms') || getSetting('invoice_terms') });
@@ -584,7 +619,7 @@ export default function registerBilling(app, ctx) {
   .paid{color:var(--ok)}.due{color:#f0ad4e}.msg{margin:0 0 14px;padding:10px 14px;border-radius:9px;background:#0e1318;border:1px solid var(--line);font-size:14px}
   .pay{width:100%;margin-top:18px;padding:13px;border:0;border-radius:10px;background:var(--accent);color:#fff;font-size:16px;font-weight:600;cursor:pointer}
   .hint{color:var(--muted);font-size:12px;margin-top:8px;text-align:center}</style></head><body><div class="wrap"><div class="card">
-  <h1>Invoice ${esc2(inv.number)}</h1><p class="sub">${company} · ${esc2(inv.date)}${inv.customer_name ? ' · ' + esc2(inv.customer_name) : ''}</p>
+  <h1>Invoice ${esc2(inv.number)}</h1><p class="sub">${company} · ${esc2(inv.date)}${inv.customer_name ? ' · ' + esc2(inv.customer_name) : ''} · <a href="/pay/${esc2(inv.pay_token)}/pdf" style="color:var(--accent)">Download PDF</a></p>
   ${msg ? `<div class="msg">${msg}</div>` : ''}
   <table>${rows}${inv.tax > 0 ? `<tr><td>Tax (${inv.tax_rate}%)</td><td></td><td align="right">$${inv.tax.toFixed(2)}</td></tr>` : ''}<tr class="tot"><td>Total</td><td></td><td align="right">$${inv.total.toFixed(2)}</td></tr></table>
   <div class="status ${inv.balance <= 0 ? 'paid' : 'due'}">${statusTxt}</div>
@@ -598,6 +633,14 @@ export default function registerBilling(app, ctx) {
   catch(e){alert('Could not start payment');btn.disabled=false;btn.textContent='Pay online';}}</script></body></html>`;
   }
   const invByToken = (token) => { const row = db.prepare('SELECT id FROM bill_invoices WHERE pay_token=?').get(String(token || '')); return row ? loadInvoice(row.id) : null; };
+  app.get('/pay/:token/pdf', (req, res) => {
+    const inv = invByToken(req.params.token);
+    if (!inv) return res.status(404).type('text/plain').send('Invoice not found');
+    const bytes = statementBytes('Invoice', inv);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Invoice-${String(inv.number).replace(/[^\w.-]+/g, '-')}.pdf"`);
+    res.send(bytes);
+  });
   app.get('/pay/:token', (req, res) => {
     const inv = invByToken(req.params.token);
     if (!inv) return res.status(404).type('text/plain').send('Invoice not found');
@@ -666,7 +709,8 @@ export default function registerBilling(app, ctx) {
       to, subject: `Quote ${q.number} from ${company} — $${q.total.toFixed(2)}`,
       text: `Quote ${q.number} from ${company}\nDate: ${q.date}${q.expiry_date ? '\nValid until: ' + q.expiry_date : ''}\n\n${lines}\n\nTotal: $${q.total.toFixed(2)}${q.view_url ? '\n\nView & respond: ' + q.view_url : ''}${q.notes ? '\n\n' + q.notes : ''}`,
       html: `<h2>Quote ${esc2(q.number)}</h2><p>${esc2(company)} · ${esc2(q.date)}${q.expiry_date ? ' · valid until <b>' + esc2(q.expiry_date) + '</b>' : ''}</p>
-        <table style="border-collapse:collapse">${rows}<tr><td style="padding:8px 12px 0 0"><b>Total</b></td><td></td><td align="right"><b>$${q.total.toFixed(2)}</b></td></tr></table>${viewBtn}${q.notes ? `<p style="color:#555">${esc2(q.notes)}</p>` : ''}`
+        <table style="border-collapse:collapse">${rows}<tr><td style="padding:8px 12px 0 0"><b>Total</b></td><td></td><td align="right"><b>$${q.total.toFixed(2)}</b></td></tr></table>${viewBtn}${q.notes ? `<p style="color:#555">${esc2(q.notes)}</p>` : ''}`,
+      attachments: [pdfAttachment(`Quote-${q.number}.pdf`, statementBytes('Quote', q))]
     });
     return true;
   }
@@ -683,6 +727,13 @@ export default function registerBilling(app, ctx) {
   app.get('/api/billing/quotes/:id', requireNoc, (req, res) => {
     const q = loadQuote(req.params.id); if (!q) return res.status(404).json({ error: 'not found' });
     res.json(q);
+  });
+  app.get('/api/billing/quotes/:id/pdf', requireNoc, (req, res) => {
+    const q = loadQuote(req.params.id); if (!q) return res.status(404).json({ error: 'not found' });
+    const bytes = statementBytes('Quote', q);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Quote-${String(q.number).replace(/[^\w.-]+/g, '-')}.pdf"`);
+    res.send(bytes);
   });
   app.post('/api/billing/quotes', requireNoc, (req, res) => {
     const b = req.body || {};
@@ -766,7 +817,7 @@ export default function registerBilling(app, ctx) {
   .msg{margin:0 0 14px;padding:10px 14px;border-radius:9px;background:#0e1318;border:1px solid var(--line);font-size:14px}
   .btns{display:flex;gap:10px;margin-top:18px}.b{flex:1;padding:12px;border:0;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer}
   .acc{background:var(--ok);color:#fff}.dec{background:#0e1318;color:var(--text);border:1px solid var(--line)}</style></head><body><div class="wrap"><div class="card">
-  <h1>Quote ${esc2(q.number)}</h1><p class="sub">${company} · ${esc2(q.date)}${q.customer_name ? ' · ' + esc2(q.customer_name) : ''}</p>
+  <h1>Quote ${esc2(q.number)}</h1><p class="sub">${company} · ${esc2(q.date)}${q.customer_name ? ' · ' + esc2(q.customer_name) : ''} · <a href="/quote/${esc2(q.view_token)}/pdf" style="color:var(--accent)">Download PDF</a></p>
   ${msg ? `<div class="msg">${msg}</div>` : ''}
   <table>${rows}${q.tax > 0 ? `<tr><td>Tax (${q.tax_rate}%)</td><td></td><td align="right">$${q.tax.toFixed(2)}</td></tr>` : ''}<tr class="tot"><td>Total</td><td></td><td align="right">$${q.total.toFixed(2)}</td></tr></table>
   <div class="status">${statusTxt}</div>
@@ -779,6 +830,14 @@ export default function registerBilling(app, ctx) {
   if(j.ok)location.href=location.pathname+'?result='+action;else{alert(j.error||'Could not submit');btn.disabled=false;}}catch(e){alert('Could not submit');btn.disabled=false;}}</script></body></html>`;
   }
   const quoteByToken = (token) => { const row = db.prepare('SELECT id FROM bill_quotes WHERE view_token=?').get(String(token || '')); return row ? loadQuote(row.id) : null; };
+  app.get('/quote/:token/pdf', (req, res) => {
+    const q = quoteByToken(req.params.token);
+    if (!q) return res.status(404).type('text/plain').send('Quote not found');
+    const bytes = statementBytes('Quote', q);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Quote-${String(q.number).replace(/[^\w.-]+/g, '-')}.pdf"`);
+    res.send(bytes);
+  });
   app.get('/quote/:token', (req, res) => {
     const q = quoteByToken(req.params.token);
     if (!q) return res.status(404).type('text/plain').send('Quote not found');

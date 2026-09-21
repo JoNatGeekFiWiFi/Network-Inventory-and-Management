@@ -628,9 +628,18 @@ export function migrate() {
     signature_strokes TEXT,                    -- JSON stroke paths: order and shape of the pen
     signature_typed TEXT,                      -- the name as typed
     signed_ip TEXT, signed_user_agent TEXT,
+    signed_lat REAL, signed_lng REAL, signed_accuracy REAL,
+    signed_geo TEXT,                          -- captured | denied | unavailable | timeout | unsupported
+    signed_tz TEXT, signed_client_at TEXT,    -- what the device clock showed, beside the server time
     viewed_at TEXT, declined_at TEXT, declined_reason TEXT)`);
   db.exec('CREATE INDEX IF NOT EXISTS idx_docsigners_doc ON doc_signers(document_id)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_docsigners_token ON doc_signers(token_hash)');
+  ensure('doc_signers', 'signed_lat', 'REAL');
+  ensure('doc_signers', 'signed_lng', 'REAL');
+  ensure('doc_signers', 'signed_accuracy', 'REAL');
+  ensure('doc_signers', 'signed_geo', 'TEXT');
+  ensure('doc_signers', 'signed_tz', 'TEXT');
+  ensure('doc_signers', 'signed_client_at', 'TEXT');
 
   // The tamper-evident trail. Append-only by convention and by hash: `hash` covers this row's
   // contents AND `prev_hash`, so the chain can be recomputed end to end and any edit, insertion or

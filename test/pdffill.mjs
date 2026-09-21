@@ -14,7 +14,7 @@
 //      through "7". Writing /Yes produces a box that is neither on nor off and renders unticked.
 import { readFileSync } from 'node:fs';
 import { PdfDocument, formFields, PdfStream, capabilities } from '../lib/pdfread.js';
-import { fillForm, fillAndVerify, parseDA, textAppearance } from '../lib/pdffill.js';
+import { fillForm, fillAndVerify, parseDA, textAppearance, matchChoice } from '../lib/pdffill.js';
 
 let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(c ? 'PASS' : 'FAIL', m); };
 const W9 = () => readFileSync(new URL('./fixtures/w9-fillable-2024.pdf', import.meta.url));
@@ -179,6 +179,13 @@ const FLAT = () => readFileSync(new URL('./fixtures/w9-flat-2025.pdf', import.me
     ok(note && note.from.includes('\n') && !note.to.includes('\n'),
       'saying what it was and what it became');
   }
+}
+
+{
+  const opts = [{ export: 'AZ', display: 'Arizona' }, { export: 'CA', display: 'California' }];
+  ok(matchChoice(opts, 'Arizona').export === 'AZ', 'a choice can be named by the label a person sees');
+  ok(matchChoice(opts, 'ca').export === 'CA', 'or by its export value, regardless of case');
+  ok(matchChoice(opts, 'Texas') === null, 'a value that is not one of the choices is not forced in');
 }
 
 console.log(`RESULT: ${pass} passed, ${fail} failed`);

@@ -440,14 +440,14 @@ app.delete('/api/models/:id', requireNoc, (req, res) => {
 const getSetting = (k) => { const r = db.prepare('SELECT value FROM settings WHERE key=?').get(k); return r ? r.value : null; };
 const setSetting = (k, v) => db.prepare('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, v == null ? '' : v);
 // Send email via the configured SMTP server (no-op if not configured). Never throws to the caller.
-async function sendMail({ to, subject, text, html, replyTo, headers }) {
+async function sendMail({ to, subject, text, html, replyTo, headers, attachments }) {
   const host = getSetting('smtp_host'), from = getSetting('mail_from');
   if (!host || !from || !to) return false;
   const tx = nodemailer.createTransport({
     host, port: parseInt(getSetting('smtp_port'), 10) || 587, secure: getSetting('smtp_secure') === '1',
     auth: getSetting('smtp_user') ? { user: getSetting('smtp_user'), pass: getSetting('smtp_pass') || '' } : undefined
   });
-  const info = await tx.sendMail({ from, to, subject, text, html, replyTo, headers });
+  const info = await tx.sendMail({ from, to, subject, text, html, replyTo, headers, attachments });
   return info && info.messageId ? info.messageId : true;
 }
 const mailSafe = (opts) => { sendMail(opts).catch(e => console.warn('email send failed:', e.message)); };
@@ -1584,7 +1584,8 @@ app.put('/api/customers/:id', requireNoc, (req, res) => {
   const b = req.body || {};
   const ex = db.prepare('SELECT * FROM customers WHERE id=?').get(req.params.id);
   if (!ex) return res.status(404).json({ error: 'not found' });
-  db.prepare('UPDATE customers SET name=?, status=?, notes=?, billing_email=? WHERE id=?').run(N(b.name, ex.name), N(b.status, ex.status), N(b.notes), N(b.billing_email, ex.billing_email), req.params.id);
+  const nextStatus = N(b.status, ex.status);
+  db.prepare('UPDATE customers SET name=?, status=?, notes=?, billing_email=? WHERE id=?').run(N(b.name, ex.name), nextStatus, N(b.notes), N(b.billing_email, ex.billing_email), req.params.id);
   if (b.sms_number !== undefined) db.prepare('UPDATE customers SET sms_number=? WHERE id=?').run(normPhone(b.sms_number) || null, req.params.id);
   if (b.whatsapp_number !== undefined) db.prepare('UPDATE customers SET whatsapp_number=? WHERE id=?').run(normPhone(b.whatsapp_number) || null, req.params.id);
   if (b.preferred_channel !== undefined) db.prepare('UPDATE customers SET preferred_channel=? WHERE id=?').run(['email', 'sms', 'whatsapp', 'imessage'].includes(b.preferred_channel) ? b.preferred_channel : null, req.params.id);
@@ -1593,30 +1594,28 @@ app.put('/api/customers/:id', requireNoc, (req, res) => {
     if (!ids.length) return res.status(400).json({ error: 'A customer must have at least one account' });
     setCustomerAccounts(req.params.id, ids, b.account_subaccounts);
   }
-  if (b.portal_enabled !== undefined) db.prepare('UPDATE customers SET portal_enabled=? WHERE id=?').run(b.portal_enabled ? 1 : 0, req.params.id);
+  if (b.portal_enabled !== undefined && nextStatus !== 'Closed') db.prepare('UPDATE customers SET portal_enabled=? WHERE id=?').run(b.portal_enabled ? 1 : 0, req.params.id);
   if (b.portal_password) db.prepare('UPDATE customers SET portal_password=? WHERE id=?').run(hashPassword(String(b.portal_password)), req.params.id);
-  audit(req, 'edit', 'customer#' + req.params.id, b.name);
+  if (nextStatus === 'Closed') deactivateCustomer(req.params.id);
+  audit(req, 'edit', 'customer#' + req.params.id, nextStatus === 'Closed' && ex.status !== 'Closed' ? 'deactivated' : b.name);
   res.json({ ok: true });
 });
-app.delete('/api/customers/:id', requireNoc, (req, res) => {
-  const id = req.params.id;
-  // Refuse while anything still points at this customer — deleting used to silently orphan
-  // invoices/quotes/tickets AND leave recurring schedules that kept generating invoices forever.
-  const blockers = [];
-  const n = (sql) => db.prepare(sql).get(id).n;
-  const sites = n('SELECT COUNT(*) AS n FROM sites WHERE customer_id=?'); if (sites) blockers.push(`${sites} site(s)`);
-  const invs = n('SELECT COUNT(*) AS n FROM bill_invoices WHERE customer_id=?'); if (invs) blockers.push(`${invs} invoice(s)`);
-  const quotes = n('SELECT COUNT(*) AS n FROM bill_quotes WHERE customer_id=?'); if (quotes) blockers.push(`${quotes} quote(s)`);
-  const recs = n('SELECT COUNT(*) AS n FROM bill_recurring WHERE customer_id=?'); if (recs) blockers.push(`${recs} recurring schedule(s)`);
-  const tix = n('SELECT COUNT(*) AS n FROM tickets WHERE customer_id=?'); if (tix) blockers.push(`${tix} ticket(s)`);
-  if (blockers.length) return res.status(409).json({ error: `In use by ${blockers.join(', ')} — reassign or delete those first` });
-  db.prepare('DELETE FROM account_customers WHERE customer_id=?').run(id);
+// A customer is a business record. Closing one ends service; it does not erase invoices, sites,
+// tickets, or messages. Those stay for the life of the company.
+function deactivateCustomer(id) {
+  const c = db.prepare('SELECT * FROM customers WHERE id=?').get(id);
+  if (!c) return null;
+  db.prepare("UPDATE customers SET status='Closed', portal_enabled=0 WHERE id=?").run(id);
   db.prepare('DELETE FROM portal_sessions WHERE customer_id=?').run(id);
   db.prepare('DELETE FROM portal_login_tokens WHERE customer_id=?').run(id);
-  db.prepare('DELETE FROM customer_messages WHERE customer_id=?').run(id);
-  db.prepare('DELETE FROM customers WHERE id=?').run(id);
-  audit(req, 'delete', 'customer#' + id);
-  res.json({ ok: true });
+  db.prepare('UPDATE bill_recurring SET active=0 WHERE customer_id=? AND active=1').run(id);
+  return c;
+}
+app.delete('/api/customers/:id', requireNoc, (req, res) => {
+  const c = deactivateCustomer(req.params.id);
+  if (!c) return res.status(404).json({ error: 'not found' });
+  audit(req, 'edit', 'customer#' + c.id, 'deactivated');
+  res.json({ ok: true, status: 'Closed' });
 });
 
 app.delete('/api/sites/:id', requireNoc, (req, res) => {

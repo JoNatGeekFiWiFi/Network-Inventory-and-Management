@@ -67,6 +67,46 @@ export default function registerDocuments(app, ctx) {
     return ev;
   }
 
+  function sqlDate(s) {
+    if (!s) return new Date();
+    const d = new Date(String(s).replace(' ', 'T') + 'Z');
+    return Number.isNaN(d.getTime()) ? new Date() : d;
+  }
+  function cleanClientAt(v) {
+    const s = String(v || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(s)) return null;
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : s.slice(0, 32);
+  }
+  function cleanTz(v) {
+    const s = String(v || '').trim();
+    return /^[+-]\d{2}:\d{2}$/.test(s) ? s : null;
+  }
+  // A signature is valid without a location. The certificate records why it is missing.
+  function readGeo(b) {
+    const allowed = ['captured', 'denied', 'unavailable', 'timeout', 'unsupported'];
+    const status = allowed.includes(b.geo_status) ? b.geo_status : 'unavailable';
+    if (status !== 'captured') return { status, lat: null, lng: null, accuracy: null };
+    const lat = Number(b.lat), lng = Number(b.lng), accuracy = Number(b.accuracy);
+    if (!Number.isFinite(lat) || lat < -90 || lat > 90 || !Number.isFinite(lng) || lng < -180 || lng > 180) {
+      return { status: 'unavailable', lat: null, lng: null, accuracy: null };
+    }
+    const acc = Number.isFinite(accuracy) && accuracy >= 0 && accuracy < 1e7 ? Math.round(accuracy) : null;
+    return {
+      status: 'captured',
+      lat: Math.round(lat * 1e6) / 1e6,
+      lng: Math.round(lng * 1e6) / 1e6,
+      accuracy: acc
+    };
+  }
+  function companyProfile() {
+    return {
+      name: getSetting('company_name') || getSetting('bill_company') || 'GeekiTek',
+      address: getSetting('company_address') || '',
+      email: getSetting('mail_from') || '',
+      phone: getSetting('company_phone') || ''
+    };
+  }
   const eventsFor = (id) => db.prepare('SELECT * FROM doc_events WHERE document_id=? ORDER BY id').all(id);
   const signersFor = (id) => db.prepare('SELECT * FROM doc_signers WHERE document_id=? ORDER BY order_index, id').all(id);
 
@@ -313,11 +353,8 @@ export default function registerDocuments(app, ctx) {
     const signers = signersFor(d.id);
     if (!signers.length) return res.status(400).json({ error: 'No signers' });
 
-    const company = {
-      name: getSetting('company_name') || 'GeekiTek',
-      address: getSetting('company_address') || ''
-    };
-    const pdf = renderDocument({ title: d.title, body: d.body || '', signers, company });
+    const company = companyProfile();
+    const pdf = renderDocument({ title: d.title, body: d.body || '', signers, company, date: longDate(new Date()) });
     const bytes = pdf.build();
     // Filed under the customer, site or POP this document belongs to.
     const target = ctx.files.place(d.parent_type, d.parent_id, parentLabel(d.parent_type, d.parent_id), 'documents',
@@ -559,12 +596,19 @@ export default function registerDocuments(app, ctx) {
     // canSign(), so a forwarded link cannot produce a second signature; it can only read a document
     // that person has already signed. The token still expires on its own schedule, and resending
     // still mints a new one and invalidates this.
+    const geo = readGeo(b);
+    const clientAt = cleanClientAt(b.client_at);
+    const tz = cleanTz(b.tz);
     db.prepare(`UPDATE doc_signers SET status='signed', signed_at=datetime('now'), signature_kind=?,
-      signature_strokes=?, signature_typed=?, signed_ip=?, signed_user_agent=? WHERE id=?`)
-      .run(kind, strokes, typed, clientIp(req), String(req.headers['user-agent'] || '').slice(0, 300), signer.id);
+      signature_strokes=?, signature_typed=?, signed_ip=?, signed_user_agent=?,
+      signed_lat=?, signed_lng=?, signed_accuracy=?, signed_geo=?, signed_tz=?, signed_client_at=? WHERE id=?`)
+      .run(kind, strokes, typed, clientIp(req), String(req.headers['user-agent'] || '').slice(0, 300),
+        geo.lat, geo.lng, geo.accuracy, geo.status, tz, clientAt, signer.id);
+    const saved = db.prepare('SELECT signed_at FROM doc_signers WHERE id=?').get(signer.id);
+    const where = geo.status === 'captured' ? ` at ${geo.lat}, ${geo.lng}` : ` (location ${geo.status})`;
     appendEvent({
       document_id: doc.id, signer_id: signer.id, kind: 'signed',
-      detail: `${signer.name} signed (${kind}); document sha256 ${String(doc.content_sha256).slice(0, 16)}…`,
+      detail: `${signer.name} signed (${kind}) ${saved.signed_at} UTC${where}; document sha256 ${String(doc.content_sha256).slice(0, 16)}…`,
       actor: signer.name, req
     });
 
@@ -644,7 +688,13 @@ export default function registerDocuments(app, ctx) {
         kind: s.signature_kind,
         strokes: s.signature_strokes ? JSON.parse(s.signature_strokes) : null,
         typed: s.signature_typed,
-        at: s.signed_at
+        at: s.signed_at,
+        clientAt: s.signed_client_at,
+        tz: s.signed_tz,
+        lat: s.signed_lat,
+        lng: s.signed_lng,
+        accuracy: s.signed_accuracy,
+        geo: s.signed_geo
       };
     }
 
@@ -654,12 +704,13 @@ export default function registerDocuments(app, ctx) {
 
     const events = eventsFor(documentId);
     const chain = verifyChain(events);
-    const company = { name: getSetting('company_name') || 'GeekiTek', address: getSetting('company_address') || '' };
+    const company = companyProfile();
 
     // One builder, two parts: the signed document, then the certificate on a fresh page. Both are
     // drawn by the same renderers used everywhere else, so the customer's copy and ours cannot drift.
     const pdf = renderDocument({
       title: doc.title, body: doc.body || '', signers, signatures, company,
+      date: longDate(sqlDate(doc.sent_at || doc.created_at)),
       footer: `Document #${doc.id} · as-sent sha256 ${String(doc.content_sha256).slice(0, 24)}... · certificate attached`
     });
     pdf.addPage();

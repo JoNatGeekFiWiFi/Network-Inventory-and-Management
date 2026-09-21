@@ -164,6 +164,7 @@ function signBlock() {
       <button class="btn link" onclick="decline()">I do not want to sign this</button>
     </div>
     <div class="note" id="msg" role="status" aria-live="polite"></div>
+    <div class="note">Signing records the time. If you allow it, this device's location is recorded on the certificate too. You can still sign if location is unavailable.</div>
   </div>`;
 }
 
@@ -241,13 +242,38 @@ function clearPad() {
   refreshButton();
 }
 
+function locate() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) { resolve({ geo_status: 'unsupported' }); return; }
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; resolve(v); };
+    const timer = setTimeout(() => finish({ geo_status: 'timeout' }), 8000);
+    navigator.geolocation.getCurrentPosition(
+      (p) => { clearTimeout(timer); finish({ geo_status: 'captured', lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy }); },
+      (err) => { clearTimeout(timer); finish({ geo_status: err && err.code === 1 ? 'denied' : 'unavailable' }); },
+      { enableHighAccuracy: true, timeout: 7000, maximumAge: 0 }
+    );
+  });
+}
+function deviceTz() {
+  const mins = -new Date().getTimezoneOffset();
+  const sign = mins >= 0 ? '+' : '-';
+  const abs = Math.abs(mins);
+  return sign + String(Math.floor(abs / 60)).padStart(2, '0') + ':' + String(abs % 60).padStart(2, '0');
+}
+
 async function submit() {
   const btn = $('#signBtn');
   btn.disabled = true;
-  $('#msg').textContent = 'Recording your signature…';
+  $('#msg').textContent = 'Recording the time and location…';
   try {
     if (!doc.signer.consented) { await api('/api/sign/consent'); doc.signer.consented = true; }
-    const body = mode === 'drawn' ? { kind: 'drawn', strokes } : { kind: 'typed', typed: $('#typedName').value.trim() };
+    const geo = await locate();
+    const body = Object.assign(
+      mode === 'drawn' ? { kind: 'drawn', strokes } : { kind: 'typed', typed: $('#typedName').value.trim() },
+      geo,
+      { client_at: new Date().toISOString(), tz: deviceTz() }
+    );
     const r = await api('/api/sign/submit', body);
     $('#wrap').innerHTML = `<div class="card">
       <h1>Thank you — that is signed</h1>
