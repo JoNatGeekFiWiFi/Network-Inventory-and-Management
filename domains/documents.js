@@ -544,8 +544,20 @@ export default function registerDocuments(app, ctx) {
       if (typed.length > 120) return res.status(400).json({ error: 'That name is too long.' });
     }
 
+    // The token is deliberately NOT cleared here.
+    //
+    // It was, and that broke the thing the signer needs most: the success screen offers "download
+    // your copy", which is fetched with this same token, so clearing it meant the link died at the
+    // exact moment somebody signed and they were told their link was invalid. A signer is entitled
+    // to the record they just agreed to — ESIGN requires it be retainable and reproducible by them —
+    // and denying it one second after signing is the worst possible time.
+    //
+    // Nothing is lost by keeping it. Signing twice is already refused by status, both here and in
+    // canSign(), so a forwarded link cannot produce a second signature; it can only read a document
+    // that person has already signed. The token still expires on its own schedule, and resending
+    // still mints a new one and invalidates this.
     db.prepare(`UPDATE doc_signers SET status='signed', signed_at=datetime('now'), signature_kind=?,
-      signature_strokes=?, signature_typed=?, signed_ip=?, signed_user_agent=?, token_hash=NULL WHERE id=?`)
+      signature_strokes=?, signature_typed=?, signed_ip=?, signed_user_agent=? WHERE id=?`)
       .run(kind, strokes, typed, clientIp(req), String(req.headers['user-agent'] || '').slice(0, 300), signer.id);
     appendEvent({
       document_id: doc.id, signer_id: signer.id, kind: 'signed',
@@ -570,21 +582,40 @@ export default function registerDocuments(app, ctx) {
     const { signer, doc } = found;
     if (signer.status === 'signed') return res.status(409).json({ error: 'You have already signed this document.' });
     const reason = String(b.reason || '').trim().slice(0, 500);
-    db.prepare("UPDATE doc_signers SET status='declined', declined_at=datetime('now'), declined_reason=?, token_hash=NULL WHERE id=?").run(reason || null, signer.id);
+    // Token kept, for the same reason as signing: somebody who declined should still be able to
+    // look at what they declined. Signing is refused by status, not by the token being gone.
+    db.prepare("UPDATE doc_signers SET status='declined', declined_at=datetime('now'), declined_reason=? WHERE id=?").run(reason || null, signer.id);
     db.prepare("UPDATE documents SET status='declined' WHERE id=?").run(doc.id);
     appendEvent({ document_id: doc.id, signer_id: signer.id, kind: 'declined', detail: `${signer.name} declined${reason ? ': ' + reason : ''}`, actor: signer.name, req });
     res.json({ ok: true });
   });
 
+  /**
+   * A page, not a JSON body, when this one fails.
+   *
+   * Every other signing endpoint is called by fetch from sign.html, so a JSON error is read and
+   * displayed properly. THIS one is a plain link a person clicks, so the browser navigates to it —
+   * and a failure painted {"error":"This signing link is not valid…"} across a white page at a
+   * customer who had just signed a contract.
+   */
+  const pdfProblem = (res, status, message) => res.status(status).type('html').send(
+    `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+     <title>Document unavailable</title>
+     <div style="font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:32rem;margin:12vh auto;padding:0 1.5rem;color:#1f1f1d">
+       <h1 style="font-size:20px;margin:0 0 .6rem">This document is not available</h1>
+       <p style="color:#5f5e5a;margin:0 0 .6rem">${String(message).replace(/[<&]/g, c => ({ '<': '&lt;', '&': '&amp;' }[c]))}</p>
+       <p style="color:#5f5e5a;margin:0">Reply to the message that sent you here and we will send it again.</p>
+     </div>`);
+
   /** The signer's own copy, by token. They are entitled to it and it costs us nothing. */
   app.get('/api/sign/pdf', (req, res) => {
     const found = signerByToken(req.query.token);
-    if (!found) return badToken(res);
+    if (!found) return pdfProblem(res, 404, 'This link is no longer valid. It may have expired or been replaced by a newer one.');
     const { doc } = found;
     const name = doc.signed_stored_name || doc.stored_name;
-    if (!name) return res.status(404).json({ error: 'No document yet' });
+    if (!name) return pdfProblem(res, 404, 'There is no document to download yet.');
     const fp = join(UPLOADS_DIR, name);
-    if (!existsSync(fp)) return res.status(404).json({ error: 'missing' });
+    if (!existsSync(fp)) return pdfProblem(res, 404, 'The stored file could not be found.');
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${doc.title.replace(/[^\w.-]+/g, '-').toLowerCase()}.pdf"`);
     res.send(readFileSync(fp));

@@ -278,9 +278,38 @@ let token = null;
   });
   ok(signed.status === 200 && signed.json.complete === true, 'a real signature completes the document');
 
-  // The token is spent. A forwarded email must not let someone sign twice.
+  // AFTER SIGNING, the link must still work for reading — and must not sign again.
+  //
+  // This test previously asserted the opposite, and so enforced a real bug: the token was cleared
+  // on signing, which killed the "download your copy" link on the success screen the moment
+  // somebody signed. They were told their link was invalid one second after agreeing to a contract.
+  // A signer is entitled to the record they just signed; ESIGN asks that it be retainable and
+  // reproducible by them.
   const reuse = await call('/api/sign/open', { body: { token } });
-  ok(reuse.status === 404, 'the link stops working once used — a forwarded email cannot sign again');
+  ok(reuse.status === 200 && reuse.json.already_signed === true,
+    'the link still opens after signing, and says it is already signed');
+  ok(reuse.json.can_sign === false, 'but offers no way to sign again');
+
+  const again = await call('/api/sign/submit', { body: { token, kind: 'typed', typed: 'Someone Else' } });
+  ok(again.status === 409, 'and a second signature through the same link is refused — status, not a missing token, is what stops it');
+
+  // The download the success screen actually links to.
+  const copy = await call(`/api/sign/pdf?token=${encodeURIComponent(token)}`, { raw: true });
+  ok(copy.status === 200 && copy.buf.slice(0, 5).toString() === '%PDF-',
+    `the signer can download their copy immediately after signing (${copy.buf.length} bytes)`);
+  // The certificate's text sits inside a Flate-compressed content stream, so it is not visible in
+  // the raw bytes. The page tree is not compressed, and the certificate is an extra page — so a
+  // multi-page document is the signed copy, and the as-sent original is one page.
+  const pageCount = (s) => Number((s.match(/\/Type \/Pages[^>]*\/Count (\d+)/) || s.match(/\/Count (\d+)/) || [])[1] || 0);
+  ok(pageCount(copy.buf.toString('latin1')) >= 2,
+    `and it is the COMPLETED copy — ${pageCount(copy.buf.toString('latin1'))} pages, the extra one being the certificate`);
+
+  // When this link DOES fail, the person clicking it is a customer, and the browser navigates to it
+  // rather than fetching it — so a JSON body gets painted across a white page. It must be a page.
+  const broken = await call('/api/sign/pdf?token=' + 'z'.repeat(50), { raw: true });
+  ok(broken.status === 404 && broken.type.includes('html'),
+    'a dead download link returns a readable page, not a raw JSON error at a customer');
+  ok(!broken.buf.toString().includes('{"error"'), 'with no JSON leaking into it');
 }
 
 // ---- what is left behind -----------------------------------------------------------------------------
