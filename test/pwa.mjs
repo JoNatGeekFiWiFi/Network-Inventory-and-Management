@@ -503,6 +503,16 @@ const REAL = [
   globalThis.renderLogin = () => {};
   const api = eval('(' + fnText.replace(/^async function api/, 'async function') + ')');
 
+  // FIRST, the way the code is actually written: a body and no method. This is the case the
+  // previous version of this test missed, because it exercised api() the way the comments describe
+  // it rather than the way every call site invokes it — and a second production bug went out.
+  // fetch defaults to GET, and a GET carrying a body makes the browser throw before the request is
+  // sent, so the user gets a raw DOM exception instead of a result.
+  await api('/thing', { body: { label: 'Support', impersonate_as: 'support@example.com' } });
+  ok(sent.opts.method === 'POST',
+    'a call with a body and NO method becomes a POST — fetch would otherwise throw on a GET with a body');
+  ok(JSON.parse(sent.opts.body).label === 'Support', 'and the body still arrives intact');
+
   await api('/thing', { method: 'POST', body: { name: "Jon's iPhone", kind: 'phone', n: 2 } });
   ok(typeof sent.opts.body === 'string', 'an OBJECT body is serialised — this is the bug that shipped');
   ok(sent.opts.body !== '[object Object]', 'and specifically is not the string "[object Object]"');
@@ -517,6 +527,11 @@ const REAL = [
 
   await api('/thing');
   ok(sent.opts.body == null, 'and a request with no body stays without one');
+  ok(!sent.opts.method || sent.opts.method === 'GET', 'and stays a GET — a plain read must not become a POST');
+
+  // An explicit method always wins. PUT and DELETE calls carry bodies too.
+  await api('/thing', { method: 'PUT', body: { a: 1 } });
+  ok(sent.opts.method === 'PUT', 'an explicitly named method is never overridden');
 
   await api('/thing', { method: 'POST', body: [1, 2, 3] });
   ok(sent.opts.body === '[1,2,3]', 'an array body is serialised too');

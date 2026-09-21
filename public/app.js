@@ -38,6 +38,16 @@ async function api(path, opts = {}) {
     || (typeof URLSearchParams !== 'undefined' && b instanceof URLSearchParams);
   if (!isRaw) opts.body = JSON.stringify(b);
 
+  // A body implies POST. fetch defaults to GET, and a GET with a body is not merely ignored — the
+  // browser throws "Request with GET/HEAD method cannot have body", so the call never leaves the
+  // page and the user sees a raw DOM exception.
+  //
+  // This is the second bug of exactly this shape. The first was an object body being coerced to
+  // "[object Object]". Both came from the same root cause: the test helpers in test/ default the
+  // method and stringify, so every test passed while real calls written the obvious way failed.
+  // The helper now behaves the way its callers already assume it does.
+  if (opts.body != null && !opts.method) opts.method = 'POST';
+
   const r = await fetch('/api' + path, opts);
   if (r.status === 401) { CURRENT_USER = null; renderLogin('Your session expired — please sign in.'); throw new Error('auth'); }
   if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.statusText); }
