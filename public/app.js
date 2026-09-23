@@ -65,7 +65,6 @@ function renderLogin(msg) {
     <div class="fld"><label class="fl">Password</label><input id="li-pass" type="password" autocomplete="current-password"/></div>
     <button class="btn primary" style="width:100%;justify-content:center" onclick="doLogin()"><i class="ti ti-login"></i> Sign in</button>
     <div class="login-err" id="li-err">${esc(msg || '')}</div>
-    <div class="hint">Test accounts (change after deploy):<br>admin@geekitek.test / admin123<br>noc@geekitek.test / noc123<br>field@geekitek.test / field123<br>support@geekitek.test / support123</div>
   </div></div>`;
   $('#li-pass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 }

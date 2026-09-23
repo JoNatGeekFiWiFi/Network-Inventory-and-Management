@@ -109,6 +109,27 @@ console.log('  flat backups still referenced:', n("SELECT COUNT(*) FROM router_b
 const set = (k) => { const r = one('SELECT value FROM settings WHERE key=?', k); return r && r.value ? 'set' : 'NOT SET'; };
 console.log('  settings      : company_name', set('company_name'), '| company_address', set('company_address'), '| inbound_secret', set('inbound_secret'), '| public_base_url', set('public_base_url'));
 NODE
+  # The seed accounts. The sign-in page used to print them with their passwords, so if any is still
+  # active with its default password, anyone who ever loaded the page can sign in as it. Checked by
+  # verifying the known default against the stored hash — the hash itself is never printed.
+  APP_DIR="$APP_DIR" DB_PATH="$DB_PATH" node --no-warnings --input-type=module - <<'NODE'
+import { DatabaseSync } from 'node:sqlite';
+const { verifyPassword } = await import(process.env.APP_DIR + '/hash.js');
+const db = new DatabaseSync(process.env.DB_PATH, { readOnly: true });
+const seeds = [['admin@geekitek.test', 'admin123'], ['noc@geekitek.test', 'noc123'], ['field@geekitek.test', 'field123'], ['support@geekitek.test', 'support123']];
+let bad = 0;
+for (const [email, pw] of seeds) {
+  const u = db.prepare('SELECT active, password_hash, role FROM users WHERE lower(email)=?').get(email);
+  let state = 'not present';
+  if (u) {
+    const dflt = (() => { try { return verifyPassword(pw, u.password_hash); } catch { return false; } })();
+    state = !u.active ? 'deactivated' : dflt ? `ACTIVE WITH DEFAULT PASSWORD (${u.role}) — change or deactivate now` : 'active, password changed';
+    if (u.active && dflt) bad++;
+  }
+  console.log('  seed account  :', email.padEnd(24), state);
+}
+if (!bad) console.log('  seed accounts : none usable with the published passwords');
+NODE
 else
   echo "database not found at $DB_PATH (or node missing)"
 fi
