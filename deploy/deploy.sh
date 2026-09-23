@@ -8,7 +8,7 @@
 # What it does, in order:
 #   1. Back up the SQLite database (kept in <db dir>/deploy-backups, last 14)
 #   2. git pull
-#   3. npm install --omit=dev
+#   3. npm ci --omit=dev (exactly the lockfile; never rewrites it)
 #   4. chown everything back to the service user
 #   5. Restart the systemd service
 #   6. Health-check the app; on failure, print exact rollback commands
@@ -87,6 +87,14 @@ fi
 # 2. Pull the new code (remember where we were for rollback)
 cd "$APP_DIR"
 OLD_SHA="$(git rev-parse HEAD)"
+# npm rewrites package-lock.json whenever it is run on the server by hand (`npm install`), or by a
+# different npm version. That is never a real change — the lockfile in git is the source of truth —
+# but git then refuses to pull ("your local changes would be overwritten"). Put git's copy back.
+# Any OTHER tracked file edited on the server still stops the deploy, because that may be real work.
+if ! git diff --quiet -- package-lock.json; then
+  echo ">> Discarding server-side changes to package-lock.json (the copy in git is authoritative)"
+  git checkout -- package-lock.json
+fi
 git pull --ff-only
 NEW_SHA="$(git rev-parse HEAD)"
 if [ "$OLD_SHA" = "$NEW_SHA" ]; then echo ">> Already up to date ($NEW_SHA)."; fi
@@ -97,7 +105,9 @@ if [ "$OLD_SHA" = "$NEW_SHA" ]; then echo ">> Already up to date ($NEW_SHA)."; f
 chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR" "$(dirname "$DB_PATH")"
 
 # 4. Dependencies (lockfile-pinned, production only)
-sudo -u "$RUN_USER" bash -c "cd '$APP_DIR' && npm install --omit=dev --no-audit --no-fund"
+# `npm ci`, not `npm install`: it installs exactly what the lockfile says and never rewrites it, so
+# the next pull cannot be blocked by a lockfile npm changed on its own.
+sudo -u "$RUN_USER" bash -c "cd '$APP_DIR' && npm ci --omit=dev --no-audit --no-fund"
 
 # 4b. Re-assert ownership in case npm created root-owned cache/artifacts
 chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR"
@@ -128,7 +138,7 @@ else
   echo >&2
   echo "!! To roll back:" >&2
   echo "     cd $APP_DIR && git reset --hard $OLD_SHA" >&2
-  echo "     sudo -u $RUN_USER bash -c 'cd $APP_DIR && npm install --omit=dev'" >&2
+  echo "     sudo -u $RUN_USER bash -c 'cd $APP_DIR && npm ci --omit=dev'" >&2
   [ -f "${BAK_FILE:-}" ] && echo "     cp '$BAK_FILE' '$DB_PATH'   # only if the new code migrated the DB" >&2
   echo "     chown -R $RUN_USER:$RUN_USER $APP_DIR && systemctl restart $SERVICE" >&2
   exit 1
