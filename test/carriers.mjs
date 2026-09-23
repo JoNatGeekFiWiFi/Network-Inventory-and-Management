@@ -48,10 +48,9 @@ let mine;
   const carrier = (await call('/api/carriers')).json.find(c => c.id === mine.id);
   ok(carrier.account_count === 1, 'the carrier counts its accounts');
 
-  // Deleting must not leave accounts pointing at nothing.
-  const del = await call('/api/carriers/' + mine.id, { method: 'DELETE' });
-  ok(del.status === 409 && /account/i.test(del.json.error), 'a carrier still holding accounts cannot be deleted');
-
+  // Carriers are vendors now, and vendors are deactivated, never deleted. This used to assert a 409
+  // "still holding accounts"; the guard existed so accounts never pointed at nothing, and archiving
+  // meets that more simply — the row stays, so every account keeps its carrier.
   // Reassigning and clearing.
   const cox = (await call('/api/carriers')).json.find(c => c.name === 'Cox');
   await call('/api/accounts/' + acct.id, { method: 'PUT', body: { name: 'TEST-ACCT-CARRIER', carrier_id: cox.id } });
@@ -64,9 +63,13 @@ let mine;
   await call('/api/accounts/' + acct.id, { method: 'PUT', body: { name: 'TEST-ACCT-CARRIER 2', carrier_id: '' } });
   ok((await call('/api/accounts/' + acct.id)).json.carrier_id === null, 'but an explicit empty value clears it');
 
-  // Now it's free.
-  ok((await call('/api/carriers/' + mine.id, { method: 'DELETE' })).status === 200, 'an unused carrier can be deleted');
-  ok((await call('/api/carriers/' + mine.id, { method: 'DELETE' })).status === 404, 'deleting it twice is a 404');
+  // Removing it deactivates it.
+  const gone = await call('/api/carriers/' + mine.id, { method: 'DELETE' });
+  ok(gone.status === 200 && gone.json.archived === true, 'removing a carrier deactivates it rather than deleting it');
+  ok((await call('/api/carriers')).json.every(c => c.id !== mine.id), 'a deactivated carrier is no longer offered in carrier pickers');
+  ok((await call('/api/vendors/' + mine.id)).json.archived_at, 'but its vendor record is still there, marked');
+  ok((await call('/api/carriers/' + mine.id, { method: 'DELETE' })).status === 409, 'deactivating it twice is refused');
+  ok((await call('/api/carriers/99999999', { method: 'DELETE' })).status === 404, 'and an unknown carrier is a 404');
 
   await call('/api/accounts/' + acct.id, { method: 'DELETE' });
 }
@@ -78,8 +81,14 @@ let mine;
   if (pops.length) {
     const ck = (await call('/api/circuits', { body: { label: 'TEST-CK-CARRIER', a_type: 'carrier', a_ref_id: cox.id, z_type: 'pop', z_ref_id: pops[0].id, status: 'Up' } })).json;
     if (ck && ck.id) {
-      const del = await call('/api/carriers/' + cox.id, { method: 'DELETE' });
-      ok(del.status === 409 && /circuit/i.test(del.json.error), 'a carrier referenced by a circuit cannot be deleted');
+      // Deactivating a carrier that circuits terminate on must leave those circuits readable: the
+      // circuit still names its carrier. (Previously this refused the delete outright.)
+      const probe = (await call('/api/vendors', { body: { name: 'TEST-CK-VENDOR ' + Date.now(), vendor_kind: 'carrier' } })).json;
+      const ck2 = (await call('/api/circuits', { body: { label: 'TEST-CK-CARRIER-2', a_type: 'carrier', a_ref_id: probe.id, z_type: 'pop', z_ref_id: pops[0].id, status: 'Up' } })).json;
+      await call('/api/carriers/' + probe.id, { method: 'DELETE' });
+      const seen = (await call('/api/circuits/' + ck2.id)).json;
+      ok(seen && /TEST-CK-VENDOR/.test(seen.a_name || ''), 'a circuit on a deactivated carrier still shows the carrier by name');
+      await call('/api/circuits/' + ck2.id, { method: 'DELETE' });
       await call('/api/circuits/' + ck.id, { method: 'DELETE' });
     } else ok(true, 'skipped: circuit fixture not created');
   } else ok(true, 'skipped: no POP to terminate a circuit on');
@@ -135,9 +144,11 @@ let mine;
     'renaming the carrier updates every device on it — a free-text field would have gone stale');
   await call('/api/carriers/' + verizon.id, { method: 'PUT', body: { name: 'Verizon' } });
 
-  // And a carrier with hardware on it is protected from deletion.
-  const del = await call('/api/carriers/' + verizon.id, { method: 'DELETE' });
-  ok(del.status === 409, 'a carrier with devices attached cannot be deleted');
+  // A carrier with hardware on it is protected in the way that matters: it cannot quietly stop
+  // being a carrier, which would drop that hardware's owner out of every carrier picker. (This used
+  // to assert the DELETE was refused; removing a carrier now deactivates it and keeps the row.)
+  const recat = await call('/api/vendors/' + verizon.id, { method: 'PUT', body: { vendor_kind: 'software' } });
+  ok(recat.status === 409, 'a carrier with devices attached cannot be re-typed as a non-carrier vendor');
 
   await call('/api/devices/' + dev.id, { method: 'DELETE' });
 }

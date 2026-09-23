@@ -1415,6 +1415,8 @@ export default function registerNetwork(app, ctx) {
       // recurring invoices: generate (and optionally email) any that have come due — once/hour is plenty
       if (process.env.BILLING !== 'off' && _tickN % 60 === 1) {
         try { ctx.jobs.runRecurringBilling(); } catch (e) { console.warn('recurring billing failed:', e.message); }
+        // …and the bills we OWE on a schedule (colo, power, software). Idempotent per period.
+        if (ctx.jobs.runRecurringExpenses) { try { ctx.jobs.runRecurringExpenses(); } catch (e) { console.warn('recurring expenses failed:', e.message); } }
       }
       // inbound email: poll the support mailbox for customer replies (self-guards on config)
       if (process.env.IMAP !== 'off') { try { await ctx.jobs.pollImap(); } catch (e) { console.warn('imap poll:', e.message); } }

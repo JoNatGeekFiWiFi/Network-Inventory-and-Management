@@ -129,6 +129,17 @@ export default function registerSearch(app, ctx) {
                    badge: r.archived_at ? 'archived' : r.status, archived: !!r.archived_at, href: '#/customer/' + r.id })
     },
     {
+      // Vendors — carriers included — by name, email or our account number with them, plus any of
+      // their contacts by name or email. NOC/Admin only, like the rest of the spending side.
+      type: 'vendor', label: 'Vendors', priv: true,
+      sql: `SELECT p.id, p.name, COALESCE(p.vendor_kind,'carrier') AS vendor_kind, p.email, p.archived_at FROM upstream_providers p
+            WHERE p.name LIKE :q ESCAPE '\\' OR p.email LIKE :q ESCAPE '\\' OR p.our_account_number LIKE :q ESCAPE '\\'
+               OR p.id IN (SELECT vendor_id FROM vendor_contacts WHERE name LIKE :q ESCAPE '\\' OR email LIKE :q ESCAPE '\\')
+            ORDER BY ${ARCHIVED_LAST('p')}, ${RANK('p.name')}, p.name LIMIT ${CAP}`,
+      map: r => ({ id: r.id, title: t(r.name), subtitle: [t(r.vendor_kind), t(r.email)].filter(Boolean).join(' · '),
+                   badge: r.archived_at ? 'archived' : r.vendor_kind, archived: !!r.archived_at, href: '#/vendor/' + r.id })
+    },
+    {
       type: 'account', label: 'Accounts', priv: true,
       sql: `SELECT id, name, account_number, status, archived_at FROM accounts
             WHERE name LIKE :q ESCAPE '\\' OR account_number LIKE :q ESCAPE '\\'

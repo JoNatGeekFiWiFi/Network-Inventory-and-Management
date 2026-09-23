@@ -691,6 +691,113 @@ export function migrate() {
     created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
   db.exec('CREATE INDEX IF NOT EXISTS idx_mailboxes_enabled ON mailboxes(enabled)');
 
+  // ---- Vendors ----------------------------------------------------------------------------------
+  //
+  // CARRIERS ARE VENDORS. Cox and Zayo are companies we pay, exactly like the distributor we buy
+  // radios from or the electrician who wires a cabinet, so they live in one list. That list is the
+  // existing upstream_providers table rather than a new `vendors` table: accounts, devices, circuits
+  // and connections already point into it by id, and a second table would mean the same company on
+  // record twice with nothing joining the two — the problem the carrier link was built to remove.
+  //
+  // `vendor_kind` is what separates them. Every row that existed before this is a carrier (that is
+  // all the table held), so the backfill is safe. Carrier pickers filter on it; the Vendors page
+  // shows everything.
+  ensure('upstream_providers', 'vendor_kind', 'TEXT');
+  db.prepare("UPDATE upstream_providers SET vendor_kind='carrier' WHERE vendor_kind IS NULL").run();
+  ensure('upstream_providers', 'email', 'TEXT');           // the general / accounts-payable address
+  ensure('upstream_providers', 'phone', 'TEXT');
+  ensure('upstream_providers', 'website', 'TEXT');
+  ensure('upstream_providers', 'address', 'TEXT');
+  ensure('upstream_providers', 'our_account_number', 'TEXT'); // what they call us, for their invoices
+  ensure('upstream_providers', 'payment_terms', 'TEXT');   // Net 30, due on receipt, autopay…
+  ensure('upstream_providers', 'notes', 'TEXT');
+  // Tax. Only the LAST FOUR of the TIN is kept in a column: the full number is on the W-9 itself,
+  // which is filed as a document, and a table column is the thing that ends up in an export, a
+  // screenshot or a support ticket. Four digits is enough to tell two W-9s apart.
+  ensure('upstream_providers', 'tax_classification', 'TEXT'); // individual, llc, c_corp, s_corp, partnership, other
+  ensure('upstream_providers', 'tin_type', 'TEXT');            // ein | ssn
+  ensure('upstream_providers', 'tin_last4', 'TEXT');
+  ensure('upstream_providers', 'is_1099', 'INTEGER NOT NULL DEFAULT 0');
+  ensure('upstream_providers', 'w9_received_at', 'TEXT');
+  ensure('upstream_providers', 'w9_attachment_id', 'INTEGER');
+  ensure('upstream_providers', 'created_at', 'TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_providers_kind ON upstream_providers(vendor_kind)');
+
+  db.exec(`CREATE TABLE IF NOT EXISTS vendor_contacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor_id INTEGER NOT NULL,
+    name TEXT NOT NULL, role TEXT, email TEXT, phone TEXT, notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_vendor_contacts ON vendor_contacts(vendor_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_vendor_contacts_email ON vendor_contacts(lower(email))');
+
+  // ---- Expenses ---------------------------------------------------------------------------------
+  //
+  // One row per bill or purchase. Money is stored in CENTS as an integer: floating-point dollars
+  // turn $0.10 + $0.20 into $0.30000000000000004, and a ledger that does not add up to the penny is
+  // a ledger nobody trusts.
+  //
+  // Nothing is deleted. A mistaken expense is VOIDED — it stays, marked, with who voided it and why,
+  // and drops out of every total. Same rule as the rest of the platform, and the one an accountant
+  // will ask about first.
+  //
+  // `parent_type/parent_id` optionally says where the money went (customer, site or POP), which is
+  // what lets Profit & Loss charge it against the right account.
+  db.exec(`CREATE TABLE IF NOT EXISTS expenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor_id INTEGER NOT NULL,
+    date TEXT NOT NULL,                     -- when it was incurred / billed (YYYY-MM-DD)
+    due_date TEXT,                          -- when it must be paid; NULL for things paid on the spot
+    amount_cents INTEGER NOT NULL,          -- the total, tax included
+    category TEXT NOT NULL DEFAULT 'other',
+    description TEXT,
+    reference TEXT,                         -- their invoice / bill / order number
+    status TEXT NOT NULL DEFAULT 'unpaid',  -- unpaid | paid | void
+    paid_at TEXT, paid_method TEXT, paid_reference TEXT,
+    parent_type TEXT, parent_id INTEGER,    -- optional: customer | site | pop
+    receipt_stored TEXT, receipt_name TEXT, receipt_mime TEXT, receipt_size INTEGER,
+    recurring_id INTEGER, period TEXT,      -- set when generated from a schedule
+    void_reason TEXT, voided_at TEXT, voided_by TEXT,
+    created_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_expenses_vendor ON expenses(vendor_id, date)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(date)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_expenses_status ON expenses(status, due_date)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_expenses_parent ON expenses(parent_type, parent_id)');
+  // The idempotency key for generated bills. However many times the generator runs — a restart, two
+  // ticks racing, a clock change — one schedule produces at most one expense per period.
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_recurring_period ON expenses(recurring_id, period) WHERE recurring_id IS NOT NULL');
+
+  db.exec(`CREATE TABLE IF NOT EXISTS expense_recurring (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor_id INTEGER NOT NULL,
+    description TEXT, category TEXT NOT NULL DEFAULT 'other',
+    amount_cents INTEGER NOT NULL,
+    frequency TEXT NOT NULL DEFAULT 'monthly', -- weekly | monthly | quarterly | semiannual | yearly
+    anchor_day INTEGER,                     -- day of month it falls on; kept so Jan 31 → Feb 28 → Mar 31
+    next_date TEXT NOT NULL,
+    due_days INTEGER NOT NULL DEFAULT 0,    -- how long after the bill date it is due
+    autopay INTEGER NOT NULL DEFAULT 0,     -- generated as already paid (card on file, bank draft)
+    parent_type TEXT, parent_id INTEGER,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_expense_recurring_vendor ON expense_recurring(vendor_id)');
+
+  // Mail to and from a vendor, filed on their page. Kept apart from customer_messages on purpose:
+  // that table feeds tickets, the customer portal and the customer's own history, and a supplier's
+  // quote must never be one join away from appearing in any of those.
+  db.exec(`CREATE TABLE IF NOT EXISTS vendor_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor_id INTEGER NOT NULL,
+    direction TEXT NOT NULL,                -- in | out
+    from_addr TEXT, to_addr TEXT, subject TEXT, body TEXT,
+    external_id TEXT,                       -- RFC 822 Message-ID, for de-duplication
+    author TEXT, delivery TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_vendor_messages ON vendor_messages(vendor_id, id)');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_vendor_messages_ext ON vendor_messages(vendor_id, external_id) WHERE external_id IS NOT NULL');
+
   // ---- Archiving: records are deactivated, never destroyed --------------------------------------
   //
   // A customer who leaves does not stop having existed. Their signed agreements, the sites they
@@ -709,7 +816,7 @@ export function migrate() {
   // One exception, for customers only: archiving also sets status='Closed', and reactivating sets it
   // back to Active, because for a customer the two really are the same fact and the pill on every
   // screen should say so. archived_at stays the thing every query checks.
-  for (const t of ['customers', 'sites', 'pops', 'accounts', 'devices', 'circuits']) {
+  for (const t of ['customers', 'sites', 'pops', 'accounts', 'devices', 'circuits', 'upstream_providers']) {
     ensure(t, 'archived_at', 'TEXT');        // when; NULL means active
     ensure(t, 'archived_by', 'TEXT');        // who
     ensure(t, 'archived_reason', 'TEXT');    // why, in their words

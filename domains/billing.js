@@ -165,8 +165,25 @@ export default function registerBilling(app, ctx) {
       const share = r2(rev / ids.length);
       for (const id of ids) { acc[id].revenue = r2(acc[id].revenue + share); acc[id].customer_count++; }
     }
-    const rows = Object.values(acc).map(a => { const cost = r2(a.base_cost + a.sub_cost); return { ...a, cost, margin: r2(a.revenue - cost), margin_pct: a.revenue ? r2(((a.revenue - cost) / a.revenue) * 100) : null }; });
-    const totals = rows.reduce((t, r) => ({ base_cost: r2(t.base_cost + r.base_cost), sub_cost: r2(t.sub_cost + r.sub_cost), cost: r2(t.cost + r.cost), revenue: r2(t.revenue + r.revenue), margin: r2(t.margin + r.margin) }), { base_cost: 0, sub_cost: 0, cost: 0, revenue: 0, margin: 0 });
+    // Recurring EXPENSES (colo, power, software…), from domains/vendors.js. Charged to the account a
+    // site is on, or split across a customer's accounts like revenue is; anything tied to a POP or to
+    // nothing is company overhead — its own line, off the company total, not smeared across accounts.
+    // See attributeRecurring() in lib/expenses.js for the rule and why.
+    const ex = ctx.recurringExpenseAttribution ? ctx.recurringExpenseAttribution() : { byAccount: new Map(), overhead: 0, overheadByCategory: {} };
+    for (const [id, cents] of ex.byAccount) {
+      if (acc[id]) acc[id].expense_cost = r2((acc[id].expense_cost || 0) + cents / 100);
+      else ex.overhead += cents;          // an account that no longer exists: the cost still lands somewhere
+    }
+    const rows = Object.values(acc).map(a => {
+      const expense_cost = r2(a.expense_cost || 0);
+      const cost = r2(a.base_cost + a.sub_cost + expense_cost);
+      return { ...a, expense_cost, cost, margin: r2(a.revenue - cost), margin_pct: a.revenue ? r2(((a.revenue - cost) / a.revenue) * 100) : null };
+    });
+    const totals = rows.reduce((t, r) => ({ base_cost: r2(t.base_cost + r.base_cost), sub_cost: r2(t.sub_cost + r.sub_cost), expense_cost: r2(t.expense_cost + r.expense_cost), cost: r2(t.cost + r.cost), revenue: r2(t.revenue + r.revenue), margin: r2(t.margin + r.margin) }), { base_cost: 0, sub_cost: 0, expense_cost: 0, cost: 0, revenue: 0, margin: 0 });
+    totals.overhead = r2(ex.overhead / 100);
+    totals.overhead_by_category = Object.fromEntries(Object.entries(ex.overheadByCategory || {}).map(([k, c]) => [k, r2(c / 100)]));
+    // Net margin is after overhead. Per-account margins are not: overhead has no account to belong to.
+    totals.margin = r2(totals.margin - totals.overhead);
     return { rows, totals };
   }
   app.get('/api/pnl', requireNoc, (req, res) => res.json(computePnl()));
@@ -183,7 +200,11 @@ export default function registerBilling(app, ctx) {
       return { id: c.id, name: c.name, monthly_revenue: share, shared: ids.length > 1, accounts: ids.length };
     }).filter(c => c.monthly_revenue > 0);
     const revenue = r2(custs.reduce((n, c) => n + c.monthly_revenue, 0));
-    res.json({ account_id: a.id, name: a.name, base_cost, sub_cost, cost, revenue, margin: r2(revenue - cost), margin_pct: revenue ? r2(((revenue - cost) / revenue) * 100) : null, subaccounts: subs, customers: custs });
+    // The same expense attribution the company P&L uses, so this card and that page cannot disagree.
+    const exAttr = ctx.recurringExpenseAttribution ? ctx.recurringExpenseAttribution() : { byAccount: new Map() };
+    const expense_cost = r2((exAttr.byAccount.get(a.id) || 0) / 100);
+    const total = r2(cost + expense_cost);
+    res.json({ account_id: a.id, name: a.name, base_cost, sub_cost, expense_cost, cost: total, revenue, margin: r2(revenue - total), margin_pct: revenue ? r2(((revenue - total) / revenue) * 100) : null, subaccounts: subs, customers: custs });
   });
 
 

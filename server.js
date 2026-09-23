@@ -29,7 +29,7 @@ function parentDisplayName(type, id) {
   const table = {
     customer: 'customers', site: 'sites', pop: 'pops',
     cable: 'fiber_cables', splice: 'fiber_splices', structure: 'fiber_structures',
-    route: 'fiber_routes', device: 'devices'
+    route: 'fiber_routes', device: 'devices', vendor: 'upstream_providers'
   }[type];
   if (!table || !id) return '';
   try { const r = db.prepare(`SELECT name FROM ${table} WHERE id=?`).get(id); return r ? r.name : ''; }
@@ -58,6 +58,7 @@ import registerMobile from './domains/mobile.js';
 import registerWireguard from './domains/wireguard.js';
 import registerDocuments from './domains/documents.js';
 import registerMail from './domains/mail.js';
+import registerVendors from './domains/vendors.js';
 import { addressKey, unitFromAddress } from './lib/address.js';
 import { PLATFORMS, platformOf, capMap, capsFor, driverFor, guessPlatform } from './lib/drivers/index.js';
 import { sshExec } from './lib/sshexec.js';
@@ -1002,7 +1003,9 @@ function publicDevice(d) {
 app.get('/api/meta', (req, res) => {
   res.json({
     pops: db.prepare('SELECT * FROM pops WHERE archived_at IS NULL ORDER BY name').all(),
-    providers: db.prepare('SELECT * FROM upstream_providers ORDER BY name').all(),
+    // Carriers only: upstream_providers now holds every vendor, and a picker for the company
+    // that brings a circuit in must not offer the electrician.
+    providers: db.prepare("SELECT * FROM upstream_providers WHERE COALESCE(vendor_kind,'carrier')='carrier' AND archived_at IS NULL ORDER BY name").all(),
     models: db.prepare('SELECT * FROM device_models ORDER BY manufacturer, model').all(),
     controllers: db.prepare('SELECT * FROM controllers ORDER BY name').all(),
     accounts: db.prepare('SELECT id, name FROM accounts WHERE archived_at IS NULL ORDER BY name').all(),
@@ -1356,7 +1359,7 @@ app.put('/api/sites/:id', (req, res) => {
 app.get('/api/carriers', (req, res) => {
   res.json(db.prepare(`SELECT p.id, p.name, p.provider_type,
       (SELECT COUNT(*) FROM accounts a WHERE a.carrier_id = p.id) AS account_count
-    FROM upstream_providers p ORDER BY p.name`).all());
+    FROM upstream_providers p WHERE COALESCE(p.vendor_kind,'carrier')='carrier' AND p.archived_at IS NULL ORDER BY p.name`).all());
 });
 
 app.post('/api/carriers', requireNoc, (req, res) => {
@@ -1364,7 +1367,7 @@ app.post('/api/carriers', requireNoc, (req, res) => {
   if (!name) return res.status(400).json({ error: 'Carrier name required' });
   const dupe = db.prepare('SELECT id, name FROM upstream_providers WHERE LOWER(name)=LOWER(?)').get(name);
   if (dupe) return res.status(409).json({ error: `"${dupe.name}" already exists` });
-  const info = db.prepare('INSERT INTO upstream_providers (name, provider_type) VALUES (?,?)')
+  const info = db.prepare("INSERT INTO upstream_providers (name, provider_type, vendor_kind, created_at) VALUES (?,?,'carrier',datetime('now'))")
     .run(name.slice(0, 80), N((req.body || {}).provider_type) || 'Carrier');
   audit(req, 'create', 'carrier#' + info.lastInsertRowid, name);
   res.json({ id: info.lastInsertRowid });
@@ -1383,20 +1386,18 @@ app.put('/api/carriers/:id', requireNoc, (req, res) => {
   res.json({ ok: true });
 });
 
+// A carrier is a vendor, and a vendor is a business record: removing one deactivates it. The old
+// hard delete refused whenever anything referenced the carrier — which, for any carrier worth
+// removing, was always. Accounts, devices and circuits keep pointing at it and keep its name.
 app.delete('/api/carriers/:id', requireNoc, (req, res) => {
   const ex = db.prepare('SELECT * FROM upstream_providers WHERE id=?').get(req.params.id);
   if (!ex) return res.status(404).json({ error: 'not found' });
-  // Blocked while anything points at it — a dangling carrier_id would leave accounts and circuits
-  // silently unattributed rather than visibly wrong.
-  const accts = db.prepare('SELECT COUNT(*) n FROM accounts WHERE carrier_id=?').get(ex.id).n;
-  const devs = db.prepare('SELECT COUNT(*) n FROM devices WHERE carrier_id=?').get(ex.id).n;
-  const ckts = db.prepare("SELECT COUNT(*) n FROM circuits WHERE provider_id=? OR (a_type='carrier' AND a_ref_id=?) OR (z_type='carrier' AND z_ref_id=?)").get(ex.id, ex.id, ex.id).n;
-  const conns = db.prepare('SELECT COUNT(*) n FROM connections WHERE served_provider_id=?').get(ex.id).n;
-  const used = [accts && `${accts} account(s)`, devs && `${devs} device(s)`, ckts && `${ckts} circuit(s)`, conns && `${conns} connection(s)`].filter(Boolean);
-  if (used.length) return res.status(409).json({ error: `${ex.name} is still referenced by ${used.join(', ')} — reassign them first` });
-  db.prepare('DELETE FROM upstream_providers WHERE id=?').run(ex.id);
-  audit(req, 'delete', 'carrier#' + ex.id, ex.name);
-  res.json({ ok: true });
+  if (ex.archived_at) return res.status(409).json({ error: 'Already deactivated' });
+  db.prepare("UPDATE upstream_providers SET archived_at=datetime('now'), archived_by=?, archived_reason=? WHERE id=?")
+    .run((req.user && req.user.email) || null, N(String((req.body || {}).reason || '').trim()) || null, ex.id);
+  db.prepare('UPDATE expense_recurring SET active=0 WHERE vendor_id=? AND active=1').run(ex.id);
+  audit(req, 'archive', 'carrier#' + ex.id, ex.name);
+  res.json({ ok: true, archived: true });
 });
 
 // ---- units within a site (MDUs) ----
@@ -1809,7 +1810,7 @@ app.get('/api/circuits-options', (req, res) => {
   res.json({
     sites: db.prepare('SELECT id, name FROM sites ORDER BY name').all(),
     pops: db.prepare('SELECT id, name FROM pops ORDER BY name').all(),
-    carriers: db.prepare('SELECT id, name FROM upstream_providers ORDER BY name').all(),
+    carriers: db.prepare("SELECT id, name FROM upstream_providers WHERE COALESCE(vendor_kind,'carrier')='carrier' AND archived_at IS NULL ORDER BY name").all(),
     accounts: db.prepare('SELECT id, name FROM accounts ORDER BY name').all()
   });
 });
@@ -2005,7 +2006,8 @@ const ATT_MIME = { ...ATT_IMAGE_MIME, ...ATT_DOC_MIME };
 const ATT_MAX = 25 * 1024 * 1024; // 25 MB
 // Anything a photo/document can hang off. Fiber plant needs these for as-built evidence:
 // splice-tray photos, OTDR traces, locate tickets, permits.
-const ATT_PARENTS = ['site', 'pop', 'cable', 'splice', 'structure', 'route'];
+// 'vendor': contracts, quotes, W-9s and price lists filed on the vendor's page.
+const ATT_PARENTS = ['site', 'pop', 'cable', 'splice', 'structure', 'route', 'vendor'];
 function withNoteAttachments(notes) {
   const q = db.prepare('SELECT id, filename, mime, size, caption FROM note_attachments WHERE note_id=? ORDER BY id');
   for (const n of notes) n.attachments = q.all(n.id);
@@ -2188,6 +2190,9 @@ registerBilling(app, ctx);
 // which support installs onto ctx. Registering earlier leaves them undefined at send time.
 registerDocuments(app, ctx);
 registerMail(app, ctx);
+// Vendors supply the expense side of P&L (ctx.recurringExpenseAttribution) and vendor mail filing
+// (ctx.vendorForAddress / ctx.fileVendorMail). Both are looked up at call time, so order is free.
+registerVendors(app, ctx);
 
 // ---- Files (admin only) ----
 //

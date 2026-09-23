@@ -239,6 +239,27 @@ Owner (carrier or 3rd-party distributor)
 
 A device's `owner_account` / `owner_sub_account` reference into this hierarchy. (Distributors may also link to the underlying carrier.) The account number and account info are **always recorded**, regardless of whether the hardware itself is owned by us, the carrier, or a distributor.
 
+### 3.8b Vendors & expenses
+
+Everyone the company pays, in one list: carriers (Cox, Zayo) plus distributors, contractors, colos,
+utilities, software and professional services. Stored in `upstream_providers` with a `vendor_kind`
+(every pre-existing row is `carrier`), so accounts, devices and circuits keep pointing at the same
+row. Carrier pickers filter to `vendor_kind='carrier'`.
+
+| Field | Notes |
+|---|---|
+| contacts | `vendor_contacts` — name, role, email, phone. Contact emails route inbound mail. |
+| tax | classification, EIN/SSN type, **TIN last four only** (the full TIN lives on the W-9 file), 1099 flag, W-9 file on record |
+| expenses | one-off or generated from a recurring bill; integer cents; unpaid → paid, or **void with a reason** (never deleted); optional receipt (photo/PDF, filed under the vendor's `receipts/`); optional customer/site/POP it was spent on |
+| recurring bills | weekly → yearly, month-end anchored; generated once per period (unique index on schedule + period); autopay option |
+| email | inbound mail from the vendor or its contacts is filed on the vendor page, never as a ticket; outbound goes from the vendor mailbox |
+
+**Profit & Loss:** active recurring bills are part of the monthly run-rate. Tied to a site → that
+site's account; tied to a customer → split across the customer's accounts like revenue; tied to a
+POP or nothing → company overhead, its own line. One-off expenses are actual spending (Expenses page),
+not run-rate. Carrier account `monthly_cost` is already counted, so the recurring-bill form warns
+against entering it again.
+
 ### 3.9 Controller (managed integration endpoint)
 
 A first-class managed object representing a UniFi Network or UISP instance the platform connects to. Devices behind it are managed through it.

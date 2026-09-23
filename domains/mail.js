@@ -10,6 +10,7 @@
 // out under the wrong identity, the customer replies to somewhere unexpected, and no error is
 // raised anywhere. So send-as is verified against Gmail's own list at setup rather than trusted.
 import { parseServiceAccount, createTokenSource, ALL_SCOPES } from '../lib/googleauth.js';
+import { routeInbound } from '../lib/mailroute.js';
 import { createGmailClient, addresses, buildRawMessage, normaliseMessage, syncSince, replyTokenIn, visibleReply } from '../lib/gmail.js';
 
 const PURPOSES = ['customer', 'vendor', 'billing', 'other'];
@@ -369,9 +370,26 @@ export default function registerMail(app, ctx) {
       catch (e) { if (e.status === 404) continue; throw e; }
       const msg = normaliseMessage(raw);
       if (msg.outbound || (msg.labels || []).includes('DRAFT')) continue;
-      const ours = allowedFrom(m).includes(String(msg.from || '').toLowerCase());
-      if (ours && !replyTokenIn(msg)) continue;
-      if (!replyTokenIn(msg) && !knownCustomer(msg.from)) continue;
+      // The routing rules, and why they are in this order, are in lib/mailroute.js.
+      const route = routeInbound(msg, {
+        isOurs: (from) => allowedFrom(m).includes(String(from || '').toLowerCase()),
+        hasReplyToken: replyTokenIn,
+        vendorFor: ctx.vendorForAddress || null,
+        isKnownCustomer: knownCustomer
+      });
+      if (route.to === 'skip') continue;
+      if (route.to === 'vendor') {
+        const filed = ctx.fileVendorMail({
+          vendor_id: route.vendor_id,
+          from: msg.fromName && msg.from ? `${msg.fromName} <${msg.from}>` : (msg.from || ''),
+          to: (msg.routedTo || []).join(' '),
+          subject: msg.subject === '(no subject)' ? '' : (msg.subject || ''),
+          body: msg.text || String(msg.snippet || ''),
+          external_id: msg.messageId || ('gmail-' + msg.id)
+        });
+        if (filed) ingested++;
+        continue;
+      }
       const body = visibleReply(msg.text || '') || String(msg.snippet || '').trim();
       if (!body) continue;
       const r = ctx.ingestInbound({

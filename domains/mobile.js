@@ -83,7 +83,7 @@ export default function registerMobile(app, ctx) {
   // and fetched once at launch instead of per screen. `version` lets the app skip the download
   // when nothing has changed.
   app.get('/api/m/bootstrap', (req, res) => {
-    const carriers = db.prepare('SELECT id, name FROM upstream_providers ORDER BY name').all();
+    const carriers = db.prepare("SELECT id, name FROM upstream_providers WHERE COALESCE(vendor_kind,'carrier')='carrier' AND archived_at IS NULL ORDER BY name").all();
     const accounts = db.prepare(`SELECT a.id, a.name, a.account_number, a.carrier_id, p.name AS carrier_name
       FROM accounts a LEFT JOIN upstream_providers p ON p.id=a.carrier_id
       WHERE a.status='Active' ORDER BY a.name`).all();

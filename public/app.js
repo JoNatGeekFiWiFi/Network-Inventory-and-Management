@@ -93,6 +93,7 @@ function setupHeader() {
   $('#navBilling').style.display = isPriv() ? '' : 'none';
   $('#navDocs').style.display = isPriv() ? '' : 'none';
   $('#navPnl').style.display = isPriv() ? '' : 'none';
+  $('#navVendors').style.display = isPriv() ? '' : 'none';
   $('#navTickets').style.display = isPriv() ? '' : 'none';
   $('#navPackages').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
@@ -239,6 +240,16 @@ async function route() {
     if (p[0] === 'documents' && p[1]) { setNav('documents'); return await renderDocument(p[1]); }
     if (p[0] === 'documents') { setNav('documents'); return await renderDocuments(); }
     if (p[0] === 'pnl') { setNav('pnl'); return await renderPnl(); }
+    if (p[0] === 'vendors') { setNav('vendors'); return await renderVendors(); }
+    if (p[0] === 'vendor' && p[1] === 'new') { setNav('vendors'); return await formVendor(q); }
+    if (p[0] === 'vendor' && p[2] === 'edit') { setNav('vendors'); return await formVendor({ id: p[1] }); }
+    if (p[0] === 'vendor' && p[1]) { setNav('vendors'); return await renderVendor(p[1]); }
+    if (p[0] === 'expenses' && p[1] === 'recurring') { setNav('vendors'); return await renderExpenseRecurring(); }
+    if (p[0] === 'expenses') { setNav('vendors'); return await renderExpenses(); }
+    if (p[0] === 'expense' && p[1] === 'new') { setNav('vendors'); return await formExpense(q); }
+    if (p[0] === 'expense' && p[2] === 'edit') { setNav('vendors'); return await formExpense({ id: p[1] }); }
+    if (p[0] === 'expense-recurring' && p[1] === 'new') { setNav('vendors'); return await formExpenseRecurring(q); }
+    if (p[0] === 'expense-recurring' && p[2] === 'edit') { setNav('vendors'); return await formExpenseRecurring({ id: p[1] }); }
     if (p[0] === 'import') { setNav('settings'); return await renderImport(); }
     if (p[0] === 'importwiz') { setNav('settings'); return await renderImportWiz(p[1]); }
     if (p[0] === 'scan') { setNav('scan'); return await renderScan(q); }
@@ -820,7 +831,8 @@ async function manageCarriers() {
       <input id="cn-${c.id}" value="${esc(c.name)}" style="flex:1" />
       <span class="small sec-muted">${c.account_count} account${c.account_count === 1 ? '' : 's'}</span>
       <button class="btn sm" onclick="saveCarrier(${c.id})"><i class="ti ti-check"></i> Save</button>
-      <button class="btn sm" onclick="delCarrier(${c.id}, '${esc(c.name).replace(/'/g, "\\'")}')"><i class="ti ti-trash"></i> Delete</button>
+      <a class="btn sm" href="#/vendor/${c.id}"><i class="ti ti-building-store"></i> Vendor page</a>
+      <button class="btn sm" onclick="delCarrier(${c.id}, ${esc(JSON.stringify(c.name))})"><i class="ti ti-archive"></i> Deactivate</button>
     </div>`).join('')}
     <div class="row">
       <i class="ti ti-plus sec-muted"></i>
@@ -840,8 +852,8 @@ async function saveCarrier(id) {
   catch (e) { toast(e.message); }
 }
 async function delCarrier(id, name) {
-  if (!confirm(`Delete carrier "${name}"?`)) return;
-  try { await api('/carriers/' + id, { method: 'DELETE' }); toast('Deleted'); $('#cf').remove(); renderCustomers().then(manageCarriers); }
+  if (!confirm(`Deactivate carrier "${name}"?\n\nIt stops being offered for new accounts. Accounts, hardware and circuits on it keep it, and it can be reactivated from Vendors.`)) return;
+  try { await api('/carriers/' + id, { method: 'DELETE' }); toast('Deactivated'); $('#cf').remove(); renderCustomers().then(manageCarriers); }
   catch (e) { toast(e.message); }
 }
 
@@ -4115,17 +4127,22 @@ async function renderPnl() {
   const t = d.totals;
   const rows = d.rows.map(r => `<div class="row rowlink" onclick="location.hash='#/account/${r.account_id}'">
     <div style="flex:1;min-width:0"><div><b>${esc(r.name)}</b>${r.customer_count ? ' <span class="small sec-muted">· ' + r.customer_count + ' client' + (r.customer_count === 1 ? '' : 's') + '</span>' : ''}</div>
-      <div class="small sec-muted">cost ${money0(r.cost)} (base ${money0(r.base_cost)} + subs ${money0(r.sub_cost)}) · revenue ${money0(r.revenue)}</div></div>
+      <div class="small sec-muted">cost ${money0(r.cost)} (base ${money0(r.base_cost)} + subs ${money0(r.sub_cost)}${r.expense_cost ? ' + expenses ' + money0(r.expense_cost) : ''}) · revenue ${money0(r.revenue)}</div></div>
     <div style="text-align:right;min-width:120px"><div style="font-weight:600;color:${marginColor(r.margin)}">${money0(r.margin)}/mo</div><div class="small sec-muted">${r.margin_pct == null ? '—' : r.margin_pct + '% margin'}</div></div>
     <i class="ti ti-chevron-right muted"></i></div>`).join('');
-  view().innerHTML = `<div class="head"><div class="t"><h1>Profit &amp; Loss</h1><div class="small sec-muted" style="margin-top:3px">Per account · monthly run-rate · account + sub-account cost vs recurring client revenue</div></div></div>
+  const overheadRows = Object.entries(t.overhead_by_category || {}).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `<div class="kv"><span class="small">${esc(k)}</span><span class="mono small">${money0(v)}/mo</span></div>`).join('');
+  view().innerHTML = `<div class="head"><div class="t"><h1>Profit &amp; Loss</h1><div class="small sec-muted" style="margin-top:3px">Per account · monthly run-rate · account, sub-account and recurring-expense cost vs recurring client revenue</div></div>
+      <a class="btn" href="#/expenses/recurring"><i class="ti ti-repeat"></i> Recurring bills</a></div>
     <div class="grid3" style="margin:16px 0">
-      <div class="metric"><div class="l">Monthly cost</div><div class="v">${money0(t.cost)}</div></div>
+      <div class="metric"><div class="l">Monthly cost</div><div class="v">${money0(t.cost + (t.overhead || 0))}</div>${t.overhead ? `<div class="small sec-muted">incl. ${money0(t.overhead)} overhead</div>` : ''}</div>
       <div class="metric"><div class="l">Monthly revenue</div><div class="v">${money0(t.revenue)}</div></div>
       <div class="metric"><div class="l">Net margin</div><div class="v" style="color:${marginColor(t.margin)}">${money0(t.margin)}</div></div>
     </div>
     <div class="card">${rows || '<div class="row muted">No accounts</div>'}</div>
-    <div class="help">Revenue = active recurring invoices (pre-tax), normalized to monthly and split evenly across the accounts serving each client. Costs = account base cost + its sub-accounts' monthly costs. One-time invoices aren't included in the run-rate.</div>`;
+    ${t.overhead ? `<div class="card"><div class="hd"><h2><i class="ti ti-building-store"></i> Company overhead <span class="small sec-muted" style="font-weight:400">· ${money0(t.overhead)}/mo</span></h2></div>
+      <div style="padding:0 14px 12px">${overheadRows}<div class="small sec-muted" style="margin-top:6px">Recurring bills tied to a POP or to nothing in particular. Taken off the company total, not off any one account.</div></div></div>` : ''}
+    <div class="help">Revenue = active recurring invoices (pre-tax), normalized to monthly and split evenly across the accounts serving each client. Costs = account base cost + its sub-accounts' monthly costs + active recurring bills charged to that account's sites or customers. One-time invoices and one-off expenses aren't part of the run-rate — see Vendors → Expenses for actual spending.</div>`;
 }
 function pnlCard(p) {
   if (!p) return '';
@@ -4135,7 +4152,514 @@ function pnlCard(p) {
       <div class="metric"><div class="l">Revenue</div><div class="v">${money0(p.revenue)}</div></div>
       <div class="metric"><div class="l">Margin</div><div class="v" style="color:${marginColor(p.margin)}">${money0(p.margin)}${p.margin_pct != null ? ' <span class="small">(' + p.margin_pct + '%)</span>' : ''}</div></div>
     </div>
-    <div style="padding:0 14px 12px" class="small sec-muted">Cost = base ${money0(p.base_cost)} + sub-accounts ${money0(p.sub_cost)}. Revenue from ${p.customers.length} billed client${p.customers.length === 1 ? '' : 's'}${p.customers.some(c => c.shared) ? ' (some shared across accounts)' : ''}.</div></div>`;
+    <div style="padding:0 14px 12px" class="small sec-muted">Cost = base ${money0(p.base_cost)} + sub-accounts ${money0(p.sub_cost)}${p.expense_cost ? ' + recurring bills ' + money0(p.expense_cost) : ''}. Revenue from ${p.customers.length} billed client${p.customers.length === 1 ? '' : 's'}${p.customers.some(c => c.shared) ? ' (some shared across accounts)' : ''}.</div></div>`;
+}
+
+// ---------- Vendors & expenses ----------
+//
+// Everyone the company pays — carriers included — and what we pay them. NOC/Admin only.
+//
+// Money arrives from the server in integer CENTS and is formatted here; nothing in the browser does
+// arithmetic on dollars. Amounts typed into forms go to the server as the text that was typed, and
+// the server parses them (lib/expenses.js toCents), so there is exactly one place that decides what
+// "1,234.5" means.
+const fmtC = (c) => {
+  const n = Number(c) || 0, neg = n < 0, a = Math.abs(Math.round(n));
+  return (neg ? '-' : '') + '$' + Math.floor(a / 100).toLocaleString('en-US') + '.' + String(a % 100).padStart(2, '0');
+};
+const centsToInput = (c) => (c == null ? '' : (Number(c) / 100).toFixed(2));
+let VENDOR_META = null;
+async function vendorMeta() {
+  if (!VENDOR_META) VENDOR_META = await api('/vendors/meta');
+  return VENDOR_META;
+}
+const kindLabel = (k) => ((VENDOR_META && VENDOR_META.kinds.find(x => x[0] === k)) || [k, k || 'Other'])[1];
+const catLabel = (k) => ((VENDOR_META && VENDOR_META.categories.find(x => x[0] === k)) || [k, k || 'Other'])[1];
+const freqLabel = (f) => (VENDOR_META && VENDOR_META.frequencies[f]) || f;
+
+/** One tab strip for the three Vendors views, so the menu entry leads to all of them. */
+const vendorTabs = (active) => `<div class="seg" style="max-width:520px;margin-bottom:14px">
+  <a class="segbtn ${active === 'vendors' ? 'on' : ''}" href="#/vendors"><i class="ti ti-building-store"></i> Vendors</a>
+  <a class="segbtn ${active === 'expenses' ? 'on' : ''}" href="#/expenses"><i class="ti ti-receipt"></i> Expenses</a>
+  <a class="segbtn ${active === 'recurring' ? 'on' : ''}" href="#/expenses/recurring"><i class="ti ti-repeat"></i> Recurring bills</a></div>`;
+
+/**
+ * A small form in a sheet, returning the values or null if cancelled.
+ *
+ * Used instead of prompt(): prompt() cannot show a date picker or a dropdown, looks like a browser
+ * error on a phone, and can be suppressed by the browser after a few uses — at which point "Mark
+ * paid" silently does nothing.
+ */
+function askSheet({ title, intro = '', fields, ok = 'Save', danger = false }) {
+  return new Promise((resolve) => {
+    const back = document.createElement('div');
+    back.className = 'sheet-back';
+    back.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(title)}">
+      <div class="hd" style="padding:12px 14px"><h2>${esc(title)}</h2>
+        <button class="btn sm" data-act="cancel" aria-label="Close without saving"><i class="ti ti-x"></i></button></div>
+      <div class="sheet-body">
+        ${intro ? `<p class="small" style="margin:0 0 12px">${intro}</p>` : ''}
+        ${fields.map(f => f.type === 'select'
+          ? `<div class="fld"><label class="fl" for="ask-${f.name}">${esc(f.label)}</label><select id="ask-${f.name}" name="${f.name}">${f.options.map(o => `<option value="${esc(o[0])}" ${o[0] === f.value ? 'selected' : ''}>${esc(o[1])}</option>`).join('')}</select></div>`
+          : `<div class="fld"><label class="fl" for="ask-${f.name}">${esc(f.label)}</label><input id="ask-${f.name}" name="${f.name}" type="${f.type || 'text'}" value="${esc(f.value || '')}" placeholder="${esc(f.ph || '')}" autocomplete="off"/></div>`).join('')}
+        <div style="display:flex;gap:8px;margin-top:14px">
+          <button class="btn sm ${danger ? '' : 'primary'}" data-act="ok" style="${danger ? 'color:var(--danger);border-color:var(--danger)' : ''}">${esc(ok)}</button>
+          <button class="btn sm" data-act="cancel">Cancel</button></div>
+      </div></div>`;
+    const close = (v) => { back.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = (e) => { if (e.key === 'Escape') close(null); };
+    document.addEventListener('keydown', onKey);
+    back.addEventListener('click', (e) => {
+      if (e.target === back || e.target.closest('[data-act=cancel]')) return close(null);
+      if (!e.target.closest('[data-act=ok]')) return;
+      const out = {}; back.querySelectorAll('[name]').forEach(el => { out[el.name] = el.value; });
+      close(out);
+    });
+    document.body.appendChild(back);
+    const first = back.querySelector('input,select'); if (first) first.focus();
+  });
+}
+
+// ---- vendor list ----
+async function renderVendors() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  await vendorMeta();
+  const kind = window._vendorKind || '';
+  const list = await api('/vendors' + archQ() + (kind ? (SHOW_ARCHIVED ? '&' : '?') + 'kind=' + encodeURIComponent(kind) : ''));
+  const rows = list.map(v => {
+    const monthly = (v.recurring_monthly_cents || 0) + Math.round((v.account_monthly || 0) * 100);
+    return `<div class="row rowlink" onclick="location.hash='#/vendor/${v.id}'" style="${v.archived_at ? 'opacity:.65' : ''}">
+      <div class="av">${initials(v.name)}</div>
+      <div style="flex:1;min-width:0"><div>${esc(v.name)}${archTag(v)}</div>
+        <div class="small sec-muted">${esc(kindLabel(v.vendor_kind))}${v.email ? ' · ' + esc(v.email) : ''}${v.account_count ? ` · ${v.account_count} account${v.account_count === 1 ? '' : 's'}` : ''}${v.is_1099 ? ' · 1099' + (v.w9_received_at ? '' : ' <span style="color:var(--warning)">(no W-9)</span>') : ''}</div></div>
+      <div style="text-align:right;min-width:120px">
+        ${v.unpaid_cents ? `<div class="small" style="color:var(--warning)">${fmtC(v.unpaid_cents)} unpaid</div>` : ''}
+        <div class="small sec-muted">${monthly ? fmtC(monthly) + '/mo' : ''}${monthly && v.ytd_cents ? ' · ' : ''}${v.ytd_cents ? fmtC(v.ytd_cents) + ' YTD' : ''}</div></div>
+      <i class="ti ti-chevron-right muted"></i></div>`;
+  }).join('');
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Vendors</h1><a class="btn primary" href="#/vendor/new"><i class="ti ti-plus"></i> Add vendor</a></div>
+    ${vendorTabs('vendors')}
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+      <label class="small sec-muted" for="vkind">Type</label>
+      <select id="vkind" style="width:auto" onchange="window._vendorKind=this.value;renderVendors()">
+        <option value="">All types</option>${VENDOR_META.kinds.map(k => `<option value="${k[0]}" ${k[0] === kind ? 'selected' : ''}>${esc(k[1])}</option>`).join('')}</select>
+      ${archivedToggle('vendors')}</div>
+    <div class="card">${rows || '<div class="row muted">No vendors yet</div>'}</div>
+    <div class="help">Carriers are vendors too. Their accounts' monthly costs are counted in Profit &amp; Loss from the account itself — don't enter the same bill again as a recurring expense.</div>`;
+}
+
+// ---- vendor form ----
+async function formVendor(q) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  await vendorMeta();
+  let v = { name: '', vendor_kind: q.kind || 'distributor' };
+  if (q.id) v = await api('/vendors/' + q.id);
+  const kinds = VENDOR_META.kinds.map(k => ({ v: k[0], l: k[1] }));
+  const taxClasses = [{ v: '', l: '—' }, { v: 'individual', l: 'Individual / sole proprietor' }, { v: 'llc', l: 'LLC' }, { v: 'c_corp', l: 'C corporation' }, { v: 's_corp', l: 'S corporation' }, { v: 'partnership', l: 'Partnership' }, { v: 'other', l: 'Other' }];
+  view().innerHTML = `<div class="crumb" onclick="location.hash='${q.id ? '#/vendor/' + q.id : '#/vendors'}'"><i class="ti ti-chevron-left"></i> ${q.id ? esc(v.name) : 'Vendors'}</div>
+    <h1>${q.id ? 'Edit vendor' : 'New vendor'}</h1>
+    <div class="card" style="margin-top:14px;padding:16px" id="f">
+      <div class="grid2">${field('Name', 'name', v.name)}${field('Type', 'vendor_kind', v.vendor_kind, { type: 'select', options: kinds })}</div>
+      <div class="grid2">${field('Email (billing / general)', 'email', v.email || '', { type: 'email' })}${field('Phone', 'phone', v.phone || '', { type: 'tel' })}</div>
+      <div class="grid2">${field('Website', 'website', v.website || '', { ph: 'https://' })}${field('Our account number with them', 'our_account_number', v.our_account_number || '', { mono: true })}</div>
+      <div class="fld"><label class="fl">Address</label><div id="vaddr"></div></div>
+      <div class="grid2">${field('Payment terms', 'payment_terms', v.payment_terms || '', { ph: 'Net 30, due on receipt, autopay…' })}<div></div></div>
+      ${field('Notes', 'notes', v.notes || '', { type: 'textarea' })}
+      <h3 style="margin:16px 0 6px;font-size:14px">Tax</h3>
+      <div class="grid2">${field('Tax classification', 'tax_classification', v.tax_classification || '', { type: 'select', options: taxClasses })}
+        ${field('TIN type', 'tin_type', v.tin_type || '', { type: 'select', options: [{ v: '', l: '—' }, { v: 'ein', l: 'EIN' }, { v: 'ssn', l: 'SSN' }] })}</div>
+      <div class="grid2">${field('TIN — last 4 digits only', 'tin', v.tin_last4 || '', { ph: '1234', mono: true })}${field('W-9 received', 'w9_received_at', v.w9_received_at || '', { type: 'date' })}</div>
+      <label class="row" style="cursor:pointer;padding:6px 0"><input type="checkbox" id="is1099" ${v.is_1099 ? 'checked' : ''} style="width:auto"/>
+        <div style="flex:1"><div>Issue a 1099</div><div class="small sec-muted">Contractors and unincorporated vendors you pay $600+ a year. Flags them on the list until a W-9 is on file.</div></div></label>
+      <div class="help"><i class="ti ti-lock"></i> Only the last four digits of the tax ID are stored. The full number stays on the W-9 itself — upload it to the vendor's files and mark it as the W-9.</div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:12px">
+        <button class="btn" onclick="location.hash='${q.id ? '#/vendor/' + q.id : '#/vendors'}'">Cancel</button>
+        <button class="btn primary" onclick="saveVendor(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div>
+    </div>`;
+  attachAddressSearch($('#vaddr'), { name: 'address', value: v.address || '' });
+}
+async function saveVendor(id) {
+  const d = collect('#f');
+  d.is_1099 = $('#is1099').checked;
+  try {
+    const r = id ? await api('/vendors/' + id, { method: 'PUT', body: d }) : await api('/vendors', { method: 'POST', body: d });
+    toast('Saved');
+    location.hash = '#/vendor/' + (id || r.id);
+  } catch (e) { toast(e.message); }
+}
+
+// ---- vendor page ----
+async function renderVendor(id) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  await vendorMeta();
+  const v = await api('/vendors/' + id);
+  const t = v.totals;
+  const kv = (label, val) => val ? `<div class="kv"><span class="small sec-muted">${label}</span><span>${val}</span></div>` : '';
+  const archived = v.archived_at
+    ? `<div class="card" style="border-left:3px solid var(--warning);margin-bottom:12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px"><b><i class="ti ti-archive"></i> Deactivated</b>
+          <div class="small sec-muted">${esc(archivedWhen(v.archived_at))}${v.archived_by ? ' by ' + esc(v.archived_by) : ''}${v.archived_reason ? ' — ' + esc(v.archived_reason) : ''}</div></div>
+        <button class="btn sm" onclick="restoreVendor(${v.id})"><i class="ti ti-arrow-back-up"></i> Reactivate</button></div>` : '';
+
+  const contacts = v.contacts.map(c => `<div class="row">
+      <i class="ti ti-user sec-muted"></i>
+      <div style="flex:1;min-width:0"><div>${esc(c.name)}${c.role ? ` <span class="tag">${esc(c.role)}</span>` : ''}</div>
+        <div class="small sec-muted">${[c.email ? `<a class="iplink" href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : '', c.phone ? `<a class="iplink" href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : ''].filter(Boolean).join(' · ')}</div></div>
+      <button class="btn sm" onclick="editVendorContact(${c.id}, ${v.id})"><i class="ti ti-edit"></i> Edit</button>
+      <button class="btn sm" onclick="removeVendorContact(${c.id}, ${v.id})" aria-label="Remove ${esc(c.name)} from contacts"><i class="ti ti-x"></i> Remove</button></div>`).join('');
+
+  const accounts = v.accounts.length ? `<div class="card"><div class="hd"><h2><i class="ti ti-building"></i> Carrier accounts · ${v.accounts.length}</h2></div>
+      ${v.accounts.map(a => `<div class="row rowlink" onclick="location.hash='#/account/${a.id}'" style="${a.archived_at ? 'opacity:.6' : ''}">
+        <div style="flex:1;min-width:0"><div>${esc(a.name)}${archTag(a)}</div><div class="small mono sec-muted">${esc(a.account_number || '')}</div></div>
+        <span class="small">${a.monthly_cost ? money0(a.monthly_cost) + '/mo' : ''}</span><i class="ti ti-chevron-right muted"></i></div>`).join('')}
+      <div class="help" style="padding:0 14px 10px">These monthly costs are already in Profit &amp; Loss. Record one-off charges (installs, equipment) as expenses, but not the monthly bill itself.</div></div>` : '';
+
+  const recurring = v.recurring.map(r => `<div class="row" style="${r.active ? '' : 'opacity:.6'}">
+      <i class="ti ti-repeat sec-muted"></i>
+      <div style="flex:1;min-width:0"><div>${esc(r.description || catLabel(r.category))} ${r.active ? '' : '<span class="tag">paused</span>'}${r.autopay ? ' <span class="tag">autopay</span>' : ''}</div>
+        <div class="small sec-muted">${fmtC(r.amount_cents)} ${esc(freqLabel(r.frequency).toLowerCase())} · next ${esc(r.next_date)}${r.parent_label ? ' · ' + esc(r.parent_label) : ' · overhead'}</div></div>
+      <a class="btn sm" href="#/expense-recurring/${r.id}/edit"><i class="ti ti-edit"></i> Edit</a>
+      <button class="btn sm" onclick="toggleRecurringExpense(${r.id}, ${r.active ? 0 : 1})"><i class="ti ${r.active ? 'ti-player-pause' : 'ti-player-play'}"></i> ${r.active ? 'Pause' : 'Resume'}</button></div>`).join('');
+
+  const w9 = v.w9
+    ? `<a class="iplink" href="/api/attachments/${v.w9.id}" target="_blank" rel="noopener">${esc(v.w9.filename || 'W-9')}</a>`
+    : (v.w9_received_at ? 'received ' + esc(v.w9_received_at) : `<span style="color:${v.is_1099 ? 'var(--warning)' : 'inherit'}">not on file</span>`);
+  const fileOpts = v.attachments.map(a => [String(a.id), a.filename || ('File #' + a.id)]);
+
+  view().innerHTML = `<div class="crumb" onclick="location.hash='#/vendors'"><i class="ti ti-chevron-left"></i> Vendors</div>
+    ${archived}
+    <div class="head"><div class="av" style="width:46px;height:46px;border-radius:8px;font-size:16px">${initials(v.name)}</div>
+      <div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(v.name)}</h1><span class="tag">${esc(kindLabel(v.vendor_kind))}</span></div>
+        <div class="small sec-muted" style="margin-top:3px">${[v.email ? `<a class="iplink" href="mailto:${esc(v.email)}">${esc(v.email)}</a>` : '', v.phone ? esc(v.phone) : '', v.payment_terms ? esc(v.payment_terms) : ''].filter(Boolean).join(' · ') || 'No contact details yet'}</div></div>
+      <a class="btn primary" href="#/expense/new?vendor=${v.id}"><i class="ti ti-plus"></i> Add expense</a>
+      <a class="btn" href="#/vendor/${v.id}/edit"><i class="ti ti-edit"></i> Edit</a>
+      ${v.archived_at ? '' : `<button class="btn" onclick="deactivateVendor(${v.id}, ${esc(JSON.stringify(v.name))})" title="Deactivate — the vendor and its history are kept"><i class="ti ti-archive"></i> Deactivate</button>`}</div>
+
+    <div class="grid3" style="margin:16px 0">
+      <div class="metric"><div class="l">Unpaid</div><div class="v" style="${t.unpaid_cents ? 'color:var(--warning)' : ''}">${fmtC(t.unpaid_cents)}</div>${t.overdue_cents ? `<div class="small" style="color:var(--danger)">${fmtC(t.overdue_cents)} overdue</div>` : ''}</div>
+      <div class="metric"><div class="l">Spent this year</div><div class="v">${fmtC(t.ytd_cents)}</div><div class="small sec-muted">${fmtC(t.last12_cents)} last 12 months</div></div>
+      <div class="metric"><div class="l">Recurring</div><div class="v">${fmtC(t.recurring_monthly_cents + Math.round((v.account_monthly || 0) * 100))}<span class="small">/mo</span></div>${v.account_monthly ? `<div class="small sec-muted">incl. ${money0(v.account_monthly)} carrier accounts</div>` : ''}</div>
+    </div>
+
+    <div class="grid2" style="align-items:start">
+      <div class="card"><div class="hd"><h2><i class="ti ti-info-circle"></i> Details</h2></div>
+        <div style="padding:0 14px 12px">
+          ${kv('Website', v.website ? `<a class="iplink" href="${esc(/^https?:/i.test(v.website) ? v.website : 'https://' + v.website)}" target="_blank" rel="noopener">${esc(v.website)}</a>` : '')}
+          ${kv('Our account #', v.our_account_number ? `<span class="mono">${esc(v.our_account_number)}</span>` : '')}
+          ${kv('Address', esc(v.address || ''))}
+          ${kv('Payment terms', esc(v.payment_terms || ''))}
+          ${v.notes ? `<div class="small" style="white-space:pre-wrap;margin-top:8px">${esc(v.notes)}</div>` : ''}
+          ${!v.website && !v.our_account_number && !v.address && !v.payment_terms && !v.notes ? '<div class="small muted">Nothing yet — Edit to add.</div>' : ''}
+        </div></div>
+      <div class="card"><div class="hd"><h2><i class="ti ti-file-certificate"></i> Tax &amp; W-9</h2></div>
+        <div style="padding:0 14px 12px">
+          ${kv('1099 vendor', v.is_1099 ? 'Yes' : 'No')}
+          ${kv('Classification', esc(v.tax_classification || '') || '—')}
+          ${kv('Tax ID', v.tin_last4 ? `<span class="mono">${esc((v.tin_type || '').toUpperCase())} •••${esc(v.tin_last4)}</span>` : '—')}
+          ${kv('W-9', w9)}
+          ${fileOpts.length ? `<div style="margin-top:8px"><button class="btn sm" onclick="pickVendorW9(${v.id})"><i class="ti ti-paperclip"></i> Choose W-9 from files</button></div>` : '<div class="small sec-muted" style="margin-top:6px">Upload the signed W-9 under Files below, then mark it here.</div>'}
+        </div></div>
+    </div>
+
+    <div class="card"><div class="hd"><h2><i class="ti ti-address-book"></i> Contacts · ${v.contacts.length}</h2>
+      <button class="btn sm" onclick="addVendorContact(${v.id})"><i class="ti ti-plus"></i> Add contact</button></div>
+      ${contacts || '<div class="row muted">No contacts yet — sales rep, support, accounts payable…</div>'}</div>
+
+    ${accounts}
+
+    <div class="card"><div class="hd"><h2><i class="ti ti-repeat"></i> Recurring bills</h2>
+      <a class="btn sm" href="#/expense-recurring/new?vendor=${v.id}"><i class="ti ti-plus"></i> Add recurring bill</a></div>
+      ${recurring || '<div class="row muted">None. Add one for bills that arrive on a schedule — colo, power, software.</div>'}</div>
+
+    <div class="card"><div class="hd"><h2><i class="ti ti-receipt"></i> Expenses · ${v.expenses.length}</h2>
+      <a class="btn sm" href="#/expense/new?vendor=${v.id}"><i class="ti ti-plus"></i> Add expense</a></div>
+      ${expenseRows(v.expenses, { showVendor: false })}</div>
+
+    ${attachPanel('vendor', v.id, v.attachments, 'Documents &amp; files')}
+
+    <div class="card" id="vmail"><div class="hd"><h2><i class="ti ti-mail"></i> Email · ${v.message_count}</h2>
+      <button class="btn sm" onclick="composeVendorMail(${v.id})"><i class="ti ti-send"></i> Email this vendor</button></div>
+      <div id="vmailList"><div class="row muted">Loading…</div></div>
+      <div class="help" style="padding:0 14px 10px">Mail from this vendor's address or any contact's address is filed here automatically from the connected Workspace mailbox, instead of becoming a support ticket.</div></div>`;
+  loadVendorMail(v.id);
+}
+
+/** Expense rows with their actions. Shared by the vendor page and the Expenses tab. */
+function expenseRows(list, { showVendor = true } = {}) {
+  if (!list.length) return '<div class="row muted">No expenses yet</div>';
+  return list.map(e => {
+    const st = e.status === 'void' ? '<span class="tag">void</span>'
+      : e.status === 'paid' ? '<span class="tag" style="color:var(--success)">paid</span>'
+      : e.overdue ? '<span class="tag" style="color:var(--danger)">overdue</span>' : '<span class="tag" style="color:var(--warning)">unpaid</span>';
+    const when = e.status === 'paid' ? `paid ${esc(e.paid_at || '')}${e.paid_method ? ' · ' + esc(e.paid_method) : ''}`
+      : e.status === 'void' ? `void — ${esc(e.void_reason || '')}` : (e.due_date ? `due ${esc(e.due_date)}` : '');
+    const actions = e.status === 'void' ? '' : [
+      e.status === 'unpaid' ? `<button class="btn sm" onclick="payExpense(${e.id})"><i class="ti ti-cash"></i> Mark paid</button>` : `<button class="btn sm" onclick="unpayExpense(${e.id})">Mark unpaid</button>`,
+      `<a class="btn sm" href="#/expense/${e.id}/edit"><i class="ti ti-edit"></i> Edit</a>`,
+      `<button class="btn sm" onclick="voidExpense(${e.id})">Void</button>`
+    ].join('');
+    return `<div class="row" style="flex-wrap:wrap;${e.status === 'void' ? 'opacity:.55' : ''}">
+      <div style="flex:1;min-width:200px">
+        <div>${showVendor ? `<a class="iplink" href="#/vendor/${e.vendor_id}">${esc(e.vendor_name || '')}</a> · ` : ''}${esc(e.description || catLabel(e.category))} ${st}${e.recurring_id ? ' <i class="ti ti-repeat sec-muted" title="From a recurring bill"></i>' : ''}</div>
+        <div class="small sec-muted">${esc(e.date)} · ${esc(catLabel(e.category))}${e.reference ? ' · #' + esc(e.reference) : ''}${e.parent_label ? ' · ' + esc(e.parent_label) : ''}${when ? ' · ' + when : ''}</div></div>
+      <div class="mono" style="min-width:90px;text-align:right;${e.status === 'void' ? 'text-decoration:line-through' : ''}">${fmtC(e.amount_cents)}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        ${e.has_receipt ? `<a class="btn sm" href="/api/expenses/${e.id}/receipt" target="_blank" rel="noopener"><i class="ti ti-eye"></i> Receipt</a>`
+          : (e.status === 'void' ? '' : `<label class="btn sm" style="cursor:pointer"><i class="ti ti-paperclip"></i> Add receipt<input type="file" accept="image/*,application/pdf" style="display:none" onchange="uploadExpenseReceipt(${e.id}, this)" aria-label="Upload a receipt for this expense"/></label>`)}
+        ${actions}</div></div>`;
+  }).join('');
+}
+
+async function payExpense(id) {
+  const r = await askSheet({ title: 'Mark paid', ok: 'Mark paid', fields: [
+    { name: 'paid_at', label: 'Paid on', type: 'date', value: new Date().toISOString().slice(0, 10) },
+    { name: 'method', label: 'How', type: 'select', value: 'card', options: [['card', 'Card'], ['ach', 'ACH / bank transfer'], ['check', 'Check'], ['cash', 'Cash'], ['autopay', 'Autopay'], ['other', 'Other']] },
+    { name: 'reference', label: 'Reference (check #, confirmation)', ph: 'optional' }] });
+  if (!r) return;
+  try { await api('/expenses/' + id + '/pay', { method: 'POST', body: r }); toast('Marked paid'); route(); } catch (e) { toast(e.message); }
+}
+async function unpayExpense(id) {
+  try { await api('/expenses/' + id + '/unpay', { method: 'POST', body: {} }); toast('Marked unpaid'); route(); } catch (e) { toast(e.message); }
+}
+async function voidExpense(id) {
+  const r = await askSheet({ title: 'Void this expense', ok: 'Void', danger: true,
+    intro: 'It stays on record, marked void, and drops out of every total. Say why — this is what anyone reading the books later will see.',
+    fields: [{ name: 'reason', label: 'Reason', ph: 'Entered twice, wrong vendor, refunded…' }] });
+  if (!r) return;
+  try { await api('/expenses/' + id + '/void', { method: 'POST', body: r }); toast('Voided'); route(); } catch (e) { toast(e.message); }
+}
+async function uploadExpenseReceipt(id, input) {
+  const f = input.files && input.files[0]; if (!f) return;
+  if (f.size > 15 * 1024 * 1024) { toast('Receipt is over 15 MB'); return; }
+  try { const data = await fileToDataUrl(f); await api('/expenses/' + id + '/receipt', { method: 'POST', body: { name: f.name, mime: f.type, data } }); toast('Receipt attached'); route(); }
+  catch (e) { toast(e.message); }
+}
+
+async function addVendorContact(vendorId, c = {}) {
+  const r = await askSheet({ title: c.id ? 'Edit contact' : 'Add contact', fields: [
+    { name: 'name', label: 'Name', value: c.name }, { name: 'role', label: 'Role', value: c.role, ph: 'Sales rep, support, accounts payable…' },
+    { name: 'email', label: 'Email', type: 'email', value: c.email }, { name: 'phone', label: 'Phone', type: 'tel', value: c.phone }] });
+  if (!r) return;
+  try {
+    if (c.id) await api('/vendor-contacts/' + c.id, { method: 'PUT', body: r });
+    else await api('/vendors/' + vendorId + '/contacts', { method: 'POST', body: r });
+    toast('Saved'); renderVendor(vendorId);
+  } catch (e) { toast(e.message); }
+}
+async function editVendorContact(contactId, vendorId) {
+  const v = await api('/vendors/' + vendorId);
+  const c = v.contacts.find(x => x.id === contactId); if (c) addVendorContact(vendorId, c);
+}
+async function removeVendorContact(contactId, vendorId) {
+  if (!confirm('Remove this contact from the vendor?')) return;
+  try { await api('/vendor-contacts/' + contactId, { method: 'DELETE' }); toast('Removed'); renderVendor(vendorId); } catch (e) { toast(e.message); }
+}
+async function pickVendorW9(vendorId) {
+  const v = await api('/vendors/' + vendorId);
+  const r = await askSheet({ title: 'Which file is the W-9?', ok: 'Mark as W-9', fields: [
+    { name: 'attachment_id', label: 'File', type: 'select', value: v.w9_attachment_id ? String(v.w9_attachment_id) : '', options: [['', '— none —'], ...v.attachments.map(a => [String(a.id), a.filename || ('File #' + a.id)])] }] });
+  if (!r) return;
+  try { await api('/vendors/' + vendorId + '/w9', { method: 'POST', body: { attachment_id: r.attachment_id ? Number(r.attachment_id) : null } }); toast('Saved'); renderVendor(vendorId); } catch (e) { toast(e.message); }
+}
+async function deactivateVendor(id, name) {
+  const r = await askSheet({ title: 'Deactivate vendor', ok: 'Deactivate',
+    intro: `Deactivate <b>${esc(name)}</b>? Its recurring bills are paused. Expenses, contacts, files and email all stay, and it can be reactivated at any time.`,
+    fields: [{ name: 'reason', label: 'Reason (optional)', ph: 'Switched suppliers, contract ended…' }] });
+  if (!r) return;
+  try { await api('/vendors/' + id, { method: 'DELETE', body: r }); toast('Deactivated'); location.hash = '#/vendors'; } catch (e) { toast(e.message); }
+}
+async function restoreVendor(id) {
+  try { const r = await api('/vendors/' + id + '/restore', { method: 'POST', body: {} }); toast(r && r.note ? 'Reactivated. ' + r.note : 'Reactivated'); route(); } catch (e) { toast(e.message); }
+}
+async function toggleRecurringExpense(id, active) {
+  try { await api('/expense-recurring/' + id, { method: 'PUT', body: { active } }); toast(active ? 'Resumed' : 'Paused'); route(); } catch (e) { toast(e.message); }
+}
+
+async function loadVendorMail(vendorId) {
+  const el = $('#vmailList'); if (!el) return;
+  let msgs = [];
+  try { msgs = await api('/vendors/' + vendorId + '/messages'); } catch { el.innerHTML = '<div class="row muted">Could not load email.</div>'; return; }
+  el.innerHTML = msgs.length ? msgs.map(m => `<div class="row" style="align-items:flex-start">
+      <i class="ti ti-${m.direction === 'in' ? 'mail' : 'send'} sec-muted" style="margin-top:3px"></i>
+      <div style="flex:1;min-width:0">
+        <div><b>${esc(m.subject || '(no subject)')}</b></div>
+        <div class="small sec-muted">${m.direction === 'in' ? 'From ' + esc(m.from_addr || '') : 'To ' + esc(m.to_addr || '') + (m.author ? ' · by ' + esc(m.author) : '')} · ${esc(archivedWhen(m.created_at))}</div>
+        <details style="margin-top:4px"><summary class="small" style="cursor:pointer">Show message</summary>
+          <div class="small" style="white-space:pre-wrap;margin-top:6px;max-height:320px;overflow:auto">${esc(m.body || '')}</div></details></div></div>`).join('')
+    : '<div class="row muted">No email yet.</div>';
+}
+async function composeVendorMail(vendorId) {
+  const v = await api('/vendors/' + vendorId);
+  const addrs = [...new Set([v.email, ...v.contacts.map(c => c.email)].filter(Boolean))];
+  const r = await askSheet({ title: 'Email ' + v.name, ok: 'Send', fields: [
+    addrs.length ? { name: 'to', label: 'To', type: 'select', value: addrs[0], options: addrs.map(a => [a, a]) } : { name: 'to', label: 'To', type: 'email', ph: 'name@vendor.com' },
+    { name: 'subject', label: 'Subject' }, { name: 'body', label: 'Message' }] });
+  if (!r) return;
+  try { const s = await api('/vendors/' + vendorId + '/messages', { method: 'POST', body: r }); toast('Sent' + (s.from ? ' from ' + s.from : '')); loadVendorMail(vendorId); }
+  catch (e) { toast(e.message); }
+}
+
+// ---- where the money went: customer, site or POP ----
+async function chargeTargets() {
+  const [custs, sites, pops] = await Promise.all([api('/customers'), api('/sites'), api('/pops')]);
+  return [{ v: '', l: '— Company overhead (not tied to anything) —' },
+    ...custs.map(c => ({ v: 'customer:' + c.id, l: 'Customer · ' + c.name })),
+    ...sites.map(s => ({ v: 'site:' + s.id, l: 'Site · ' + s.name })),
+    ...pops.map(p => ({ v: 'pop:' + p.id, l: 'POP · ' + p.name }))];
+}
+const splitTarget = (v) => { const [t, id] = String(v || '').split(':'); return t && id ? { parent_type: t, parent_id: Number(id) } : { parent_type: null, parent_id: null }; };
+
+// ---- expense form ----
+async function formExpense(q) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  await vendorMeta();
+  const [vendors, targets] = await Promise.all([api('/vendors'), chargeTargets()]);
+  let e = { vendor_id: q.vendor || '', date: new Date().toISOString().slice(0, 10), category: 'other' };
+  if (q.id) e = await api('/expenses/' + q.id);
+  const back = q.id ? '#/vendor/' + e.vendor_id : (q.vendor ? '#/vendor/' + q.vendor : '#/expenses');
+  view().innerHTML = `<div class="crumb" onclick="location.hash='${back}'"><i class="ti ti-chevron-left"></i> Back</div>
+    <h1>${q.id ? 'Edit expense' : 'New expense'}</h1>
+    <div class="card" style="margin-top:14px;padding:16px" id="f">
+      <div class="grid2"><div class="fld"><label class="fl">Vendor</label><div id="exvendor"></div></div>
+        ${field('Amount (total, tax included)', 'amount', centsToInput(e.amount_cents), { ph: '0.00', mono: true })}</div>
+      <div class="grid2">${field('Date', 'date', e.date, { type: 'date' })}${field('Due date (leave blank if paid on the spot)', 'due_date', e.due_date || '', { type: 'date' })}</div>
+      <div class="grid2">${field('Category', 'category', e.category, { type: 'select', options: VENDOR_META.categories.map(c => ({ v: c[0], l: c[1] })) })}
+        ${field('Their invoice / order #', 'reference', e.reference || '', { mono: true })}</div>
+      ${field('Description', 'description', e.description || '', { ph: 'What was it for?' })}
+      <div class="fld"><label class="fl">Charged to</label><div id="extarget"></div>
+        <div class="help" style="margin:4px 0 0">Tie it to a customer or site to see it against that account in Profit &amp; Loss. Anything else is company overhead.</div></div>
+      ${q.id ? '' : `<label class="row" style="cursor:pointer;padding:6px 0"><input type="checkbox" id="expaid" style="width:auto"/>
+        <div style="flex:1"><div>Already paid</div><div class="small sec-muted">Card at the counter, autopay, paid on receipt.</div></div></label>
+      <div class="fld"><label class="fl" for="exreceipt">Receipt (photo or PDF)</label><input type="file" id="exreceipt" accept="image/*,application/pdf" capture="environment"/></div>`}
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:12px">
+        <button class="btn" onclick="location.hash='${back}'">Cancel</button>
+        <button class="btn primary" onclick="saveExpense(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div>
+    </div>`;
+  attachSearch($('#exvendor'), vendors.map(v => ({ v: v.id, l: v.name + ' (' + kindLabel(v.vendor_kind) + ')' })), 'vendor_id', e.vendor_id, 'Search vendors…');
+  attachSearch($('#extarget'), targets, 'target', e.parent_type ? e.parent_type + ':' + e.parent_id : '', 'Search customers, sites, POPs…');
+}
+async function saveExpense(id) {
+  const d = collect('#f');
+  Object.assign(d, splitTarget(d.target)); delete d.target;
+  if (!id) {
+    d.paid = $('#expaid') && $('#expaid').checked;
+    const f = $('#exreceipt') && $('#exreceipt').files[0];
+    if (f) {
+      if (f.size > 15 * 1024 * 1024) { toast('Receipt is over 15 MB'); return; }
+      d.receipt = { name: f.name, mime: f.type, data: await fileToDataUrl(f) };
+    }
+  }
+  try {
+    if (id) await api('/expenses/' + id, { method: 'PUT', body: d });
+    else await api('/expenses', { method: 'POST', body: d });
+    toast('Saved'); location.hash = '#/vendor/' + d.vendor_id;
+  } catch (e) { toast(e.message); }
+}
+
+// ---- recurring bill form ----
+async function formExpenseRecurring(q) {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  await vendorMeta();
+  const [vendors, targets] = await Promise.all([api('/vendors'), chargeTargets()]);
+  let r = { vendor_id: q.vendor || '', frequency: 'monthly', next_date: new Date().toISOString().slice(0, 10), category: 'other', due_days: 0, autopay: 0, active: 1 };
+  if (q.id) { const all = await api('/expense-recurring'); r = all.find(x => x.id === Number(q.id)) || r; }
+  const vendorOf = (id) => vendors.find(v => v.id === Number(id));
+  const back = r.vendor_id ? '#/vendor/' + r.vendor_id : '#/expenses/recurring';
+  view().innerHTML = `<div class="crumb" onclick="location.hash='${back}'"><i class="ti ti-chevron-left"></i> Back</div>
+    <h1>${q.id ? 'Edit recurring bill' : 'New recurring bill'}</h1>
+    <div class="card" style="margin-top:14px;padding:16px" id="f">
+      <div class="grid2"><div class="fld"><label class="fl">Vendor</label><div id="rvendor"></div></div>
+        ${field('Amount each time', 'amount', centsToInput(r.amount_cents), { ph: '0.00', mono: true })}</div>
+      <div id="rcarrierwarn"></div>
+      <div class="grid2">${field('How often', 'frequency', r.frequency, { type: 'select', options: Object.entries(VENDOR_META.frequencies).map(([v, l]) => ({ v, l })) })}
+        ${field('Next bill date', 'next_date', r.next_date, { type: 'date' })}</div>
+      <div class="grid2">${field('Category', 'category', r.category, { type: 'select', options: VENDOR_META.categories.map(c => ({ v: c[0], l: c[1] })) })}
+        ${field('Due this many days after the bill', 'due_days', r.due_days || 0, { type: 'number' })}</div>
+      ${field('Description', 'description', r.description || '', { ph: 'Rack space, power, Microsoft 365…' })}
+      <div class="fld"><label class="fl">Charged to</label><div id="rtarget"></div></div>
+      <label class="row" style="cursor:pointer;padding:6px 0"><input type="checkbox" id="rautopay" ${r.autopay ? 'checked' : ''} style="width:auto"/>
+        <div style="flex:1"><div>Autopay</div><div class="small sec-muted">Each bill is recorded as already paid on its date (card on file, bank draft).</div></div></label>
+      <div class="help">Each bill is created on its date — once, however often the server restarts — and counts toward Profit &amp; Loss every month while this schedule is active.</div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:12px">
+        <button class="btn" onclick="location.hash='${back}'">Cancel</button>
+        <button class="btn primary" onclick="saveExpenseRecurring(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div>
+    </div>`;
+  // A carrier's monthly account cost is already in P&L. Entering it again here would count it twice,
+  // so the form says so the moment a carrier with costed accounts is picked.
+  const warn = (id) => {
+    const v = vendorOf(id);
+    $('#rcarrierwarn').innerHTML = v && v.vendor_kind === 'carrier' && v.account_monthly
+      ? `<div class="help" style="color:var(--warning)"><i class="ti ti-alert-triangle"></i> ${esc(v.name)} already has ${money0(v.account_monthly)}/mo on its carrier accounts, which Profit &amp; Loss counts. Only add a recurring bill here for something that isn't on those accounts.</div>` : '';
+  };
+  attachSearch($('#rvendor'), vendors.map(v => ({ v: v.id, l: v.name + ' (' + kindLabel(v.vendor_kind) + ')' })), 'vendor_id', r.vendor_id, 'Search vendors…', warn);
+  attachSearch($('#rtarget'), targets, 'target', r.parent_type ? r.parent_type + ':' + r.parent_id : '', 'Search customers, sites, POPs…');
+  warn(r.vendor_id);
+}
+async function saveExpenseRecurring(id) {
+  const d = collect('#f');
+  Object.assign(d, splitTarget(d.target)); delete d.target;
+  d.autopay = $('#rautopay').checked;
+  try {
+    if (id) await api('/expense-recurring/' + id, { method: 'PUT', body: d });
+    else await api('/expense-recurring', { method: 'POST', body: d });
+    toast('Saved'); location.hash = '#/vendor/' + d.vendor_id;
+  } catch (e) { toast(e.message); }
+}
+
+// ---- the Expenses tab ----
+async function renderExpenses() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  await vendorMeta();
+  const status = window._expStatus || 'unpaid';
+  const cat = window._expCat || '';
+  const [s, list] = await Promise.all([api('/expenses/summary'),
+    api('/expenses?status=' + status + (cat ? '&category=' + encodeURIComponent(cat) : ''))]);
+  const max = Math.max(1, ...s.by_month.map(m => m.cents));
+  const bars = s.by_month.map(m => `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0" title="${esc(m.month)}: ${fmtC(m.cents)}">
+      <div style="width:70%;background:var(--info);border-radius:3px 3px 0 0;height:${Math.max(2, Math.round((m.cents / max) * 90))}px"></div>
+      <div class="small sec-muted" style="font-size:10px">${esc(m.month.slice(5))}</div></div>`).join('');
+  const cats = s.by_category.map(c => `<div class="kv"><span class="small">${esc(catLabel(c.category))}</span><span class="mono small">${fmtC(c.cents)}</span></div>`).join('');
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Expenses</h1>
+      <a class="btn primary" href="#/expense/new"><i class="ti ti-plus"></i> Add expense</a></div>
+    ${vendorTabs('expenses')}
+    <div class="grid3" style="margin:4px 0 16px">
+      <div class="metric"><div class="l">Unpaid</div><div class="v" style="${s.unpaid_cents ? 'color:var(--warning)' : ''}">${fmtC(s.unpaid_cents)}</div><div class="small sec-muted">${s.unpaid_count} bill${s.unpaid_count === 1 ? '' : 's'}${s.due_7d_cents ? ` · ${fmtC(s.due_7d_cents)} due this week` : ''}</div></div>
+      <div class="metric"><div class="l">Overdue</div><div class="v" style="${s.overdue_cents ? 'color:var(--danger)' : ''}">${fmtC(s.overdue_cents)}</div><div class="small sec-muted">${s.overdue_count} bill${s.overdue_count === 1 ? '' : 's'}</div></div>
+      <div class="metric"><div class="l">Spent</div><div class="v">${fmtC(s.month_cents)}<span class="small"> this month</span></div><div class="small sec-muted">${fmtC(s.ytd_cents)} this year · ${fmtC(s.recurring_monthly_cents)}/mo recurring</div></div>
+    </div>
+    ${s.by_month.length ? `<div class="grid2" style="align-items:start">
+      <div class="card"><div class="hd"><h2><i class="ti ti-chart-bar"></i> Last 12 months</h2></div><div style="display:flex;align-items:flex-end;gap:4px;height:120px;padding:6px 14px 12px">${bars}</div></div>
+      <div class="card"><div class="hd"><h2><i class="ti ti-tags"></i> By category</h2></div><div style="padding:0 14px 12px">${cats}</div></div></div>` : ''}
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:6px 0 10px">
+      <select style="width:auto" aria-label="Filter by status" onchange="window._expStatus=this.value;renderExpenses()">
+        ${[['unpaid', 'Unpaid'], ['overdue', 'Overdue'], ['paid', 'Paid'], ['', 'All (not void)'], ['void', 'Void'], ['all', 'Everything']].map(o => `<option value="${o[0]}" ${o[0] === status ? 'selected' : ''}>${o[1]}</option>`).join('')}</select>
+      <select style="width:auto" aria-label="Filter by category" onchange="window._expCat=this.value;renderExpenses()">
+        <option value="">All categories</option>${VENDOR_META.categories.map(c => `<option value="${c[0]}" ${c[0] === cat ? 'selected' : ''}>${esc(c[1])}</option>`).join('')}</select></div>
+    <div class="card">${expenseRows(list)}</div>`;
+}
+
+async function renderExpenseRecurring() {
+  if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
+  await vendorMeta();
+  const list = await api('/expense-recurring');
+  const total = list.filter(r => r.active).reduce((n, r) => n + r.monthly_cents, 0);
+  const rows = list.map(r => `<div class="row" style="${r.active ? '' : 'opacity:.6'}">
+      <i class="ti ti-repeat sec-muted"></i>
+      <div style="flex:1;min-width:0"><div><a class="iplink" href="#/vendor/${r.vendor_id}">${esc(r.vendor_name || '')}</a> · ${esc(r.description || catLabel(r.category))} ${r.active ? '' : '<span class="tag">paused</span>'}${r.autopay ? ' <span class="tag">autopay</span>' : ''}</div>
+        <div class="small sec-muted">${fmtC(r.amount_cents)} ${esc(freqLabel(r.frequency).toLowerCase())} (${fmtC(r.monthly_cents)}/mo) · next ${esc(r.next_date)} · ${r.parent_label ? esc(r.parent_label) : 'overhead'}</div></div>
+      <a class="btn sm" href="#/expense-recurring/${r.id}/edit"><i class="ti ti-edit"></i> Edit</a>
+      <button class="btn sm" onclick="toggleRecurringExpense(${r.id}, ${r.active ? 0 : 1})"><i class="ti ${r.active ? 'ti-player-pause' : 'ti-player-play'}"></i> ${r.active ? 'Pause' : 'Resume'}</button></div>`).join('');
+  view().innerHTML = `<div class="head"><h1 style="flex:1">Recurring bills</h1>
+      <button class="btn" onclick="runRecurringExpensesNow()"><i class="ti ti-refresh"></i> Create due bills now</button>
+      <a class="btn primary" href="#/expense-recurring/new"><i class="ti ti-plus"></i> Add recurring bill</a></div>
+    ${vendorTabs('recurring')}
+    <div class="metric" style="margin:4px 0 14px;max-width:260px"><div class="l">Active, per month</div><div class="v">${fmtC(total)}</div></div>
+    <div class="card">${rows || '<div class="row muted">No recurring bills yet</div>'}</div>
+    <div class="help">Bills are created automatically on their date (checked hourly). Carrier account costs aren't listed here — they're on each account and already in Profit &amp; Loss.</div>`;
+}
+async function runRecurringExpensesNow() {
+  try { const r = await api('/expense-recurring/run', { method: 'POST', body: {} }); toast(r.created ? `Created ${r.created} bill${r.created === 1 ? '' : 's'}` : 'Nothing due'); route(); }
+  catch (e) { toast(e.message); }
 }
 
 // ---------- Reusable photo + document panel (any record: cable, splice, structure, route…) ----------
@@ -4190,6 +4714,7 @@ function refreshAfterAttach(parentType, parentId) {
   if (parentType === 'route') return renderFiberRoute(parentId);
   if (parentType === 'splice' && window._cable) return renderCable(window._cable.id);
   if (parentType === 'structure') return renderStructure(parentId);
+  if (parentType === 'vendor') return renderVendor(parentId);
   route();
 }
 
