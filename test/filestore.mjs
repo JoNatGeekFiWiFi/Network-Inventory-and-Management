@@ -5,7 +5,7 @@
 // directory traversal gets introduced into an application that never had it. The traversal tests
 // below are the most important thing in this file — a sanitiser that looks thorough and misses one
 // encoding is worth nothing, so the check is on the RESOLVED path rather than on the text.
-import { mkdtempSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createFileStore, slug, safeFilename } from '../lib/filestore.js';
@@ -174,6 +174,34 @@ const store = createFileStore(ROOT);
   // Relocating something that no longer exists must not throw or invent a result.
   ok(store.relocate('customer/11-mover/documents/gone.pdf', 'customer', 12, 'D', 'documents') === null,
     'relocating a missing file returns null rather than throwing');
+}
+
+// ---- router backups move into per-device folders, once, and nothing is lost ----------------------------
+{
+  const { DatabaseSync } = await import('node:sqlite');
+  const { migrateBackupsIntoDeviceDirs } = await import('../lib/filemigrate.js');
+  const BROOT = mkdtempSync(join(tmpdir(), 'backups-'));
+  const bstore = createFileStore(BROOT);
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE devices (id INTEGER PRIMARY KEY, name TEXT)');
+  db.exec('CREATE TABLE router_backups (id INTEGER PRIMARY KEY, device_id INTEGER, stored_name TEXT)');
+  db.prepare('INSERT INTO devices VALUES (7, ?)').run('Tower Router');
+  writeFileSync(join(BROOT, 'bak-7-1.rsc'), '/ip address\n');
+  writeFileSync(join(BROOT, 'dev7-2.tar.gz'), 'tar');
+  db.prepare('INSERT INTO router_backups VALUES (1, 7, ?)').run('bak-7-1.rsc');
+  db.prepare('INSERT INTO router_backups VALUES (2, 7, ?)').run('dev7-2.tar.gz');
+  db.prepare('INSERT INTO router_backups VALUES (3, 7, ?)').run('gone.rsc');           // file already missing
+
+  const r = migrateBackupsIntoDeviceDirs(db, bstore, BROOT);
+  ok(r.moved === 2, `existing flat backups are moved (${r.moved})`);
+  const rows = db.prepare('SELECT id, stored_name FROM router_backups ORDER BY id').all();
+  ok(rows[0].stored_name === 'device/7-tower-router/backups/bak-7-1.rsc', `into the device's own folder, name unchanged (${rows[0].stored_name})`);
+  ok(existsSync(bstore.resolveStored(rows[0].stored_name)) && !existsSync(join(BROOT, 'bak-7-1.rsc')), 'the file is there and gone from the root');
+  ok(readFileSync(bstore.resolveStored(rows[0].stored_name), 'utf8') === '/ip address\n', 'with its contents intact');
+  ok(rows[2].stored_name === 'gone.rsc', 'a row whose file is already missing is left alone, not rewritten to point somewhere new');
+  const again = migrateBackupsIntoDeviceDirs(db, bstore, BROOT);
+  ok(again.moved === 0, 'running it again moves nothing');
+  rmSync(BROOT, { recursive: true, force: true });
 }
 
 rmSync(ROOT, { recursive: true, force: true });

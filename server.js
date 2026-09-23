@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync, createReadStream, existsSync, statSync, un
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { db, initSchema, migrate, isEmpty, seed, backfillCustomers, backfillAccountCustomers, UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR } from './db.js';
 import { createFileStore } from './lib/filestore.js';
-import { migrateFilesIntoRecordDirs } from './lib/filemigrate.js';
+import { migrateFilesIntoRecordDirs, migrateBackupsIntoDeviceDirs } from './lib/filemigrate.js';
 
 /**
  * Files on disk, grouped by the record they belong to.
@@ -17,6 +17,10 @@ import { migrateFilesIntoRecordDirs } from './lib/filemigrate.js';
  * ../../etc/passwd.
  */
 const files = createFileStore(UPLOADS_DIR);
+// Router config backups get the same treatment in their own root: backups/device/<id>-<name>/backups/.
+// A separate root because backups are pruned on a schedule and sit on their own volume in some
+// deployments; the same path-safety rules apply.
+const backupFiles = createFileStore(BACKUPS_DIR);
 
 /**
  * The record's own name, for the readable half of its directory.
@@ -206,6 +210,9 @@ backfillAccountCustomers();
     (r.orphaned ? `, ${r.orphaned} left flat (their record is gone)` : ''));
   if (r.collisions.length) console.warn(`Files: ${r.collisions.length} left in place — something was already at the destination`);
   for (const e of r.errors) console.warn('Files:', e.table, e.error);
+  const b = migrateBackupsIntoDeviceDirs(db, backupFiles, BACKUPS_DIR);
+  if (b.moved) console.log(`Backups: moved ${b.moved} into per-device directories`);
+  for (const e of b.errors) console.warn('Backups:', e.error);
 }
 
 /**
@@ -2170,7 +2177,7 @@ const ctx = {
   customerAccounts, accountCustomers, setCustomerAccounts,
   verifyPassword, parseCookies, hashPassword,
   restReq, rosHeaders, rosErr, publicDevice, pollDeviceCore,
-  UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR, files,
+  UPLOADS_DIR, BACKUPS_DIR, PACKAGES_DIR, files, backupFiles,
   harvestThreats, pushBlocklistToDevice, activeBlockIps, blocklistMinHits,
   attachmentsFor, deleteAttachmentsFor,
   geocode, normPhone,
@@ -2347,11 +2354,15 @@ function saveIdPhoto(dataUrl) {
   return { stored };
 }
 // copy a prior visitor's ID photo to a new file so a returning visit reuses it without re-scanning
+//
+// Into _system/access-id/ like every other ID photo. This used to write "idphoto-<uuid>.jpg" straight
+// into the uploads root — a government ID sitting loose beside everything else, missed by the
+// per-record reorganisation because it is created by copying rather than by upload.
 function copyIdPhoto(srcStored) {
   if (!srcStored || !existsSync(files.resolveStored(srcStored))) return null;
-  const ext = '.' + (srcStored.split('.').pop() || 'jpg');
-  const stored = 'idphoto-' + randomUUID() + ext;
-  try { copyFileSync(files.resolveStored(srcStored), files.resolveStored(stored)); return stored; } catch { return null; }
+  const ext = '.' + (String(srcStored).split('.').pop() || 'jpg').replace(/[^a-z0-9]/gi, '').slice(0, 5);
+  const target = files.placeSystem('access-id', 'idphoto' + ext, { ext });
+  try { copyFileSync(files.resolveStored(srcStored), target.absolute); return target.stored; } catch { return null; }
 }
 app.post('/access', (req, res) => {
   const b = req.body || {};

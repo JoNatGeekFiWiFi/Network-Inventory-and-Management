@@ -42,6 +42,16 @@ await login('admin@geekitek.test', 'admin123');
   // Download follows retention.
   const dl = await call(`/api/files/locator/${staff.id}/download`);
   ok(dl.status === 200 && /FILES-SEG/.test(dl.t), 'the retained staff file downloads intact');
+
+  // Where it landed. Staff locator files used to be written loose into the uploads root; they
+  // belong to no record, so they go under _system/locator/ like the migration puts old ones.
+  if (process.env.TEST_DB_PATH) {
+    const { DatabaseSync } = await import('node:sqlite');
+    const tdb = new DatabaseSync(process.env.TEST_DB_PATH, { readOnly: true });
+    const row = tdb.prepare('SELECT stored_name FROM locator_uploads WHERE id=?').get(staff.id);
+    tdb.close();
+    ok(row && /^_system\/locator\//.test(row.stored_name), `the retained file is filed under _system/locator/ (${row && row.stored_name})`);
+  }
   const nodl = await call(`/api/files/locator/${pub.id}/download`);
   ok(nodl.status === 410 && /metadata only/i.test(nodl.json.error), 'downloading a public upload explains why there is nothing to fetch');
 

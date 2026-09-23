@@ -447,8 +447,12 @@ export default function registerLocate(app, ctx) {
       const body = result.status === 200 ? result.body : null;
       let stored = null;
       if (who.source === 'staff') {
-        stored = 'locator-' + randomUUID() + '.' + ((who.filename || '').split('.').pop() || 'dat').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8);
-        writeFileSync(join(ctx.UPLOADS_DIR, stored), buf);
+        // Under _system/locator/, not the uploads root: these belong to no record, and the root is
+        // meant to hold nothing but per-record folders and _system.
+        const ext = '.' + (((who.filename || '').split('.').pop() || 'dat').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'dat');
+        const target = ctx.files.placeSystem('locator', 'locator' + ext, { ext });
+        writeFileSync(target.absolute, buf);
+        stored = target.stored;
       }
       db.prepare(`INSERT INTO locator_uploads
         (filename, format, size, sha256, segments, vertices, total_m, faults, source, actor, ip, stored_name)

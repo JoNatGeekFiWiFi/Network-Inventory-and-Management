@@ -439,8 +439,10 @@ export default function registerNetwork(app, ctx) {
       const driver = await driverFor(d, { sshExec });
       const out = await driver.configBackup();
       const buf = Buffer.from(out.base64, 'base64');
-      const stored = `dev${d.id}-${Date.now()}.tar.gz`;
-      writeFileSync(join(BACKUPS_DIR, stored), buf);
+      // Filed under the device, like every other file: backups/device/<id>-<name>/backups/.
+      const target = ctx.backupFiles.place('device', d.id, d.name, 'backups', `dev${d.id}-${Date.now()}.tar.gz`, { keepName: true });
+      writeFileSync(target.absolute, buf);
+      const stored = target.stored;
       const info = db.prepare("INSERT INTO router_backups (device_id,status,size,stored_name,format,source) VALUES (?,?,?,?,?,?)")
         .run(d.id, 'ok', buf.length, stored, 'tar.gz', source || 'manual');
       return { id: info.lastInsertRowid, size: buf.length, format: 'tar.gz', stored_name: stored };
@@ -479,15 +481,16 @@ export default function registerNetwork(app, ctx) {
       }
     }
     if (!text || !text.trim()) throw new Error('Router won\'t return config over REST — set the backup upload URL in Settings so the router can push the file');
-    const stored = 'bak-' + d.id + '-' + Date.now() + '.rsc';
-    writeFileSync(join(BACKUPS_DIR, stored), text);
+    const target = ctx.backupFiles.place('device', d.id, d.name, 'backups', 'bak-' + d.id + '-' + Date.now() + '.rsc', { keepName: true });
+    writeFileSync(target.absolute, text);
+    const stored = target.stored;
     const size = Buffer.byteLength(text);
     const info = db.prepare("INSERT INTO router_backups (device_id,status,size,stored_name,format,source) VALUES (?,?,?,?,?,?)").run(d.id, 'ok', size, stored, 'rsc', source || 'auto');
     return { id: info.lastInsertRowid, size };
   }
   function pruneOldBackups() {
     const old = db.prepare("SELECT * FROM router_backups WHERE created_at < datetime('now','-183 days')").all(); // ~6 months
-    for (const b of old) { if (b.stored_name) { try { unlinkSync(join(BACKUPS_DIR, b.stored_name)); } catch {} } db.prepare('DELETE FROM router_backups WHERE id=?').run(b.id); }
+    for (const b of old) { if (b.stored_name) { try { unlinkSync(ctx.backupFiles.resolveStored(b.stored_name)); } catch {} } db.prepare('DELETE FROM router_backups WHERE id=?').run(b.id); }
     return old.length;
   }
   async function runWeeklyBackups(source) {
@@ -565,7 +568,7 @@ export default function registerNetwork(app, ctx) {
   app.get('/api/backups/:id/download', requireNoc, (req, res) => {
     const b = db.prepare('SELECT * FROM router_backups WHERE id=?').get(req.params.id);
     if (!b || !b.stored_name) return res.status(404).json({ error: 'not found' });
-    const fp = join(BACKUPS_DIR, b.stored_name);
+    let fp; try { fp = ctx.backupFiles.resolveStored(b.stored_name); } catch { return res.status(404).json({ error: 'file missing' }); }
     if (!existsSync(fp)) return res.status(404).json({ error: 'file missing' });
     const dev = db.prepare('SELECT name FROM devices WHERE id=?').get(b.device_id) || {};
     const fname = ((dev.name || 'router').replace(/[^a-z0-9_-]+/gi, '_')) + '-' + b.created_at.replace(/[: ]/g, '-') + '.rsc';
@@ -578,7 +581,7 @@ export default function registerNetwork(app, ctx) {
   app.delete('/api/backups/:id', requireNoc, (req, res) => {
     const b = db.prepare('SELECT * FROM router_backups WHERE id=?').get(req.params.id);
     if (!b) return res.status(404).json({ error: 'not found' });
-    if (b.stored_name) { try { unlinkSync(join(BACKUPS_DIR, b.stored_name)); } catch {} }
+    if (b.stored_name) { try { unlinkSync(ctx.backupFiles.resolveStored(b.stored_name)); } catch {} }
     db.prepare('DELETE FROM router_backups WHERE id=?').run(b.id);
     audit(req, 'delete', 'device#' + b.device_id, 'backup#' + b.id);
     res.json({ ok: true });
@@ -599,8 +602,8 @@ export default function registerNetwork(app, ctx) {
     if (!dev) { try { audit({ user: { email: 'router:' + serial } }, 'provision_miss', 'serial#' + serial, 'no device'); } catch {} return res.status(404).type('text/plain').send('# no device for serial ' + serial); }
     const bak = db.prepare("SELECT * FROM router_backups WHERE device_id=? AND status='ok' AND stored_name IS NOT NULL ORDER BY datetime(created_at) DESC LIMIT 1").get(dev.id);
     if (!bak) return res.status(404).type('text/plain').send('# no backup on file for ' + dev.name);
-    const fp = join(BACKUPS_DIR, bak.stored_name);
-    if (!existsSync(fp)) return res.status(404).type('text/plain').send('# backup file missing');
+    let fp; try { fp = ctx.backupFiles.resolveStored(bak.stored_name); } catch { fp = ''; }
+    if (!fp || !existsSync(fp)) return res.status(404).type('text/plain').send('# backup file missing');
     try { audit({ user: { email: 'router:' + serial } }, 'provision_restore', 'device#' + dev.id, 'served backup#' + bak.id); } catch {}
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Length', statSync(fp).size);
