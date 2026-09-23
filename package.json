@@ -15,9 +15,9 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "imapflow": "^1.4.6",
-    "mailparser": "^3.9.14",
-    "nodemailer": "^6.9.14",
+    "imapflow": "^2.0.6",
+    "mailparser": "^3.9.28",
+    "nodemailer": "^10.0.10",
     "ssh2": "^1.17.0"
   },
   "devDependencies": {
