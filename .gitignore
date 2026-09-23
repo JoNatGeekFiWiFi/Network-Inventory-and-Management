@@ -45,3 +45,10 @@ az_spans_*.json
 # area and a real signed contract must never be committed by accident.
 *.pdf
 !test/fixtures/*.pdf
+
+# Runtime data written next to data.db: uploaded files (visitor ID photos, signed contracts,
+# attachments) and router config backups (full device configs, often with credentials). *.pdf above
+# only covered the PDFs; an ID photo is a .jpg and a backup is a .rsc, and push-to-github.sh runs
+# `git add -A`, so without these lines the next push after local testing would have published them.
+/uploads/
+/backups/
