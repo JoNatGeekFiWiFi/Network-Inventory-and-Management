@@ -535,8 +535,10 @@ export default function registerSupport(app, ctx) {
   });
   // Telnyx SMS + WhatsApp inbound (JSON; registered with raw body up top). Secret path-gated.
   function inboundTelnyx(req, res) {
-    const secret = getSetting('inbound_secret');
-    if (secret && req.params.secret !== secret) return res.status(403).end();
+    // Same rule as every other inbound webhook: no secret configured means CLOSED, not open. The old
+    // `if (secret && …)` accepted anything at /inbound/telnyx/<whatever> until a secret was set,
+    // which let anyone who found the URL inject messages into a customer's thread.
+    if (!inboundSecretOk(req)) return res.status(403).end();
     let payload = {}; try { payload = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString('utf8') : (req.body || '{}')); } catch { return res.status(400).end(); }
     const evt = payload.data || {}; if (evt.event_type && evt.event_type !== 'message.received') return res.status(200).end();
     const d = evt.payload || {};

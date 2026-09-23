@@ -53,8 +53,14 @@ Different departments see different layouts over the **same underlying data**. N
      (`site_count`, `device_count`) exclude archived children, so four closed sites and one open one
      does not read as five.
 
-   `status` is a different question and is not overloaded for this: it is the operational state —
-   Active, Planned, Decommissioned — of a record that still exists.
+   - **What stops, for a customer.** Deactivating also sets `status='Closed'`, revokes portal
+     sessions and **pauses recurring billing**; the recurring run and MRR also skip archived customers
+     even if a schedule is switched back on by hand. Setting Closed from the edit form is the same act
+     as the button. Reactivating sets Active again but leaves billing paused — restarting charges is a
+     decision made on the Billing page, not a side effect.
+
+   For every other record `status` is a different question and is not overloaded for this: it is the
+   operational state — Active, Planned, Decommissioned — of a record that still exists.
 
 ## 3. Entities
 
