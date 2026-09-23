@@ -287,7 +287,7 @@ app.get('/api/build', (req, res) => res.json({ build: APP_BUILD }));
 // The signing routes, listed here rather than in domains/documents.js on purpose: which paths skip
 // authentication is a property of the application's security boundary, and it should be readable in
 // one place next to the middleware that enforces it, not discovered by reading a domain module.
-const SIGNING_PATHS = new Set(['/sign/open', '/sign/consent', '/sign/submit', '/sign/decline', '/sign/pdf']);
+const SIGNING_PATHS = new Set(['/sign/open', '/sign/consent', '/sign/submit', '/sign/decline', '/sign/pdf', '/sign/form-preview']);
 
 // ---- require auth for everything else under /api ----
 //
@@ -2028,11 +2028,13 @@ function deleteAttachmentsFor(parentType, parentId) {
 app.get('/api/attachments', (req, res) => {
   const { parent_type, parent_id } = req.query;
   if (!ATT_PARENTS.includes(parent_type) || !parent_id) return res.status(400).json({ error: 'parent_type and parent_id required' });
+  if (parent_type === 'vendor' && !isPriv(req)) return res.status(403).json({ error: 'NOC/Admin only' });
   res.json(attachmentsFor(parent_type, parent_id));
 });
 app.post('/api/attachments', (req, res) => {
   const b = req.body || {};
   if (!ATT_PARENTS.includes(b.parent_type) || !b.parent_id) return res.status(400).json({ error: 'parent_type and parent_id required' });
+  if (b.parent_type === 'vendor' && !isPriv(req)) return res.status(403).json({ error: 'NOC/Admin only' });
   if (!ATT_MIME[b.mime]) return res.status(400).json({ error: 'Unsupported file type — images, PDF, Office documents, CSV/text and ZIP are allowed' });
   let raw = String(b.data || '');
   const comma = raw.indexOf(','); if (raw.startsWith('data:') && comma !== -1) raw = raw.slice(comma + 1); // strip data URL prefix
@@ -2067,6 +2069,9 @@ app.put('/api/attachments/:id', (req, res) => {
 app.get('/api/attachments/:id', (req, res) => {
   const a = db.prepare('SELECT * FROM note_attachments WHERE id=?').get(req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
+  // Vendor files are contracts, price lists and W-9s — a W-9 carries a full taxpayer ID. Field and
+  // support staff can open site and fibre photos; they cannot open these.
+  if (a.parent_type === 'vendor' && !isPriv(req)) return res.status(403).json({ error: 'NOC/Admin only' });
   const fp = files.resolveStored(a.stored_name);
   if (!existsSync(fp)) return res.status(404).json({ error: 'file missing' });
   // Only images and PDFs render inline; everything else downloads, so an uploaded file can never

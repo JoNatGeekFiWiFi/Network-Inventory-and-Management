@@ -49,6 +49,21 @@
   .banner.warn{background:rgba(176,48,48,.11);color:var(--danger)}
   .hash{font:11px ui-monospace,monospace;color:var(--text3);word-break:break-all}
   .hidden{display:none}
+  /* The W-9 form. Plain inputs, large enough to use on a phone. */
+  .f{margin-bottom:14px}
+  .f input[type=text],.f select{font:inherit;font-size:16px;width:100%;padding:10px 12px;border-radius:8px;
+     border:.5px solid var(--border);background:var(--surface);color:var(--text)}
+  .f .err{color:var(--danger);font-size:13px;margin-top:4px}
+  .f.bad input,.f.bad select{border-color:var(--danger)}
+  .opts{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:6px}
+  .opt{display:flex;gap:8px;align-items:center;padding:8px 10px;border:.5px solid var(--border);border-radius:8px;cursor:pointer;color:var(--text);font-size:14px;margin:0}
+  .opt input{margin:0;width:17px;height:17px;flex:none}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media (max-width:560px){.grid2{grid-template-columns:1fr}}
+  .cert{background:var(--surface2);border-radius:8px;padding:14px;font-size:13.5px}
+  .cert p{margin:0 0 7px}
+  .cert .x{text-decoration:line-through;opacity:.6}
+  details summary{cursor:pointer;color:var(--text2);font-size:14px}
 </style>
 </head>
 <body>
@@ -70,7 +85,7 @@ async function api(path, body) {
     body: JSON.stringify(Object.assign({ token }, body || {}))
   });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || 'Something went wrong');
+  if (!r.ok) { const err = new Error(j.error || 'Something went wrong'); err.fields = j.fields; throw err; }
   return j;
 }
 
@@ -102,9 +117,11 @@ function render() {
       <div class="sub">From ${esc(doc.company)} · for ${esc(doc.signer.role_label)} ${esc(doc.signer.name)}</div>
     </div>
 
+    ${doc.form && !signed && !doc.declined && !blocked ? w9Block() : ''}
+
     <div class="card">
-      <label>The document</label>
-      <div class="doc">${esc(doc.body)}</div>
+      <label>${doc.form ? 'The form as sent to you' : 'The document'}</label>
+      ${doc.form ? '<div class="sub">The official IRS form. Your answers above are written onto it when you sign.</div>' : `<div class="doc">${esc(doc.body)}</div>`}
       <div class="row" style="margin-top:12px">
         <a class="btn" href="/api/sign/pdf?token=${encodeURIComponent(token)}" target="_blank" rel="noopener">
           <i class="ti ti-download"></i> Open as PDF</a>
@@ -119,7 +136,111 @@ function render() {
 
     ${signed || doc.declined || blocked ? '' : signBlock()}
   `;
-  if (!signed && !doc.declined && !blocked) wireSigning();
+  if (!signed && !doc.declined && !blocked) { wireSigning(); if (doc.form) wireW9(); }
+}
+
+// ---- Form W-9 ---------------------------------------------------------------------------------------
+//
+// Your taxpayer ID number is sent only when you preview or sign, goes straight onto the form, and is
+// not stored anywhere else by the company that asked for it.
+function w9Block() {
+  const f = doc.form, p = f.prefill || {};
+  const field = (id, label, value, opts = {}) => `<div class="f" id="f-${id}">
+      <label for="w9-${id}">${label}</label>
+      <input type="text" id="w9-${id}" value="${esc(value || '')}" ${opts.ph ? `placeholder="${esc(opts.ph)}"` : ''}
+        ${opts.max ? `maxlength="${opts.max}"` : ''} ${opts.mode ? `inputmode="${opts.mode}"` : ''} autocomplete="${opts.ac || 'off'}"/>
+      ${opts.help ? `<div class="note" style="margin-top:4px">${opts.help}</div>` : ''}<div class="err"></div></div>`;
+  return `<div class="card" id="w9">
+    <h1 style="font-size:18px">Form W-9</h1>
+    <div class="sub" style="margin-bottom:14px">Request for Taxpayer Identification Number and Certification (Rev. ${esc(f.revision)}). ${Object.keys(p).length ? 'We filled in what we already had — please check it.' : ''}</div>
+
+    ${field('name', '1. Name of entity or individual (as shown on your income tax return)', p.name, { ac: 'name', help: 'A sole proprietor or single-member LLC enters the owner\'s name here and the business name on line 2.' })}
+    ${field('business_name', '2. Business name / disregarded entity name, if different', p.business_name, { ac: 'organization' })}
+
+    <div class="f" id="f-classification"><label>3a. Federal tax classification — choose one</label>
+      <div class="opts">${f.classifications.map(([k, l]) => `<label class="opt"><input type="radio" name="cls" value="${k}" ${p.classification === k ? 'checked' : ''}/> ${esc(l)}</label>`).join('')}</div>
+      <div class="err"></div></div>
+    <div class="f ${p.classification === 'llc' ? '' : 'hidden'}" id="f-llc_class"><label for="w9-llc_class">LLC tax classification</label>
+      <select id="w9-llc_class"><option value="">Choose…</option>
+        <option value="C" ${p.llc_class === 'C' ? 'selected' : ''}>C — C corporation</option>
+        <option value="S" ${p.llc_class === 'S' ? 'selected' : ''}>S — S corporation</option>
+        <option value="P" ${p.llc_class === 'P' ? 'selected' : ''}>P — Partnership</option></select>
+      <div class="note" style="margin-top:4px">A single-member LLC that is a disregarded entity should choose the owner's classification above instead.</div><div class="err"></div></div>
+    <div class="${p.classification === 'other' ? '' : 'hidden'}" id="wrap-other">${field('other_text', 'Other — describe', p.other_text)}</div>
+    <div class="f"><label class="opt" style="display:flex"><input type="checkbox" id="w9-foreign"/> 3b. I checked Partnership, Trust/estate, or LLC-P above and have foreign partners, owners or beneficiaries</label></div>
+
+    <details style="margin-bottom:14px"><summary>4. Exemptions — most people leave these blank</summary>
+      <div class="grid2" style="margin-top:10px">${field('exempt_payee', 'Exempt payee code (1–13)', p.exempt_payee, { max: 2, mode: 'numeric' })}${field('fatca_code', 'FATCA exemption code (A–M)', p.fatca_code, { max: 1 })}</div></details>
+
+    ${field('address', '5. Address (number, street, and apt. or suite no.)', p.address, { ac: 'street-address' })}
+    ${field('city_state_zip', '6. City, state, and ZIP code', p.city_state_zip, { ac: 'off', ph: 'Phoenix, AZ 85001' })}
+    ${field('account_numbers', '7. Account number(s) — optional', p.account_numbers)}
+
+    <div class="f" id="f-tin_type"><label>Part I — Taxpayer Identification Number</label>
+      <div class="opts" style="grid-template-columns:1fr 1fr">
+        <label class="opt"><input type="radio" name="tintype" value="ssn"/> Social Security number</label>
+        <label class="opt"><input type="radio" name="tintype" value="ein"/> Employer ID number (EIN)</label></div><div class="err"></div></div>
+    <div class="f" id="f-tin"><label for="w9-tin">Number</label>
+      <input type="text" id="w9-tin" inputmode="numeric" autocomplete="off" maxlength="11" placeholder="9 digits" spellcheck="false"/>
+      <div class="note" style="margin-top:4px">Must match the name on line 1. It goes onto the form only — it is not saved anywhere else.</div><div class="err"></div></div>
+
+    <div class="f"><label>Part II — Certification</label>
+      <div class="cert" id="certText">${f.certification.map((t, i) => `<p id="cert-${i}">${esc(t)}</p>`).join('')}</div>
+      <label class="opt" style="display:flex;margin-top:8px"><input type="checkbox" id="w9-bw"/> The IRS has notified me that I am currently subject to backup withholding (this crosses out item 2)</label>
+      <div class="note">${esc(f.certification_note)}</div></div>
+
+    <div class="row"><button class="btn" id="previewBtn" onclick="previewW9()"><i class="ti ti-eye"></i> Preview the completed form</button>
+      <span class="note" style="margin:0">Opens the filled-in W-9 so you can check it before signing.</span></div>
+  </div>`;
+}
+function wireW9() {
+  document.querySelectorAll('input[name=cls]').forEach(r => r.addEventListener('change', () => {
+    const v = w9Value('cls');
+    $('#f-llc_class').classList.toggle('hidden', v !== 'llc');
+    $('#wrap-other').classList.toggle('hidden', v !== 'other');
+  }));
+  $('#w9-bw').addEventListener('change', () => { const p = $('#cert-2'); if (p) p.classList.toggle('x', $('#w9-bw').checked); });
+  const tin = $('#w9-tin');
+  // Format as it is typed, in the shape the chosen number takes: 123-45-6789 or 12-3456789.
+  const fmt = () => {
+    const d = tin.value.replace(/\D/g, '').slice(0, 9);
+    const t = w9Value('tintype');
+    tin.value = t === 'ein' ? (d.length > 2 ? d.slice(0, 2) + '-' + d.slice(2) : d)
+      : (d.length > 5 ? d.slice(0, 3) + '-' + d.slice(3, 5) + '-' + d.slice(5) : d.length > 3 ? d.slice(0, 3) + '-' + d.slice(3) : d);
+  };
+  tin.addEventListener('input', fmt);
+  document.querySelectorAll('input[name=tintype]').forEach(r => r.addEventListener('change', fmt));
+}
+function w9Value(radioName) { const r = document.querySelector('input[name=' + radioName + ']:checked'); return r ? r.value : ''; }
+function w9Form() {
+  const val = (id) => { const el = $('#w9-' + id); return el ? el.value.trim() : ''; };
+  return {
+    name: val('name'), business_name: val('business_name'), classification: w9Value('cls'),
+    llc_class: val('llc_class'), other_text: val('other_text'), foreign_partners: $('#w9-foreign').checked,
+    exempt_payee: val('exempt_payee'), fatca_code: val('fatca_code'), address: val('address'),
+    city_state_zip: val('city_state_zip'), account_numbers: val('account_numbers'),
+    tin_type: w9Value('tintype'), tin: val('tin').replace(/\D/g, ''), backup_withholding: $('#w9-bw').checked
+  };
+}
+function showW9Errors(fields) {
+  document.querySelectorAll('#w9 .f').forEach(el => { el.classList.remove('bad'); const e = el.querySelector('.err'); if (e) e.textContent = ''; });
+  let first = null;
+  for (const [k, msg] of Object.entries(fields || {})) {
+    const el = $('#f-' + k); if (!el) continue;
+    el.classList.add('bad'); const e = el.querySelector('.err'); if (e) e.textContent = msg;
+    if (!first) first = el;
+  }
+  if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+async function previewW9() {
+  // Open the tab first, inside the click, or a popup blocker eats it once the fetch finishes.
+  const w = window.open('', '_blank');
+  try {
+    const r = await fetch('/api/sign/form-preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, form: w9Form() }) });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'The preview could not be made');
+    const url = URL.createObjectURL(await r.blob());
+    if (w) w.location = url; else location.href = url;
+  } catch (e) { if (w) w.close(); alert(e.message); }
 }
 
 function signBlock() {
@@ -138,6 +259,7 @@ function signBlock() {
 
   <div class="card">
     <label>Your signature</label>
+    ${doc.form ? '<div class="sub" style="margin-bottom:10px"><b>Under penalties of perjury</b>, by signing you certify the statements in Part II above.</div>' : ''}
     <div class="tabs" role="tablist">
       <button class="tab" role="tab" id="tabDraw"  aria-selected="true"  onclick="setMode('drawn')">Draw it</button>
       <button class="tab" role="tab" id="tabType" aria-selected="false" onclick="setMode('typed')">Type it</button>
@@ -274,9 +396,12 @@ async function submit() {
       geo,
       { client_at: new Date().toISOString(), tz: deviceTz() }
     );
-    const r = await api('/api/sign/submit', body);
+    if (doc.form) body.form = w9Form();
+    let r;
+    try { r = await api('/api/sign/submit', body); }
+    catch (e) { if (e.fields) showW9Errors(e.fields); throw e; }
     $('#wrap').innerHTML = `<div class="card">
-      <h1>Thank you — that is signed</h1>
+      <h1>${doc.form ? 'Thank you — your W-9 is signed' : 'Thank you — that is signed'}</h1>
       <p class="sub">${r.complete
         ? 'Everyone has now signed. A completed copy, with a certificate recording how it was signed, is available below.'
         : 'We are now waiting on ' + esc((r.waiting_for || []).join(', ')) + '. You will be sent the completed copy once everyone has signed.'}</p>

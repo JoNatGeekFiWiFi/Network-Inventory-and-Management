@@ -150,6 +150,9 @@ export default function registerVendors(app, ctx) {
     };
     v.attachments = ctx.attachmentsFor ? ctx.attachmentsFor('vendor', v.id) : [];
     v.w9 = v.w9_attachment_id ? v.attachments.find(a => a.id === v.w9_attachment_id) || null : null;
+    // W-9s requested and signed online (domains/documents.js). The latest signed one wins over an
+    // uploaded file, because it carries its own signing record.
+    v.documents = ctx.documentsFor ? ctx.documentsFor('vendor', v.id) : [];
     v.message_count = db.prepare('SELECT COUNT(*) n FROM vendor_messages WHERE vendor_id=?').get(v.id).n;
     res.json(v);
   });

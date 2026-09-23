@@ -71,9 +71,19 @@ const KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'return', 'typeof', 'v
 // Parsed as a script, not a module: index.html loads it with a plain <script> tag, so parsing it as
 // ESM would reject things that are legal in the browser and reward nobody.
 {
-  for (const file of readdirSync('public').filter(f => f.endsWith('.js')).map(f => 'public/' + f)) {
+  // The standalone pages carry their script inline. sign.html is the one page a vendor or customer
+  // who is not our user ever sees, so an undefined name there fails in front of exactly the wrong
+  // person. Each page's inline scripts are checked as one script, the way the browser runs them.
+  const inlineSources = new Map();
+  for (const f of readdirSync('public').filter(f => f.endsWith('.html'))) {
+    const html = readFileSync('public/' + f, 'utf8');
+    const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]).filter(t => t.trim());
+    if (scripts.length) inlineSources.set('public/' + f + ' (inline script)', scripts.join('\n;\n'));
+  }
+  const browserFiles = [...readdirSync('public').filter(f => f.endsWith('.js')).map(f => 'public/' + f), ...inlineSources.keys()];
+  for (const file of browserFiles) {
     let src;
-    try { src = readFileSync(file, 'utf8'); } catch { continue; }
+    try { src = inlineSources.has(file) ? inlineSources.get(file) : readFileSync(file, 'utf8'); } catch { continue; }
     const isModule = /^\s*(import|export)\s/m.test(src);
     try {
       const ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: isModule ? 'module' : 'script', locations: true });
@@ -109,6 +119,9 @@ const KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'return', 'typeof', 'v
       walk.full(ast, n => {
         if ((n.type === 'FunctionDeclaration' || n.type === 'ClassDeclaration') && n.id) declared.add(n.id.name);
         if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier') declared.add(n.id.name);
+        // `window.rm = …` is how a module-scoped page exposes a handler to inline markup.
+        if (n.type === 'AssignmentExpression' && n.left.type === 'MemberExpression' && !n.left.computed &&
+            n.left.object.type === 'Identifier' && n.left.object.name === 'window') declared.add(n.left.property.name);
       });
       const handlerCalls = new Map();
       // on<event>="name(...)" — the first identifier is the function the browser will look up.

@@ -37,7 +37,7 @@ for (const suite of suites) {
 
   const out = await new Promise(res => {
     let buf = '';
-    const p = spawn(process.execPath, [join(__dirname, suite)], { env: { ...process.env, BASE: `http://localhost:${PORT}` } });
+    const p = spawn(process.execPath, [join(__dirname, suite)], { env: { ...process.env, BASE: `http://localhost:${PORT}`, TEST_DB_PATH: DB } });
     p.stdout.on('data', d => buf += d); p.stderr.on('data', d => buf += d);
     p.on('close', code => res({ code, buf }));
   });

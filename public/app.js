@@ -3949,7 +3949,8 @@ async function renderDocument(id) {
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
         ${isDraft ? `<button class="btn primary" onclick="sendDocument(${d.id})"><i class="ti ti-send"></i> Send for signature</button>` : ''}
         ${d.stored_name ? `<a class="btn" href="/api/documents/${d.id}/pdf" target="_blank" rel="noopener"><i class="ti ti-file-text"></i> As sent (PDF)</a>` : ''}
-        ${d.signed_stored_name ? `<a class="btn primary" href="/api/documents/${d.id}/pdf?signed=1" target="_blank" rel="noopener"><i class="ti ti-file-certificate"></i> Signed copy + certificate</a>` : ''}
+        ${d.signed_stored_name ? `<a class="btn primary" href="/api/documents/${d.id}/pdf?signed=1" target="_blank" rel="noopener"><i class="ti ti-file-certificate"></i> ${d.certificate_stored_name ? 'Signed form' : 'Signed copy + certificate'}</a>` : ''}
+        ${d.certificate_stored_name ? `<a class="btn" href="/api/documents/${d.id}/pdf?certificate=1" target="_blank" rel="noopener"><i class="ti ti-shield-check"></i> Certificate of completion</a>` : ''}
         <button class="btn" onclick="verifyDocument(${d.id})"><i class="ti ti-shield-check"></i> Verify integrity</button>
         ${canVoid ? `<div style="flex:1"></div><button class="btn" onclick="voidDocument(${d.id})"><i class="ti ti-ban"></i> Void</button>` : ''}
       </div>
@@ -4321,7 +4322,17 @@ async function renderVendor(id) {
       <a class="btn sm" href="#/expense-recurring/${r.id}/edit"><i class="ti ti-edit"></i> Edit</a>
       <button class="btn sm" onclick="toggleRecurringExpense(${r.id}, ${r.active ? 0 : 1})"><i class="ti ${r.active ? 'ti-player-pause' : 'ti-player-play'}"></i> ${r.active ? 'Pause' : 'Resume'}</button></div>`).join('');
 
-  const w9 = v.w9
+  const signedW9 = (v.documents || []).find(d => d.id === v.w9_document_id && d.status === 'signed');
+  // Every W-9 request, with where it has got to. The newest first; signed ones link to the form and
+  // to the certificate recording how it was signed.
+  const w9Docs = (v.documents || []).filter(d => /^Form W-9/.test(d.title)).map(d => `<div class="kv"><span class="small sec-muted">
+      <a class="iplink" href="#/documents/${d.id}">W-9 request #${d.id}</a> · ${esc(d.created_at.slice(0, 10))}</span>
+      <span class="small">${d.status === 'signed'
+        ? `<a class="iplink" href="/api/documents/${d.id}/pdf?signed=1" target="_blank" rel="noopener">signed W-9</a> · <a class="iplink" href="/api/documents/${d.id}/pdf?certificate=1" target="_blank" rel="noopener">certificate</a>`
+        : esc(d.status)}</span></div>`).join('');
+  const w9 = signedW9
+    ? `<a class="iplink" href="/api/documents/${signedW9.id}/pdf?signed=1" target="_blank" rel="noopener">signed online ${esc((signedW9.completed_at || '').slice(0, 10))}</a>`
+    : v.w9
     ? `<a class="iplink" href="/api/attachments/${v.w9.id}" target="_blank" rel="noopener">${esc(v.w9.filename || 'W-9')}</a>`
     : (v.w9_received_at ? 'received ' + esc(v.w9_received_at) : `<span style="color:${v.is_1099 ? 'var(--warning)' : 'inherit'}">not on file</span>`);
   const fileOpts = v.attachments.map(a => [String(a.id), a.filename || ('File #' + a.id)]);
@@ -4354,10 +4365,16 @@ async function renderVendor(id) {
       <div class="card"><div class="hd"><h2><i class="ti ti-file-certificate"></i> Tax &amp; W-9</h2></div>
         <div style="padding:0 14px 12px">
           ${kv('1099 vendor', v.is_1099 ? 'Yes' : 'No')}
+          ${v.legal_name && v.legal_name !== v.name ? kv('Legal name (W-9 line 1)', esc(v.legal_name)) : ''}
           ${kv('Classification', esc(v.tax_classification || '') || '—')}
           ${kv('Tax ID', v.tin_last4 ? `<span class="mono">${esc((v.tin_type || '').toUpperCase())} •••${esc(v.tin_last4)}</span>` : '—')}
           ${kv('W-9', w9)}
-          ${fileOpts.length ? `<div style="margin-top:8px"><button class="btn sm" onclick="pickVendorW9(${v.id})"><i class="ti ti-paperclip"></i> Choose W-9 from files</button></div>` : '<div class="small sec-muted" style="margin-top:6px">Upload the signed W-9 under Files below, then mark it here.</div>'}
+          ${v.backup_withholding ? kv('Backup withholding', '<span style="color:var(--danger)">Yes — they certified they are subject to it</span>') : ''}
+          ${w9Docs}
+          <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+            ${v.archived_at ? '' : `<button class="btn sm primary" onclick="requestW9(${v.id})"><i class="ti ti-send"></i> Request W-9</button>`}
+            ${fileOpts.length ? `<button class="btn sm" onclick="pickVendorW9(${v.id})"><i class="ti ti-paperclip"></i> Choose W-9 from files</button>` : ''}</div>
+          <div class="small sec-muted" style="margin-top:6px">Request W-9 emails them the official IRS form to fill in and sign online. Or upload one they sent you under Files and mark it here.</div>
         </div></div>
     </div>
 
@@ -4453,6 +4470,57 @@ async function editVendorContact(contactId, vendorId) {
 async function removeVendorContact(contactId, vendorId) {
   if (!confirm('Remove this contact from the vendor?')) return;
   try { await api('/vendor-contacts/' + contactId, { method: 'DELETE' }); toast('Removed'); renderVendor(vendorId); } catch (e) { toast(e.message); }
+}
+// ---- requesting a W-9 ----
+const W9_CLASSES = [['', '— not known —'], ['individual', 'Individual / sole proprietor'], ['c_corp', 'C corporation'], ['s_corp', 'S corporation'],
+  ['partnership', 'Partnership'], ['trust', 'Trust / estate'], ['llc', 'LLC'], ['other', 'Other']];
+/** "1 Main St, Phoenix, AZ 85001" → line 5 and line 6 of the W-9, as best a comma allows. */
+function splitAddress(a) {
+  const parts = String(a || '').split(',').map(x => x.trim()).filter(Boolean);
+  if (parts.length < 2) return { address: parts[0] || '', city_state_zip: '' };
+  return { address: parts[0], city_state_zip: parts.slice(1).filter(p => !/^(usa|united states)$/i.test(p)).join(', ') };
+}
+async function requestW9(vendorId) {
+  const v = await api('/vendors/' + vendorId);
+  const people = [...(v.email ? [[v.email, v.name]] : []), ...v.contacts.filter(c => c.email).map(c => [c.email, c.name])];
+  const first = await askSheet({
+    title: 'Request a W-9 from ' + v.name, ok: 'Next',
+    intro: 'They get an email with a personal link to fill in the official IRS Form W-9 and sign it online. The signed form is filed here, and their tax details are recorded — except the full tax ID, which stays on the form only.',
+    fields: [
+      people.length ? { name: 'email', label: 'Send to', type: 'select', value: people[0][0], options: people.map(([e, n]) => [e, `${n} — ${e}`]) }
+        : { name: 'email', label: 'Send to (email)', type: 'email', ph: 'accounts@vendor.com' },
+      { name: 'mode', label: 'Form', type: 'select', value: 'prefill', options: [['prefill', 'Pre-fill what we already know'], ['blank', 'Send the blank form']] }
+    ]
+  });
+  if (!first) return;
+  const who = people.find(p => p[0] === first.email);
+  const body = { email: first.email, name: who ? who[1] : v.name, mode: first.mode };
+  if (first.mode === 'prefill') {
+    const addr = splitAddress(v.address);
+    const pre = await askSheet({
+      title: 'What to pre-fill', ok: 'Send W-9',
+      intro: 'They can correct anything here before signing. Their tax ID is never entered by us — they add it themselves.',
+      fields: [
+        { name: 'name', label: 'Line 1 — name on their tax return', value: v.legal_name || v.name },
+        { name: 'business_name', label: 'Line 2 — business name, if different', value: '' },
+        { name: 'classification', label: 'Tax classification', type: 'select', value: v.tax_classification || '', options: W9_CLASSES },
+        { name: 'address', label: 'Line 5 — street address', value: addr.address },
+        { name: 'city_state_zip', label: 'Line 6 — city, state, ZIP', value: addr.city_state_zip },
+        { name: 'account_numbers', label: 'Line 7 — account number(s), optional', value: v.our_account_number || '' }
+      ]
+    });
+    if (!pre) return;
+    body.prefill = pre;
+  }
+  try {
+    const r = await api('/vendors/' + vendorId + '/w9-request', { method: 'POST', body });
+    const d = r.delivery || {};
+    if (d.sent) toast('W-9 sent to ' + first.email + (d.from ? ' from ' + d.from : ''));
+    else {
+      toast('W-9 created, but the email did not go: ' + (d.error || 'unknown error') + '. Copy the link from the document page.');
+    }
+    renderVendor(vendorId);
+  } catch (e) { toast(e.message); }
 }
 async function pickVendorW9(vendorId) {
   const v = await api('/vendors/' + vendorId);

@@ -640,6 +640,17 @@ export function migrate() {
   ensure('doc_signers', 'signed_geo', 'TEXT');
   ensure('doc_signers', 'signed_tz', 'TEXT');
   ensure('doc_signers', 'signed_client_at', 'TEXT');
+  // Documents that are an EXISTING PDF form (IRS W-9) filled in by the signer, rather than text we
+  // render. form_prefill holds what staff already knew — never a taxpayer ID; see lib/w9.js.
+  ensure('documents', 'form_kind', 'TEXT');
+  ensure('documents', 'form_prefill', 'TEXT');
+  // Form documents keep the official form untouched as the signed file, so the certificate of
+  // completion is filed beside it rather than appended as a page.
+  ensure('documents', 'certificate_stored_name', 'TEXT');
+  ensure('documents', 'certificate_sha256', 'TEXT');
+  // What a signer's form answers amounted to, minus anything sensitive (for a W-9: name,
+  // classification, last four of the TIN). JSON.
+  ensure('doc_signers', 'form_summary', 'TEXT');
 
   // The tamper-evident trail. Append-only by convention and by hash: `hash` covers this row's
   // contents AND `prev_hash`, so the chain can be recomputed end to end and any edit, insertion or
@@ -720,6 +731,9 @@ export function migrate() {
   ensure('upstream_providers', 'is_1099', 'INTEGER NOT NULL DEFAULT 0');
   ensure('upstream_providers', 'w9_received_at', 'TEXT');
   ensure('upstream_providers', 'w9_attachment_id', 'INTEGER');
+  ensure('upstream_providers', 'w9_document_id', 'INTEGER');   // the signed W-9 completed through /sign
+  ensure('upstream_providers', 'legal_name', 'TEXT');          // line 1 of their W-9
+  ensure('upstream_providers', 'backup_withholding', 'INTEGER NOT NULL DEFAULT 0');
   ensure('upstream_providers', 'created_at', 'TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS idx_providers_kind ON upstream_providers(vendor_kind)');
 

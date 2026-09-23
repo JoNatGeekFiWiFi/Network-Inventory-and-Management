@@ -45,6 +45,8 @@ az_spans_*.json
 # area and a real signed contract must never be committed by accident.
 *.pdf
 !test/fixtures/*.pdf
+# Blank government forms the platform fills in (public documents, needed at runtime).
+!forms/*.pdf
 
 # Runtime data written next to data.db: uploaded files (visitor ID photos, signed contracts,
 # attachments) and router config backups (full device configs, often with credentials). *.pdf above
