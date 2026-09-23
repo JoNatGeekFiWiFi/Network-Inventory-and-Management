@@ -72,7 +72,7 @@ fi
 section "log: last 24h errors and warnings (emails masked)"
 if have journalctl; then
   journalctl -u "$SERVICE" --since "24 hours ago" --no-pager 2>/dev/null \
-    | grep -iE '\[error\]|error|warn|failed|uncaught|EADDRINUSE' | grep -v ExperimentalWarning | tail -40 | mask
+    | grep -iE '\[error\]|error|warn|failed|uncaught|EADDRINUSE' | grep -vE 'ExperimentalWarning|trace-warnings' | tail -40 | mask
   section "log: startup file moves (this boot)"
   journalctl -u "$SERVICE" -b --no-pager 2>/dev/null | grep -E 'Files:|Backups:|moved|running on' | tail -10 | mask
 fi
@@ -107,6 +107,8 @@ console.log('  flat uploads still referenced:', n("SELECT (SELECT COUNT(*) FROM 
 console.log('  flat backups still referenced:', n("SELECT COUNT(*) FROM router_backups WHERE stored_name IS NOT NULL AND stored_name NOT LIKE '%/%'"), '(should be 0)');
 // Settings that must be set for W-9s and signing links to be right — reports SET / not set only.
 const set = (k) => { const r = one('SELECT value FROM settings WHERE key=?', k); return r && r.value ? 'set' : 'NOT SET'; };
+const bub = (one("SELECT value FROM settings WHERE key='backup_upload_base'") || {}).value || '';
+console.log('  router backup upload URL :', !bub ? 'not set' : (/:3000\b/.test(bub) ? 'set, points at port 3000 directly' : 'set, goes through nginx'), bub ? '(host: ' + (bub.match(/^\w+:\/\/([^/:]+)/) || [])[1] + ')' : '');
 console.log('  settings      : company_name', set('company_name'), '| company_address', set('company_address'), '| inbound_secret', set('inbound_secret'), '| public_base_url', set('public_base_url'));
 NODE
   # The seed accounts. The sign-in page used to print them with their passwords, so if any is still
@@ -154,8 +156,10 @@ found=0
 for f in /etc/cron.d/* /etc/cron.daily/* /var/spool/cron/crontabs/*; do
   [ -f "$f" ] && grep -qiE 'data\.db|netinv|sqlite' "$f" 2>/dev/null && { echo "cron: $f"; found=1; }
 done
-have systemctl && systemctl list-timers --all --no-pager 2>/dev/null | grep -iE 'netinv|backup' && found=1
-[ "$found" -eq 0 ] && echo "NOTHING FOUND — no scheduled backup of $DB_PATH or the uploads folder"
+have systemctl && systemctl list-timers --all --no-pager 2>/dev/null | grep -iE 'netinv|backup' | grep -v dpkg && found=1
+DEPLOY_BAK="$DATA_DIR/deploy-backups"
+[ -d "$DEPLOY_BAK" ] && echo "deploy-time backups: $(ls "$DEPLOY_BAK" 2>/dev/null | wc -l) in $DEPLOY_BAK (same disk as the database — they do not survive losing it)"
+[ "$found" -eq 0 ] && echo "no SCHEDULED backup of $DB_PATH or the uploads folder, and nothing copied off this server"
 
 # ---- web / tls / firewall ---------------------------------------------------------------------------
 section "nginx and TLS"
@@ -166,5 +170,9 @@ fi
 section "firewall and listening ports"
 have ufw && ufw status 2>/dev/null | head -12
 have ss && ss -tlnp 2>/dev/null | awk 'NR==1 || /LISTEN/ {print "  " $4, $6}' | sed -E 's/users:\(\("([^"]+)".*/\1/' | head -20
+echo "  -- UDP --"
+have ss && ss -ulnp 2>/dev/null | awk 'NR>1 {print "  " $4, $6}' | sed -E 's/users:\(\("([^"]+)".*/\1/' | head -20
+echo "  -- interfaces --"
+have ip && ip -br addr 2>/dev/null | awk '{print "  " $1, $3}' | head -12
 
 echo; echo "done — nothing was changed."

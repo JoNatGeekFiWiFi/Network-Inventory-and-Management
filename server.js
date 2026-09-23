@@ -2604,4 +2604,8 @@ process.on('uncaughtException', (err) => {
 const _sessionSweep = setInterval(() => { try { pruneSessions(); } catch {} }, 6 * 60 * 60 * 1000);
 if (_sessionSweep.unref) _sessionSweep.unref();
 
-app.listen(PORT, () => console.log(`Network Inventory Platform running on http://localhost:${PORT}`));
+// HOST lets a deployment bind to one interface (e.g. HOST=127.0.0.1 behind nginx, so port 3000 is not
+// reachable from the internet at all). Unset keeps the old behaviour — all interfaces — because
+// routers on the management overlay may be pushing backups to this port directly.
+const HOST = process.env.HOST || undefined;
+app.listen(PORT, HOST, () => console.log(`Network Inventory Platform running on http://${HOST || 'localhost'}:${PORT}`));
