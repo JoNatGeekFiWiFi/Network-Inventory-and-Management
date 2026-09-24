@@ -68,6 +68,7 @@ import registerMail from './domains/mail.js';
 import registerVendors from './domains/vendors.js';
 import registerHealth from './domains/health.js';
 import registerSuspension from './domains/suspension.js';
+import registerMaintenance from './domains/maintenance.js';
 import { demoGate, registerDemo, registerShapeExport, startDemoTraffic, DEMO_INFO } from './domains/demo.js';
 import { populateDemo } from './lib/demodata.js';
 import { addressKey, unitFromAddress } from './lib/address.js';
@@ -132,7 +133,29 @@ const activeBlockIps = () => {
   const min = blocklistMinHits();
   return db.prepare("SELECT ip FROM blocklist WHERE active=1 AND (source='manual' OR hits>=?) ORDER BY ip").all(min).map(r => r.ip);
 };
+/**
+ * Failed-login lines in an OpenWrt log: dropbear (SSH) and LuCI/rpcd. Exported shape matches the
+ * RouterOS harvest: { ip: count }.
+ */
+function openwrtFailedLogins(lines) {
+  const counts = {};
+  for (const e of lines || []) {
+    const msg = e.message || '';
+    if (/bad password attempt|login attempt for nonexistent user|failed login|authentication fail|exit before auth/i.test(msg)) {
+      const ip = extractIp(msg);
+      if (ip && isPublicV4(ip)) counts[ip] = (counts[ip] || 0) + 1;
+    }
+  }
+  return counts;
+}
 async function harvestThreats(d) {
+  if (platformOf(d) === 'openwrt') {
+    const driver = await driverFor(d, { sshExec });
+    const counts = openwrtFailedLogins(await driver.log({ lines: 400 }));
+    const up = db.prepare("INSERT INTO blocklist (ip,reason,hits,source) VALUES (?,?,?,?) ON CONFLICT(ip) DO UPDATE SET hits=MAX(hits,?), last_seen=datetime('now'), source=excluded.source");
+    for (const [ip, c] of Object.entries(counts)) up.run(ip, 'failed login', c, d.name, c);
+    return Object.keys(counts).length;
+  }
   const user = d.admin_username || 'admin';
   const H = { Authorization: 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64'), Accept: 'application/json' };
   const r = await restReq(d.mgmt_address, '/rest/log', { headers: H, timeoutMs: 7000 });
@@ -153,6 +176,13 @@ async function harvestThreats(d) {
 }
 // Push the active blocklist to one device: reconcile its netinv-blocklist address-list + ensure an input drop rule.
 async function pushBlocklistToDevice(d) {
+  // OpenWrt: an ipset and one drop rule, staged in UCI and applied with rollback.
+  if (platformOf(d) === 'openwrt') {
+    const driver = await driverFor(d, { sshExec });
+    const r = await driver.pushBlocklist(activeBlockIps());
+    if (!r.ok) return { added: 0, removed: 0, total: r.total || 0, error: r.error };
+    return { added: r.changed ? r.total : 0, removed: 0, total: r.total, ruleAdded: r.changed, unchanged: !!r.unchanged };
+  }
   const user = d.admin_username || 'admin';
   const H = { Authorization: 'Basic ' + Buffer.from(user + ':' + d.admin_password).toString('base64'), Accept: 'application/json' };
   const ips = activeBlockIps();
@@ -2296,6 +2326,7 @@ registerMail(app, ctx);
 registerVendors(app, ctx);
 // Suspension for nonpayment. Billing calls ctx.suspension.onPayment() at payment time, looked up then.
 registerSuspension(app, ctx);
+registerMaintenance(app, ctx);
 
 // ---- Files (admin only) ----
 //

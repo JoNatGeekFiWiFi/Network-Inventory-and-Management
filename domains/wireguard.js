@@ -16,6 +16,8 @@ import {
 } from '../lib/ipam.js';
 import { wgKeypair, deviceConfig, serverPeerStanza } from '../wg.js';
 import { toSvg } from '../lib/qr.js';
+import { driverFor, platformOf } from '../lib/drivers/index.js';
+import { sshExec } from '../lib/sshexec.js';
 
 /**
  * One shape for both config reads — a router's and a laptop's — so the UI that shows them can be
@@ -351,6 +353,20 @@ export default function registerWireguard(app, ctx) {
     // Reached over whatever address currently works — usually the existing ZeroTier address, since
     // this is normally run while migrating a device that is already on ZeroTier.
     const reachAt = req.body && req.body.via ? String(req.body.via) : (d.current_mgmt_ip || d.mgmt_address);
+
+    // OpenWrt: the same tunnel as UCI (interface + hub peer + a management zone), applied with
+    // rollback, then the hub end.
+    if (platformOf(d) === 'openwrt') {
+      try {
+        const driver = await driverFor({ ...d, mgmt_address: reachAt }, { sshExec });
+        const r = await driver.pushWireguard({ privateKey: d.wg_private_key, address: d.mgmt_address, prefix,
+          serverPub, endpointHost: host, endpointPort: port || '51820', allowed });
+        const sync = r.ok ? await hub().sync(desiredPeers()) : null;
+        audit(req, 'edit', 'device#' + d.id, `WireGuard pushed to OpenWrt router (${r.ok ? 'ok' : 'failed'})`);
+        return res.status(r.ok ? 200 : 502).json({ ok: !!r.ok, iface: 'wg_mgmt', address: `${d.mgmt_address}/${prefix}`, reached_at: reachAt,
+          steps: [{ step: 'UCI network + firewall (confirmed apply)', ok: !!r.ok, detail: r.error || (r.unchanged ? 'already configured' : null) }], hub: sync, error: r.ok ? null : r.error });
+      } catch (e) { return res.status(502).json({ ok: false, error: e.message }); }
+    }
     const H = rosHeaders(d);
     const steps = [];
     const ros = async (method, path, body) => {

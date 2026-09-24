@@ -168,8 +168,29 @@ async function checkOpenWrt(d) {
   await probe(name, 'packages read', async () => `${Object.keys(await drv.packages()).length} packages`);
   await probe(name, 'UCI read (settings)', async () => { const r = await drv.uciGetAll('firewall'); if (!r.ok) throw new Error(r.error + ' — the login may lack UCI access (rpcd ACL)'); return `${Object.keys(r.values).length} firewall sections`; });
   await probe(name, 'no half-made changes', async () => { const c = await drv.uciChanges(); return c.length ? { status: 'warn', detail: `${c.length} unsaved change(s) on the router — Wi-Fi edits and suspension will refuse until they are applied or reverted` } : 'clean'; });
-  row(name, 'blocklist push', 'skip', 'not built for OpenWrt yet');
-  row(name, 'DHCP edit / reboot', 'skip', 'not built for OpenWrt yet');
+  await probe(name, 'DHCP edit (UCI dhcp)', async () => { const r = await drv.uciGetAll('dhcp'); if (!r.ok) throw new Error(r.error); const hosts = Object.values(r.values).filter(x => x['.type'] === 'host'); return `readable · ${hosts.length} reservation(s)`; });
+  await probe(name, 'blocklist push', async () => {
+    const r = await drv.uciGetAll('firewall'); if (!r.ok) throw new Error(r.error);
+    const set = r.values.netinv_blocklist;
+    return set ? `pushed · ${[].concat(set.entry || []).length} address(es)` : { status: 'warn', detail: 'not pushed yet (happens on the next blocklist change, or Blocklist → Push now)' };
+  });
+  await probe(name, 'shell (SSH) for firmware/packages', async () => {
+    const t = await sshExec({ host: d.mgmt_address, username: d.admin_username || 'root', password: d.admin_password, argv: ['true'], timeoutMs: 8000 });
+    if (!t.ok) throw new Error(t.error + ' — firmware upgrades, packages and backups need SSH');
+    return 'SSH login works';
+  });
+  await probe(name, 'firmware upgrade path', async () => {
+    const fw = await drv.firmware();
+    const ls = await sshExec({ host: d.mgmt_address, username: d.admin_username || 'root', password: d.admin_password, argv: ['which', 'sysupgrade'], timeoutMs: 8000 });
+    if (!ls.ok) throw new Error('sysupgrade not found on the router');
+    return `running ${fw.running || '?'} · sysupgrade available`;
+  });
+  await probe(name, 'WireGuard support', async () => {
+    const r = await sshExec({ host: d.mgmt_address, username: d.admin_username || 'root', password: d.admin_password, argv: ['ubus', 'call', 'network', 'get_proto_handlers'], timeoutMs: 8000 });
+    if (!r.ok) throw new Error(r.error);
+    return /"wireguard"/.test(r.stdout) ? 'wireguard protocol installed' : { status: 'warn', detail: 'not installed — opkg install kmod-wireguard wireguard-tools luci-proto-wireguard (from the Maintenance card)' };
+  });
+  await probe(name, 'reboot', async () => { const r = await sshExec({ host: d.mgmt_address, username: d.admin_username || 'root', password: d.admin_password, argv: ['ubus', '-v', 'list', 'system'], timeoutMs: 8000 }); if (!r.ok) throw new Error(r.error); return /reboot/.test(r.stdout) ? 'system.reboot available (not called)' : { status: 'warn', detail: 'no system.reboot method' }; });
   await probe(name, 'suspend: overlay zone', async () => {
     const fw = await drv.uciGetAll('firewall');
     const z = findOverlayZone({ interfaces: ifs || await drv.interfaces(), firewall: fw.values, mgmtAddress: d.mgmt_address });

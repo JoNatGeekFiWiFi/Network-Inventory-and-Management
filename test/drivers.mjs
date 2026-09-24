@@ -37,9 +37,9 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
 
   ok(can('routeros', 'wifiWrite'), 'RouterOS can have its WiFi rewritten');
   ok(can('openwrt', 'wifiWrite'), 'OpenWrt can now write WiFi — the first configuration capability');
-  // `firmware` is the one still deliberately withheld: sysupgrade exists on the hardware, and a
-  // failed firmware push at a customer's house is not recoverable remotely.
-  ok(!can('openwrt', 'firmware'), 'but not firmware, which is withheld on purpose');
+  // Firmware is now claimed — behind a backup first, the router's own image check, and a typed
+  // confirmation (test/openwrt-write.mjs covers the order). DD-WRT still claims none of it.
+  ok(can('openwrt', 'firmware') && !can('ddwrt', 'firmware'), 'OpenWrt can upgrade firmware (guarded); DD-WRT cannot');
   ok(can('openwrt', 'interfaces') && can('openwrt', 'dhcpRead') && can('openwrt', 'wifiClients'),
     'but OpenWrt does cover the monitoring set');
   ok(!can('ddwrt', 'wifiRead'), 'DD-WRT claims nothing it cannot actually do');
@@ -51,7 +51,7 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
     for (const c of p.caps)
       ok(CAPABILITIES.includes(c), `${key} claims only real capabilities (${c})`);
 
-  const m = capMap('openwrt');
+  const m = capMap('ddwrt');
   ok(m.interfaces === true && m.firmware === false, 'the capability map is complete, not sparse');
   ok(Object.keys(m).length === CAPABILITIES.length, 'and covers every capability, so absent never means unknown');
 
@@ -550,8 +550,8 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
   // ---- firmware is READ ONLY, on purpose ----
   {
     const { capsFor } = await import('../lib/drivers/index.js');
-    ok(!capsFor('openwrt').includes('firmware'),
-      'firmware is NOT claimed for OpenWrt — sysupgrade exists on the hardware and is deliberately not wired up');
+    ok(capsFor('openwrt').includes('firmware') && capsFor('openwrt').includes('configBackup'),
+      'firmware is claimed for OpenWrt only alongside backups — the upgrade route takes one first');
     ok(capsFor('openwrt').includes('configBackup') && capsFor('openwrt').includes('wifiWrite'),
       'while backup and WiFi writes are, in that order: the undo shipped before the change');
   }
@@ -1155,8 +1155,10 @@ let pass = 0, fail = 0; const ok = (c, m) => { c ? pass++ : fail++; console.log(
 
   const owd = (await call('/api/devices/' + ow)).json;
   ok(owd.platform === 'openwrt', 'the platform round-trips through create');
-  ok(owd.caps && owd.caps.interfaces === true && owd.caps.firmware === false,
+  ok(owd.caps && owd.caps.interfaces === true && owd.caps.firmware === true && owd.caps.packages === true,
     'and the device read carries the capability map the page gates on');
+  const up = await fetch(B + '/api/devices/' + ow + '/firmware/upgrade', { method: 'POST', headers: { cookie, 'content-type': 'application/octet-stream' }, body: Buffer.alloc(10) });
+  ok(up.status === 400 && /Type the device name/.test((await up.json()).error), 'a firmware upgrade needs the device name typed to confirm');
   ok(owd.platform_label === 'OpenWrt (and vendor builds of it)', 'with a label fit to display');
 
   // The migration's promise: nothing existing changed.

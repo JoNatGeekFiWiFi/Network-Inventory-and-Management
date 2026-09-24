@@ -73,7 +73,9 @@ export default function registerNetwork(app, ctx) {
     configBackup: 'back up the configuration of',
     firmware: 'manage firmware on',
     blocklistPush: 'push the threat blocklist to',
-    reboot: 'reboot'
+    reboot: 'reboot',
+    packages: 'manage packages on',
+    wireguardPush: 'set up WireGuard on'
   };
 
   app.get('/api/devices/:id/dhcp-leases', requireNoc, requireCap('dhcpRead'), async (req, res) => {
@@ -83,7 +85,8 @@ export default function registerNetwork(app, ctx) {
       // luci-rpc or only the raw dnsmasq file.
       if (platformOf(d) !== 'routeros') {
         const driver = await driverFor(d, { sshExec });
-        const leases = (await driver.dhcpLeases())
+        // Annotated with the DHCP config, so reservations and blocks show as such.
+        const leases = (await (driver.dhcpLeasesAnnotated ? driver.dhcpLeasesAnnotated() : driver.dhcpLeases()))
           .sort((a, b) => String(a.address).localeCompare(String(b.address), undefined, { numeric: true }));
         return res.json({ leases });
       }
@@ -102,6 +105,14 @@ export default function registerNetwork(app, ctx) {
     const { id, mac, action } = req.body || {};
     let dynamic = (req.body || {}).dynamic === true || (req.body || {}).dynamic === 'true';
     if (!id || !action) return res.status(400).json({ error: 'id and action required' });
+    if (platformOf(d) === 'openwrt') {
+      const b = req.body || {};
+      const driver = await driverFor(d, { sshExec });
+      const r = await driver.dhcpAction({ mac: b.mac || id, ip: b.address, host: b.host, action });
+      if (!r.ok) return res.status(r.error && /dynamic lease|valid MAC|Unknown action|no address/.test(r.error) ? 400 : 502).json({ error: r.error, rolledBack: r.rolledBack });
+      audit(req, 'dhcp', 'device#' + d.id, `${action} lease ${b.mac || id}`);
+      return res.json({ ok: true, action, unchanged: !!r.unchanged });
+    }
     const H = rosHeaders(d);
     const ros = (method, path, body) => restReq(d.mgmt_address, path, { headers: H, method, body });
     const findStaticIdByMac = async (m) => {
@@ -493,6 +504,8 @@ export default function registerNetwork(app, ctx) {
     for (const b of old) { if (b.stored_name) { try { unlinkSync(ctx.backupFiles.resolveStored(b.stored_name)); } catch {} } db.prepare('DELETE FROM router_backups WHERE id=?').run(b.id); }
     return old.length;
   }
+  // Firmware upgrades take one first (domains/maintenance.js).
+  ctx.backupDevice = backupDevice;
   async function runWeeklyBackups(source) {
     let ok = 0, fail = 0;
     // Only devices that can actually be backed up. Attempting the rest wrote a failed row per
@@ -976,7 +989,33 @@ export default function registerNetwork(app, ctx) {
   // Strip credential values from a device row, replace with has_* flags
 
   // ---- batch config changes (fleet-wide, NOC/Admin) ----
+  /** The batch operations an OpenWrt router can take. Everything else is refused by name. */
+  async function applyBatchOpOpenWrt(d, op, params) {
+    const driver = await driverFor(d, { sshExec });
+    if (op === 'set-wifi') {
+      const wf = await driver.wifi();
+      if (!wf.radios || !wf.radios.length) throw new Error('no WiFi on this device');
+      const done = [];
+      for (const r of wf.radios) {
+        if (!r.section) continue;
+        const out = await driver.setWifi({ section: r.section, ssid: params.ssid || null, password: params.password || null });
+        if (!out.ok) throw new Error(out.error);
+        done.push(r.section);
+      }
+      if (!done.length) throw new Error('could not match the radios to their configuration sections');
+      return 'updated ' + done.length + ' network(s)' + (params.ssid ? ' · ssid=' + params.ssid : '') + (params.password ? ' · password set' : '');
+    }
+    if (op === 'add-firewall') {
+      const out = await driver.addFirewallRule(params);
+      if (!out.ok) throw new Error(out.error);
+      return params.chain + '/' + params.action + ' rule added';
+    }
+    if (op === 'reboot') { const out = await driver.reboot(); if (!out.ok) throw new Error(out.error); return 'rebooting'; }
+    throw new Error(`${op} is not available on OpenWrt (use the device page for firmware and packages)`);
+  }
+
   async function applyBatchOp(d, op, params) {
+    if (platformOf(d) === 'openwrt') return applyBatchOpOpenWrt(d, op, params);
     const H = rosHeaders(d);
     const ros = (m, p, b) => restReq(d.mgmt_address, p, { headers: H, method: m, body: b, timeoutMs: 15000 });
     if (op === 'add-user') {
@@ -1035,6 +1074,11 @@ export default function registerNetwork(app, ctx) {
       try { const rb = await ros('POST', '/rest/system/reboot', {}); rebooted = rb.status < 400; } catch {}
       return 'RouterBOOT firmware upgrade staged' + (rebooted ? ' · rebooting to apply' : ' · reboot to apply');
     }
+    if (op === 'reboot') {
+      try { const r = await ros('POST', '/rest/system/reboot', {}); if (r.status >= 400) throw new Error('HTTP ' + r.status); }
+      catch (e) { if (!(['ECONNRESET', 'ETIMEDOUT', 'EPIPE'].includes(e.code) || e.message === 'timeout')) throw e; }
+      return 'rebooting';
+    }
     if (op === 'add-firewall') {
       const body = { chain: params.chain, action: params.action };
       if (params.protocol && params.protocol !== 'any') body.protocol = params.protocol;
@@ -1073,7 +1117,8 @@ export default function registerNetwork(app, ctx) {
       'set-wifi': 'Set WiFi' + (params.ssid ? ' "' + params.ssid + '"' : ' password'),
       'add-firewall': 'Add firewall ' + params.chain + '/' + params.action,
       'update-packages': 'Update packages' + (params.channel ? ' (' + params.channel + ')' : ''),
-      'update-firmware': 'Update RouterBOOT firmware'
+      'update-firmware': 'Update RouterBOOT firmware',
+      'reboot': 'Reboot'
     })[op] || op;
     const jid = db.prepare("INSERT INTO batch_jobs (op,summary,actor,total,ok,fail) VALUES (?,?,?,?,?,?)").run(op, summary, actor, results.length, ok, fail).lastInsertRowid;
     const ins = db.prepare("INSERT INTO batch_results (job_id,device_id,device_name,status,detail) VALUES (?,?,?,?,?)");
@@ -1104,7 +1149,7 @@ export default function registerNetwork(app, ctx) {
   });
   app.post('/api/batch', requireNoc, async (req, res) => {
     const b = req.body || {};
-    const OPS = ['add-user', 'change-password', 'remove-user', 'set-wifi', 'add-firewall', 'update-packages', 'update-firmware'];
+    const OPS = ['add-user', 'change-password', 'remove-user', 'set-wifi', 'add-firewall', 'update-packages', 'update-firmware', 'reboot'];
     if (!OPS.includes(b.op)) return res.status(400).json({ error: 'unknown operation' });
     const ids = (b.device_ids || []).map(Number).filter(Boolean);
     if (!ids.length) return res.status(400).json({ error: 'Select at least one device' });
@@ -1400,7 +1445,7 @@ export default function registerNetwork(app, ctx) {
           if (ctx.health) { try { ctx.health.observe(d, 'reachable', 0); } catch {} }
         }
         try {
-          if (can(d, 'logRead') && platformOf(d) === 'routeros') await harvestThreats(d);
+          if (can(d, 'logRead') && ['routeros', 'openwrt'].includes(platformOf(d))) await harvestThreats(d);
         } catch {}
       }
       // Tell people about anything that changed this pass — one digest each, not one per device.

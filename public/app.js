@@ -1527,6 +1527,10 @@ async function renderDevice(id) {
       <div style="flex:1;min-width:0"><div>DHCP leases</div><div class="small sec-muted">View and manage live DHCP leases on this router</div></div>
       <i class="ti ti-chevron-right muted"></i></a></div>`;
 
+  const maintCard = (d.management_mode === 'provider' || !isPriv() || !(capable('reboot') || capable('firmware') || capable('packages'))) ? '' : `
+    <div class="card"><div class="hd"><h2><i class="ti ti-tool"></i> Maintenance</h2>
+      ${capable('reboot') ? `<button class="btn sm" onclick="rebootDevice(${d.id}, ${esc(JSON.stringify(d.name))})"><i class="ti ti-power"></i> Reboot</button>` : ''}</div>
+      <div id="maintBody"><div class="row muted small">${capable('firmware') ? '<button class="btn sm" onclick="loadMaintenance(' + d.id + ')"><i class="ti ti-cpu"></i> Show firmware' + (capable('packages') ? ' &amp; packages' : '') + '</button>' : ''}</div></div></div>`;
   const backupCard = (d.management_mode === 'provider' || !isPriv() || !capable('configBackup')) ? '' : `
     <div class="card"><a class="row rowlink" href="#/device/${d.id}/backups">
       <i class="ti ti-archive sec-muted"></i>
@@ -1593,6 +1597,8 @@ async function renderDevice(id) {
 
     ${backupCard}
 
+    ${maintCard}
+
     ${overlayCard}
 
     ${visibleCreds.length ? `<div class="card"><div class="hd"><h2><i class="ti ti-key"></i> Credentials</h2><button class="btn sm" onclick="revealCreds(${d.id})" title="Show the masked passwords (each reveal is written to the activity log)"><i class="ti ti-eye"></i> Reveal</button></div><div style="padding:0 14px 10px">${credRows}<div class="help"><i class="ti ti-lock"></i> Masked · reveal is logged${isPriv() ? '' : ' · NOC-only fields hidden for your role'}</div></div></div>` : ''}`;
@@ -1601,6 +1607,58 @@ async function renderDevice(id) {
   if (d.management_mode !== 'provider') { setWanRange('1h'); setLatRange('1h'); }
   if (signalCard) setSignalRange(d.id, '1h');
   loadDeviceHealth(d.id);
+}
+
+// ---------- Maintenance: reboot, firmware, packages ----------
+async function rebootDevice(id, name) {
+  if (!confirm(`Reboot ${name}? Everyone behind it loses service for a minute or two.`)) return;
+  try { const r = await api(`/devices/${id}/reboot`, { method: 'POST', body: JSON.stringify({ reason: 'from device page' }) }); toast(r.message || 'Rebooting'); } catch (e) { toast(e.message); }
+}
+async function loadMaintenance(id) {
+  const box = $('#maintBody'); if (!box) return;
+  box.innerHTML = '<div class="loading" style="padding:10px">Asking the router…</div>';
+  let fw = null, pk = null;
+  try { fw = await api(`/devices/${id}/firmware`); } catch (e) { fw = { error: e.message }; }
+  if (fw && fw.platform === 'openwrt') { try { pk = await api(`/devices/${id}/opkg`); } catch (e) { pk = { error: e.message }; } }
+  window._maint = { id, fw, pk };
+  const fwHtml = fw.error ? `<div class="row small" style="color:var(--danger)">${esc(fw.error)}</div>`
+    : fw.platform === 'routeros'
+      ? `<div class="row small"><span style="flex:1">RouterOS <b>${esc(fw.running || '?')}</b>${fw.latest && fw.latest !== fw.running ? ` · <b style="color:var(--warning)">${esc(fw.latest)} available</b>` : fw.latest ? ' · up to date' : ''}${fw.channel ? ' · ' + esc(fw.channel) + ' channel' : ''} · RouterBOOT ${esc((fw.routerboot || {}).current || '?')}${(fw.routerboot || {}).upgrade && fw.routerboot.upgrade !== fw.routerboot.current ? ' → ' + esc(fw.routerboot.upgrade) : ''}</span><a class="btn sm" href="#/batch">Batch update</a></div>`
+      : `<div class="row small"><span style="flex:1">${esc(fw.distribution || 'OpenWrt')} <b>${esc(fw.running || '?')}</b>${fw.kernel ? ' · kernel ' + esc(fw.kernel) : ''}</span></div>
+         <div class="row small" style="flex-wrap:wrap;gap:8px"><span>Upgrade from an image file (.bin, sysupgrade):</span><input type="file" id="fwFile" accept=".bin,.img,.itb">
+           <label class="small" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="fwKeep" checked> keep settings</label>
+           <button class="btn sm" onclick="uploadFirmware(${id})"><i class="ti ti-upload"></i> Upgrade</button></div>
+         <div class="help" style="padding:0 14px 8px">A configuration backup is taken first, the router checks the image fits this hardware, and only then does it flash. Untick "keep settings" only if you mean to reset it — the management tunnel is in those settings.</div>`;
+  let pkHtml = '';
+  if (pk) {
+    const names = pk.packages ? Object.keys(pk.packages).sort() : [];
+    pkHtml = pk.error || pk.available === false ? `<div class="row small sec-muted">Packages: ${esc(pk.error || pk.reason || 'unavailable')}</div>`
+      : `<div class="row small" style="gap:8px;flex-wrap:wrap"><b style="flex:1">Packages · ${names.length}</b>
+           <input id="pkName" placeholder="package name" style="width:180px"><button class="btn sm" onclick="pkgAction(${id},'install')"><i class="ti ti-download"></i> Install</button>
+           <button class="btn sm" onclick="pkgAction(${id},'update')" title="Refresh the package lists (opkg update)"><i class="ti ti-refresh"></i> Update lists</button></div>
+         <div style="max-height:260px;overflow:auto">${names.map(n => `<div class="row small"><span class="mono" style="flex:1">${esc(n)} <span class="sec-muted">${esc(pk.packages[n])}</span></span><button class="btn sm" onclick="pkgAction(${id},'remove',${esc(JSON.stringify(n))})" title="Remove">✕</button></div>`).join('')}</div>`;
+  }
+  box.innerHTML = fwHtml + pkHtml;
+}
+async function uploadFirmware(id) {
+  const f = $('#fwFile').files[0]; if (!f) { toast('Choose the image file first'); return; }
+  const m = window._maint || {}; const keep = $('#fwKeep').checked;
+  const name = prompt(`This flashes ${f.name} (${(f.size / 1048576).toFixed(1)} MB) onto the router${keep ? '' : ' AND RESETS ITS SETTINGS'}. It will be offline for a few minutes.\n\nType the device name to confirm:`);
+  if (!name) return;
+  toast('Uploading and checking the image…');
+  try {
+    const r = await fetch(`/api/devices/${id}/firmware/upgrade?keep=${keep ? 1 : 0}&confirm=${encodeURIComponent(name)}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Filename': f.name }, body: f });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(j.error || 'Upgrade refused'); return; }
+    toast(j.message || 'Flashing');
+  } catch (e) { toast(e.message); }
+}
+async function pkgAction(id, action, name) {
+  name = name || ($('#pkName') ? $('#pkName').value.trim() : '');
+  if (action !== 'update' && !name) { toast('Type a package name'); return; }
+  if (action === 'remove' && !confirm(`Remove ${name} from the router?`)) return;
+  toast(action === 'update' ? 'Updating package lists…' : `${action === 'install' ? 'Installing' : 'Removing'} ${name}…`);
+  try { await api(`/devices/${id}/opkg`, { method: 'POST', body: JSON.stringify({ action, name }) }); toast('Done'); loadMaintenance(id); } catch (e) { toast(e.message); }
 }
 
 // ---------- Health & alerts ----------
@@ -2563,6 +2621,7 @@ async function renderBatch() {
           <option value="add-firewall">Add firewall rule</option>
           <option value="update-packages">Update packages (RouterOS)</option>
           <option value="update-firmware">Update RouterBOOT firmware</option>
+          <option value="reboot">Reboot</option>
         </select></div>
       <div id="opFields"></div>
       <div class="hd" style="padding:8px 0 4px"><h2>Target routers</h2>
@@ -2593,6 +2652,8 @@ function batchOpChange() {
   else if (op === 'update-packages') F.innerHTML = `${field('Channel', 'channel', '', { type: 'select', options: ['', 'stable', 'long-term', 'testing'] })}
     <div class="help" style="color:var(--warning)"><i class="ti ti-alert-triangle"></i> Checks MikroTik for updates and, if a newer version exists, downloads it and <b>reboots</b> each selected router. Leave channel blank to keep each router's current channel. Routers need internet access.</div>`;
   else if (op === 'update-firmware') F.innerHTML = `<div class="help" style="color:var(--warning)"><i class="ti ti-alert-triangle"></i> Upgrades the RouterBOOT firmware to match the installed RouterOS and <b>reboots</b> each selected router to apply. Do this after a packages update.</div>`;
+  else if (op === 'reboot') F.innerHTML = `<div class="help" style="color:var(--warning)"><i class="ti ti-alert-triangle"></i> <b>Reboots</b> every selected router (MikroTik and OpenWrt). Everyone behind them loses service for a minute or two.</div>`;
+  // OpenWrt routers take Set WiFi, Add firewall rule and Reboot; the MikroTik-only operations say so per router.
 }
 function batchVisible() { const q = ($('#tfilter').value || '').toLowerCase(); return (window._batchTargets || []).filter(t => !q || (t.name || '').toLowerCase().includes(q) || (t.group || '').toLowerCase().includes(q)); }
 function renderTargets() {
@@ -2625,7 +2686,7 @@ function batchResultCard(r) {
     <div style="flex:1;min-width:0"><div>${esc(x.device_name || ('device#' + x.device_id))}</div><div class="small sec-muted">${esc(x.detail || '')}</div></div></div>`).join('');
   return `<div class="card" style="margin-top:14px"><div class="hd"><h2>${esc(r.summary || r.op)}</h2><span class="small mono"><span style="color:var(--success)">${r.ok}✓</span> · <span style="color:var(--danger)">${r.fail}✗</span> / ${r.total}</span></div>${rows}</div>`;
 }
-const BATCH_LABELS = { 'add-user': 'Add user', 'change-password': 'Change password', 'remove-user': 'Remove user', 'set-wifi': 'Set WiFi', 'add-firewall': 'Add firewall rule', 'update-packages': 'Update packages', 'update-firmware': 'Update RouterBOOT firmware' };
+const BATCH_LABELS = { 'add-user': 'Add user', 'change-password': 'Change password', 'remove-user': 'Remove user', 'set-wifi': 'Set WiFi', 'add-firewall': 'Add firewall rule', 'update-packages': 'Update packages', 'update-firmware': 'Update RouterBOOT firmware', 'reboot': 'Reboot' };
 async function runBatchOp() {
   const op = $('#f [name=op]').value;
   const params = collect('#opFields');
@@ -2636,7 +2697,7 @@ async function runBatchOp() {
   if (op === 'set-wifi' && !params.ssid && !params.password) { toast('Enter an SSID and/or password'); return; }
   if (op === 'add-firewall' && (!params.chain || !params.action)) { toast('Pick a chain and action'); return; }
   if (!ids.length) { toast('Select at least one router'); return; }
-  const reboots = op === 'update-packages' || op === 'update-firmware';
+  const reboots = op === 'update-packages' || op === 'update-firmware' || op === 'reboot';
   const extra = op === 'remove-user' ? ' — this removes the account' : (reboots ? ' — this DOWNLOADS updates and REBOOTS each router' : '');
   if (!confirm(`Run "${BATCH_LABELS[op]}" on ${ids.length} router(s)?${extra}`)) return;
   const out = $('#batchResults'); out.innerHTML = `<div class="card" style="margin-top:14px;padding:14px"><span class="muted">Running on ${ids.length} router(s)…</span></div>`;
@@ -3848,7 +3909,7 @@ async function leaseAction(idx, sel) {
   if (action === 'remove' && !confirm('Remove this DHCP lease?\n' + (l.address || '') + ' ' + (l.mac || ''))) { sel.value = ''; return; }
   sel.disabled = true; toast(action.replace('-', ' ') + '…');
   try {
-    await api('/devices/' + window._dhcpDevId + '/dhcp-leases/action', { method: 'POST', body: JSON.stringify({ id: l.id, mac: l.mac, dynamic: l.dynamic, action }) });
+    await api('/devices/' + window._dhcpDevId + '/dhcp-leases/action', { method: 'POST', body: JSON.stringify({ id: l.id, mac: l.mac, dynamic: l.dynamic, address: l.address, host: l.host, action }) });
     toast('Done · ' + action.replace('-', ' '));
     await loadLeases(window._dhcpDevId);
   } catch (e) { toast(e.message); sel.disabled = false; sel.value = ''; }
