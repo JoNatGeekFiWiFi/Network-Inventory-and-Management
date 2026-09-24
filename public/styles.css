@@ -219,3 +219,17 @@ label.fl{display:block;font-size:13px;color:var(--text2);margin-bottom:5px}
 .fiber-layers .sec-muted{margin-left:auto;padding-left:8px}
 .fiber-layers input{margin:0}
 .fl-sw{display:inline-block;flex:none;vertical-align:middle}
+
+/* Health & alerts */
+.s-off{background:var(--surface2);color:var(--text2)}
+.navbadge{margin-left:auto;background:var(--danger);color:#fff;border-radius:9px;font-size:11px;padding:0 6px;line-height:17px;font-weight:600}
+.bellwrap{position:relative}
+.bellbtn{position:relative}
+.bellcount{position:absolute;top:-6px;right:-6px;background:var(--danger);color:#fff;border-radius:9px;font-size:10px;padding:0 5px;line-height:16px;font-weight:600}
+.bellpanel{position:absolute;right:0;top:calc(100% + 6px);width:340px;max-width:90vw;max-height:70vh;overflow:auto;z-index:80;
+  background:var(--surface);border:.5px solid var(--border);border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.18)}
+.bellhd{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:.5px solid var(--border)}
+.bellitem{display:flex;gap:10px;align-items:flex-start;padding:9px 12px;color:var(--text);text-decoration:none;font-size:13px;border-bottom:.5px solid var(--border)}
+.bellitem.unread{background:var(--info-bg, var(--surface2))}
+.bellitem:hover{background:var(--surface2)}
+.bellfoot{display:block;padding:10px 12px;font-size:12.5px;text-align:center}

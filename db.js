@@ -854,6 +854,40 @@ export function migrate() {
   // already have archived_at are untouched.
   db.prepare(`UPDATE customers SET archived_at=datetime('now'), archived_by='migration: status was Closed'
     WHERE COALESCE(status,'')='Closed' AND archived_at IS NULL`).run();
+
+  // ---- Health checks, alerts and notifications (lib/health.js, domains/health.js) ---------------
+  //
+  // alert_rules: one row per (device, metric) override, or device_id NULL for the global default.
+  // metric_state: the live state per (device, metric) — last value, when it started breaching, and
+  // whether an alert is firing. alert_events: every alert and recovery, kept. notifications: the
+  // per-person inbox behind the bell. notify_prefs: how each person wants to be told.
+  db.exec(`CREATE TABLE IF NOT EXISTS alert_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER, metric TEXT NOT NULL,
+    enabled INTEGER, op TEXT, threshold REAL, tolerance_min INTEGER,
+    updated_by TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_alert_rules_key ON alert_rules(IFNULL(device_id, 0), metric)');
+  db.exec(`CREATE TABLE IF NOT EXISTS metric_state (
+    device_id INTEGER NOT NULL, metric TEXT NOT NULL, value REAL, observed_at TEXT,
+    breach_since TEXT, firing INTEGER NOT NULL DEFAULT 0, fired_at TEXT,
+    PRIMARY KEY (device_id, metric))`);
+  db.exec(`CREATE TABLE IF NOT EXISTS alert_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER NOT NULL, metric TEXT NOT NULL,
+    kind TEXT NOT NULL, value REAL, message TEXT, since TEXT,
+    suppressed INTEGER NOT NULL DEFAULT 0, notified_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_alert_events_device ON alert_events(device_id, id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_alert_events_pending ON alert_events(notified_at)');
+  db.exec(`CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, event_id INTEGER,
+    level TEXT, title TEXT NOT NULL, body TEXT, href TEXT, read_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read_at, id)');
+  db.exec(`CREATE TABLE IF NOT EXISTS notify_prefs (
+    user_id INTEGER PRIMARY KEY, web INTEGER, email INTEGER, sms INTEGER, phone TEXT,
+    recoveries INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  // Maintenance mute: checks keep running and events are recorded, but nobody is told.
+  ensure('devices', 'monitor_muted_until', 'TEXT');
+  ensure('devices', 'monitor_mute_reason', 'TEXT');
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

@@ -654,4 +654,6 @@ export default function registerSupport(app, ctx) {
   ctx.requirePortal = requirePortal;
   ctx.pubBase = pubBase;
   ctx.deliverOnChannel = deliverOnChannel;
+  // Alerts text the on-call person directly (domains/health.js).
+  ctx.sendSms = sendSms;
 }

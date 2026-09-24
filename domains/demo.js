@@ -160,6 +160,25 @@ export function registerShapeExport(app, ctx) {
 
 // ---- traffic: the demo's side ------------------------------------------------------------------
 
+/**
+ * A few past alerts and recoveries, so the history on the Alerts page is not empty on day one.
+ * Marked as already notified: they are history, not news.
+ */
+function demoAlertHistory(db, routers) {
+  const ins = db.prepare("INSERT INTO alert_events (device_id, metric, kind, value, message, since, notified_at, created_at) VALUES (?,?,?,?,?,?,datetime('now'),?)");
+  const name = (id) => (db.prepare('SELECT name FROM devices WHERE id=?').get(id) || {}).name || 'Router';
+  const sql = (t) => new Date(t).toISOString().replace('T', ' ').slice(0, 19);
+  const now = Date.now();
+  routers.slice(1, 4).forEach((r, i) => {
+    const start = now - (2 + i * 3) * 86400000 - (3 + i) * 3600000, end = start + (20 + i * 25) * 60000;
+    const [metric, bad, good, a, b] = i === 1
+      ? ['latency', 240 + i * 30, 18, 'has high WAN latency', 'WAN latency is back to normal']
+      : ['wan_ping', 0, 1, 'cannot reach the internet', 'can reach the internet again'];
+    ins.run(r.id, metric, 'alert', bad, `${name(r.id)} ${a}`, new Date(start).toISOString(), sql(start));
+    ins.run(r.id, metric, 'recovery', good, `${name(r.id)} ${b}`, new Date(start).toISOString(), sql(end));
+  });
+}
+
 async function loadShapes(dbPath) {
   const cacheFile = join(dirname(dbPath), 'traffic-shapes.json');
   const url = process.env.DEMO_SHAPE_URL, token = process.env.DEMO_SHAPE_TOKEN;
@@ -220,14 +239,36 @@ export async function startDemoTraffic(ctx, { dbPath, intervalMs = 60000 } = {})
     try { for (const t of times) writeAt(routers, t); db.exec('COMMIT'); }
     catch (e) { db.exec('ROLLBACK'); throw e; }
     console.log(`Demo: backfilled ${times.length} samples × ${routers.length} routers from ${source} traffic shapes`);
+    demoAlertHistory(db, routers);
   } else {
     console.log(`Demo: traffic simulator using ${source} shapes for ${routers.length} routers`);
   }
+
+  // Health checks, fed from the same simulation. The devices that were generated offline stay
+  // unreachable, so a few minutes after a reset their alerts fire and the bell has something real.
+  const downIds = new Set(db.prepare("SELECT id FROM devices WHERE status='Deployed' AND online=0 AND archived_at IS NULL").all().map(r => r.id));
+  const healthTick = (t) => {
+    if (!ctx.health) return;
+    const byId = new Map(routers.map(r => [r.id, r]));
+    for (const d of db.prepare('SELECT * FROM devices WHERE archived_at IS NULL').all()) {
+      if (!ctx.health.isMonitored(d)) continue;
+      if (downIds.has(d.id)) { ctx.health.observe(d, 'reachable', 0, t); continue; }
+      ctx.health.observe(d, 'reachable', 1, t);
+      if (byId.has(d.id)) {
+        const last = db.prepare('SELECT ms FROM dev_latency WHERE device_id=? ORDER BY ts DESC LIMIT 1').get(d.id);
+        ctx.health.observe(d, 'wan_ping', 1, t);
+        if (last) ctx.health.observe(d, 'latency', last.ms, t);
+      }
+    }
+    ctx.health.flush().catch(() => {});
+  };
+  try { healthTick(Date.now()); } catch (e) { console.warn('Demo health:', e.message); }
 
   const tick = () => {
     try {
       routers = demoRouters(db);            // a visitor may have tagged a new WAN port or deactivated a router
       db.exec('BEGIN'); writeAt(routers, Math.floor(Date.now() / 60000) * 60000); db.exec('COMMIT');
+      healthTick(Date.now());
       const cutoff = new Date(Date.now() - 60 * 86400000).toISOString();
       db.prepare('DELETE FROM iface_traffic WHERE ts<?').run(cutoff);
       db.prepare('DELETE FROM dev_latency WHERE ts<?').run(cutoff);

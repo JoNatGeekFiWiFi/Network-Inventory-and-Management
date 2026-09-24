@@ -86,8 +86,10 @@ async function doLogin() {
 }
 async function logout() { try { await fetch('/api/logout', { method: 'POST' }); } catch {} CURRENT_USER = null; renderLogin('Signed out.'); }
 function setupHeader() {
-  $('#userMenu').innerHTML = `<div class="who"><div class="nm">${esc(CURRENT_USER.name || CURRENT_USER.email)}</div><div class="rl">${esc(CURRENT_USER.role)}</div></div>
+  $('#userMenu').innerHTML = `<div class="bellwrap"><button class="btn sm bellbtn" id="bellBtn" onclick="toggleBell(event)" title="Notifications" aria-label="Notifications"><i class="ti ti-bell"></i><span class="bellcount" id="bellCount" hidden></span></button><div class="bellpanel" id="bellPanel" hidden></div></div>
+    <div class="who"><div class="nm">${esc(CURRENT_USER.name || CURRENT_USER.email)}</div><div class="rl">${esc(CURRENT_USER.role)}</div></div>
     <button class="btn sm" onclick="logout()"><i class="ti ti-logout"></i> Sign out</button>`;
+  startBellPolling();
   $('#navModels').style.display = isPriv() ? '' : 'none';
   $('#navSettings').style.display = isPriv() ? '' : 'none';
   $('#navZt').style.display = isPriv() ? '' : 'none';
@@ -246,6 +248,7 @@ async function route() {
     if (p[0] === 'customer' && p[2] === 'messages') { setNav('customers'); return await renderCustComms(p[1]); }
     if (p[0] === 'customer') { setNav('accounts'); return await renderCust(p[1]); }
     if (p[0] === 'inventory') { setNav('inventory'); return await renderInventory(); }
+    if (p[0] === 'alerts') { setNav('alerts'); return await renderAlerts(); }
     if (p[0] === 'device' && p[1] === 'new') { setNav('inventory'); return await formDevice(q); }
     if (p[0] === 'device' && p[2] === 'edit') { setNav('inventory'); return await formDevice({ id: p[1] }); }
     if (p[0] === 'device' && p[2] === 'dhcp') { setNav('inventory'); return await renderDeviceDhcp(p[1]); }
@@ -1262,7 +1265,7 @@ async function saveCust(id) {
 
 // ---------- Inventory ----------
 async function renderInventory() {
-  const devs = await api('/devices' + archQ());
+  const [devs, health] = await Promise.all([api('/devices' + archQ()), api('/health/status').catch(() => ({}))]);
   let pending = []; if (isPriv()) { try { pending = await api('/enrollments'); } catch {} }
   const pendCard = pending.length ? `<div class="card" style="margin-top:14px;border:1px solid var(--info)">
     <div class="hd"><h2><i class="ti ti-sparkles" style="color:var(--info)"></i> Pending enrollments · ${pending.length}</h2></div>
@@ -1277,7 +1280,7 @@ async function renderInventory() {
     <i class="ti ti-${iconFor(d.device_type)} sec-muted"></i>
     <div style="flex:1;min-width:0"><div>${esc(d.name)} · ${esc(d.manufacturer || '')} ${esc(d.model || '')} ${d.enroll_pending ? '<span class="tag" style="background:var(--info-bg);color:var(--info)">new</span>' : ''}${archTag(d)}</div>
       <div class="small sec-muted">${esc(d.management_mode === 'provider' ? 'Provider-managed' : 'Platform-managed')} · owned by ${esc(d.ownership)}</div></div>
-    <span class="tag">${esc(d.status)}</span>${statusPill(d.online ? 'Online' : 'Offline')}<i class="ti ti-chevron-right muted"></i></div>`).join('');
+    <span class="tag">${esc(d.status)}</span>${healthPill(health[d.id]) || statusPill(d.online ? 'Online' : 'Offline')}<i class="ti ti-chevron-right muted"></i></div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Inventory</h1><a class="btn" href="#/device/new"><i class="ti ti-plus"></i> Add hardware</a></div>
     ${pendCard}
     <div style="margin-top:14px">${archivedToggle('hardware')}</div>
@@ -1413,6 +1416,8 @@ async function renderDevice(id) {
       ${d.mgmt_address ? `<a class="btn" href="https://${esc(d.mgmt_address)}" target="_blank"><i class="ti ti-external-link"></i> Console</a>` : ''}
       <a class="btn" href="#/device/${d.id}/edit"><i class="ti ti-edit"></i> Edit</a>${deactivateBtn('device', d)}</div>
 
+    <div id="healthCard"></div>
+
     ${d.management_mode === 'provider' ? '' : `
     <div class="card"><div class="hd"><h2><i class="ti ti-arrows-up-down"></i> WAN traffic</h2><div class="seg" style="flex:none" id="wanrng">
       <button class="segbtn on" data-r="1h" onclick="setWanRange('1h')">1h</button><button class="segbtn" data-r="24h" onclick="setWanRange('24h')">24h</button><button class="segbtn" data-r="7d" onclick="setWanRange('7d')">7d</button></div></div>
@@ -1442,7 +1447,167 @@ async function renderDevice(id) {
   window._devId = d.id; window._devPorts = ifaces.map(i => i.name);
   if (d.management_mode !== 'provider') { setWanRange('1h'); setLatRange('1h'); }
   if (signalCard) setSignalRange(d.id, '1h');
+  loadDeviceHealth(d.id);
 }
+
+// ---------- Health & alerts ----------
+// Server side: lib/health.js (rules, tolerance, status) and domains/health.js (storage, notify).
+const HEALTH_LOOK = {
+  critical: ['s-down', 'var(--danger)', 'Critical'], problem: ['s-warn', 'var(--warning)', 'Problem'],
+  ok: ['s-up', 'var(--success)', 'OK'], unknown: ['s-off', 'var(--text3)', 'Unknown'],
+  unmonitored: ['s-off', 'var(--text3)', 'Not monitored'], deactivated: ['s-off', 'var(--text3)', 'Deactivated']
+};
+/** A health pill, or '' for a device nothing checks (the caller then falls back to Online/Offline). */
+function healthPill(status, { always = false } = {}) {
+  if (!status || (!always && (status === 'unmonitored' || status === 'deactivated'))) return '';
+  const [c, col, label] = HEALTH_LOOK[status] || HEALTH_LOOK.unknown;
+  return `<span class="pill ${c}" title="Health"><span class="dot" style="background:${col}"></span>${label}</span>`;
+}
+const fmtRule = (r, unit) => `alert when ${r.op === '<' && unit === '' && r.threshold === 1 ? 'failing' : (r.op === '>' ? 'above ' : 'below ') + r.threshold + (unit || '')}${r.tolerance_min ? ` for ${r.tolerance_min} min` : ''}`;
+const whenMs = (s) => (s ? Date.parse(s) : null);
+function durationSince(s) { const t = whenMs(s); return t ? timeAgo(t).replace(' ago', '') : ''; }
+
+async function loadDeviceHealth(id) {
+  const box = $('#healthCard'); if (!box) return;
+  let h; try { h = await api('/devices/' + id + '/health'); } catch { box.innerHTML = ''; return; }
+  window._devHealth = h;
+  if (!h.monitored && !h.events.length) {
+    box.innerHTML = `<div class="card"><div class="hd"><h2><i class="ti ti-heartbeat"></i> Health</h2>${healthPill(h.status, { always: true })}</div>
+      <div class="help" style="padding:0 14px 12px">Not monitored — health checks run on deployed, platform-managed devices with a management address and admin password.</div></div>`;
+    return;
+  }
+  const checkRow = (c) => {
+    const val = c.value == null ? '—' : c.bool ? (c.value >= 1 ? 'yes' : 'no') : Math.round(c.value * 10) / 10 + c.unit;
+    const state = !c.rule.enabled ? '<span class="muted">off</span>'
+      : c.firing ? `<b style="color:var(--${c.critical ? 'danger' : 'warning'})">Alert · ${durationSince(c.fired_at)}</b>`
+      : c.breaching_since ? `<span style="color:var(--warning)">failing ${durationSince(c.breaching_since)} · alerts after ${c.rule.tolerance_min} min</span>`
+      : c.observed_at ? '<span style="color:var(--success)">OK</span>' : '<span class="muted">no data yet</span>';
+    const dot = !c.rule.enabled || !c.observed_at ? 'var(--text3)' : c.firing ? (c.critical ? 'var(--danger)' : 'var(--warning)') : c.breaching_since ? 'var(--warning)' : 'var(--success)';
+    return `<div class="row" id="hc-${c.metric}"><span class="dot" style="background:${dot};width:9px;height:9px;border-radius:50%;flex:none"></span>
+      <div style="flex:1;min-width:0"><div>${esc(c.label)} <span class="mono small sec-muted">${esc(val)}</span></div>
+        <div class="small sec-muted" title="${esc(c.help)}">${state} · ${esc(fmtRule(c.rule, c.unit))}${c.override ? ' <span class="tag">this device</span>' : ''}</div></div>
+      ${isPriv() ? `<button class="btn sm" onclick="editHealthRule(${id},'${c.metric}')" title="Change when this check alerts, for this device only"><i class="ti ti-adjustments"></i> Rule</button>` : ''}</div>`;
+  };
+  const muted = h.muted_until ? `<div class="box" style="margin:0 14px 10px"><i class="ti ti-bell-off"></i> Alerts muted until ${esc(new Date(h.muted_until).toLocaleString())}${h.mute_reason ? ' — ' + esc(h.mute_reason) : ''}. Checks still run and are recorded.</div>` : '';
+  const muteBtn = !isPriv() ? '' : h.muted_until
+    ? `<button class="btn sm" onclick="unmuteDevice(${id})"><i class="ti ti-bell"></i> Unmute</button>`
+    : `<button class="btn sm" onclick="muteDevice(${id})" title="Maintenance: keep checking, stop notifying"><i class="ti ti-bell-off"></i> Mute</button>`;
+  box.innerHTML = `<div class="card"><div class="hd"><h2><i class="ti ti-heartbeat"></i> Health</h2>${healthPill(h.status, { always: true })}<span style="flex:1"></span>${muteBtn}</div>
+    ${muted}${h.checks.map(checkRow).join('')}
+    ${h.events.length ? `<div class="small sec-muted" style="padding:10px 14px 4px">Recent</div>${h.events.slice(0, 6).map(e => `<div class="row small"><i class="ti ${e.kind === 'alert' ? 'ti-alert-triangle' : 'ti-circle-check'}" style="color:var(--${e.kind === 'alert' ? 'warning' : 'success'})"></i><span style="flex:1">${esc(e.message)}${e.suppressed ? ' <span class="tag">muted</span>' : ''}</span><span class="sec-muted">${timeAgo(whenMs(e.created_at.replace(' ', 'T') + (e.created_at.includes('T') ? '' : 'Z')))}</span></div>`).join('')}` : ''}
+  </div>`;
+}
+function editHealthRule(id, metric) {
+  const c = (window._devHealth.checks || []).find(x => x.metric === metric); if (!c) return;
+  const row = $('#hc-' + metric); if (!row) return;
+  row.insertAdjacentHTML('afterend', `<div class="row" id="hce-${metric}" style="gap:8px;flex-wrap:wrap;background:var(--surface2)">
+    <label class="small" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="hr-en" ${c.rule.enabled ? 'checked' : ''}> On</label>
+    <span class="small">alert when</span>
+    <select id="hr-op" style="width:auto"><option value="<" ${c.rule.op === '<' ? 'selected' : ''}>below</option><option value=">" ${c.rule.op === '>' ? 'selected' : ''}>above</option></select>
+    <input id="hr-th" type="number" step="any" value="${c.rule.threshold}" style="width:90px"> <span class="small">${esc(c.unit || (c.bool ? '(1 = yes)' : ''))}</span>
+    <span class="small">for</span><input id="hr-tol" type="number" min="0" max="1440" value="${c.rule.tolerance_min}" style="width:70px"><span class="small">min</span>
+    <span style="flex:1"></span>
+    ${c.override ? `<button class="btn sm" onclick="resetHealthRule(${id},'${metric}')">Use default</button>` : ''}
+    <button class="btn sm" onclick="$('#hce-${metric}').remove()">Cancel</button>
+    <button class="btn sm primary" onclick="saveHealthRule(${id},'${metric}')"><i class="ti ti-check"></i> Save</button></div>`);
+}
+async function saveHealthRule(id, metric) {
+  const body = { enabled: $('#hr-en').checked, op: $('#hr-op').value, threshold: Number($('#hr-th').value), tolerance_min: Number($('#hr-tol').value) };
+  try { await api(`/devices/${id}/health/rules/${metric}`, { method: 'PUT', body: JSON.stringify(body) }); toast('Rule saved for this device'); loadDeviceHealth(id); }
+  catch (e) { toast(e.message); }
+}
+async function resetHealthRule(id, metric) {
+  try { await api(`/devices/${id}/health/rules/${metric}`, { method: 'DELETE' }); toast('Back to the default rule'); loadDeviceHealth(id); } catch (e) { toast(e.message); }
+}
+async function muteDevice(id) {
+  const hours = prompt('Mute alerts for how many hours? (checks keep running)', '4'); if (!hours) return;
+  const reason = prompt('Reason (optional) — e.g. scheduled maintenance', '') || '';
+  try { await api(`/devices/${id}/health/mute`, { method: 'POST', body: JSON.stringify({ hours: Number(hours), reason }) }); toast('Alerts muted'); loadDeviceHealth(id); }
+  catch (e) { toast(e.message); }
+}
+async function unmuteDevice(id) {
+  try { await api(`/devices/${id}/health/mute`, { method: 'DELETE' }); toast('Alerts unmuted'); loadDeviceHealth(id); } catch (e) { toast(e.message); }
+}
+
+// ---- the Alerts page ----
+async function renderAlerts() {
+  const [sum, events, rules, prefs] = await Promise.all([api('/health/summary'), api('/health/events?limit=100'), api('/health/rules'), api('/notifications/prefs')]);
+  const tile = (k, label, col) => `<div class="metric"><div class="l">${label}</div><div class="v" style="color:${col}">${sum.counts[k] || 0}</div></div>`;
+  const firing = sum.firing.map(f => `<div class="row rowlink" onclick="location.hash='#/device/${f.device_id}'">
+    <i class="ti ti-alert-triangle" style="color:var(--${f.critical ? 'danger' : 'warning'})"></i>
+    <div style="flex:1;min-width:0"><div><b>${esc(f.name)}</b> · ${esc(f.label)}${f.muted ? ' <span class="tag">muted</span>' : ''}</div>
+      <div class="small sec-muted">${esc(f.site || f.pop || 'unassigned')} · for ${durationSince(f.fired_at)}</div></div><i class="ti ti-chevron-right muted"></i></div>`).join('');
+  const ev = events.map(e => `<div class="row rowlink small" onclick="location.hash='#/device/${e.device_id}'">
+    <i class="ti ${e.kind === 'alert' ? 'ti-alert-triangle' : 'ti-circle-check'}" style="color:var(--${e.kind === 'alert' ? 'warning' : 'success'})"></i>
+    <span style="flex:1">${esc(e.message)}${e.suppressed ? ' <span class="tag">muted</span>' : ''}</span>
+    <span class="sec-muted">${esc(String(e.created_at).replace('T', ' ').slice(0, 16))}</span></div>`).join('');
+  const ruleRow = (r) => `<div class="row" style="gap:8px;flex-wrap:wrap">
+    <div style="flex:1;min-width:180px"><div>${esc(r.label)}${r.critical ? ' <span class="tag">critical</span>' : ''}</div><div class="small sec-muted">${esc(r.help)}</div></div>
+    ${isPriv() ? `<label class="small" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="gr-en-${r.metric}" ${r.enabled ? 'checked' : ''}> On</label>
+      <select id="gr-op-${r.metric}" style="width:auto"><option value="<" ${r.op === '<' ? 'selected' : ''}>below</option><option value=">" ${r.op === '>' ? 'selected' : ''}>above</option></select>
+      <input id="gr-th-${r.metric}" type="number" step="any" value="${r.threshold}" style="width:80px"><span class="small">${esc(r.unit)}</span>
+      <span class="small">for</span><input id="gr-tol-${r.metric}" type="number" min="0" max="1440" value="${r.tolerance_min}" style="width:64px"><span class="small">min</span>
+      <button class="btn sm" onclick="saveGlobalRule('${r.metric}')"><i class="ti ti-check"></i> Save</button>`
+      : `<span class="small">${esc(fmtRule(r, r.unit))}</span>`}</div>`;
+  view().innerHTML = `<div class="head"><div class="t"><h1>Alerts</h1><div class="small sec-muted" style="margin-top:3px">Device health, what is alerting now, and how you are told</div></div></div>
+    ${sum.sampler ? '' : '<div class="box" style="margin-top:12px;color:var(--warning)"><i class="ti ti-alert-triangle"></i> The sampler is off on this server (SAMPLER=off), so no checks are running.</div>'}
+    <div class="grid3" style="margin:14px 0">
+      ${tile('critical', 'Critical', 'var(--danger)')}${tile('problem', 'Problem', 'var(--warning)')}${tile('ok', 'OK', 'var(--success)')}
+      ${tile('unknown', 'Unknown', 'var(--text3)')}${tile('unmonitored', 'Not monitored', 'var(--text3)')}${tile('deactivated', 'Deactivated', 'var(--text3)')}
+    </div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-alert-triangle"></i> Alerting now · ${sum.firing.length}</h2></div>${firing || '<div class="row muted">Nothing is alerting.</div>'}</div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-bell-ringing"></i> How I'm notified</h2></div>
+      <div style="padding:4px 14px 12px" id="np">
+        <label class="small" style="display:flex;gap:8px;align-items:center;margin:6px 0"><input type="checkbox" id="np-web" ${prefs.web ? 'checked' : ''}> In the app (the bell)</label>
+        <label class="small" style="display:flex;gap:8px;align-items:center;margin:6px 0"><input type="checkbox" id="np-email" ${prefs.email ? 'checked' : ''}> Email to ${esc(CURRENT_USER.email)} — one message per check round, however many devices</label>
+        <label class="small" style="display:flex;gap:8px;align-items:center;margin:6px 0"><input type="checkbox" id="np-sms" ${prefs.sms ? 'checked' : ''}> Text message to <input id="np-phone" value="${esc(prefs.phone || '')}" placeholder="mobile number" style="width:160px"></label>
+        <label class="small" style="display:flex;gap:8px;align-items:center;margin:6px 0"><input type="checkbox" id="np-rec" ${prefs.recoveries ? 'checked' : ''}> Also tell me when things recover</label>
+        <button class="btn sm primary" onclick="saveNotifyPrefs()"><i class="ti ti-check"></i> Save</button></div></div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-adjustments"></i> Alert rules</h2></div>
+      ${rules.map(ruleRow).join('')}
+      <div class="help" style="padding:8px 14px">These apply to every device. A device's own page can override a rule for that device. The "for … min" tolerance is how long a check must keep failing before anyone is told.</div></div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-history"></i> History</h2></div>${ev || '<div class="row muted">No alerts yet.</div>'}</div>`;
+}
+async function saveGlobalRule(metric) {
+  const body = { enabled: $('#gr-en-' + metric).checked, op: $('#gr-op-' + metric).value, threshold: Number($('#gr-th-' + metric).value), tolerance_min: Number($('#gr-tol-' + metric).value) };
+  try { await api('/health/rules/' + metric, { method: 'PUT', body: JSON.stringify(body) }); toast('Rule saved'); } catch (e) { toast(e.message); }
+}
+async function saveNotifyPrefs() {
+  const body = { web: $('#np-web').checked, email: $('#np-email').checked, sms: $('#np-sms').checked, phone: $('#np-phone').value, recoveries: $('#np-rec').checked };
+  try { await api('/notifications/prefs', { method: 'PUT', body: JSON.stringify(body) }); toast('Saved'); } catch (e) { toast(e.message); }
+}
+
+// ---- the bell ----
+let _bellTimer = null;
+function startBellPolling() {
+  refreshBell();
+  if (!_bellTimer) _bellTimer = setInterval(() => { if (CURRENT_USER && !document.hidden) refreshBell(); }, 60000);
+}
+async function refreshBell() {
+  let n = 0; try { n = (await api('/notifications/count')).unread; } catch { return; }
+  const b = $('#bellCount'); if (b) { b.hidden = !n; b.textContent = n > 99 ? '99+' : String(n); }
+  // The sidebar badge counts what is alerting now, not what you have read.
+  try {
+    const f = (await api('/health/summary')).firing.length;
+    const nb = $('#navAlertCount'); if (nb) { nb.hidden = !f; nb.textContent = String(f); }
+  } catch {}
+}
+async function toggleBell(ev) {
+  if (ev) ev.stopPropagation();
+  const p = $('#bellPanel'); if (!p) return;
+  if (!p.hidden) { p.hidden = true; return; }
+  p.hidden = false;
+  p.innerHTML = '<div class="loading" style="padding:12px">Loading…</div>';
+  let r; try { r = await api('/notifications?limit=25'); } catch (e) { p.innerHTML = `<div style="padding:12px">${esc(e.message)}</div>`; return; }
+  const icon = { critical: ['ti-alert-octagon', 'danger'], problem: ['ti-alert-triangle', 'warning'], recovery: ['ti-circle-check', 'success'] };
+  p.innerHTML = `<div class="bellhd"><b>Notifications</b><span style="flex:1"></span>${r.unread ? '<button class="btn sm" onclick="bellReadAll()">Mark all read</button>' : ''}</div>
+    ${r.items.map(n => { const [ic, col] = icon[n.level] || ['ti-bell', 'text2']; return `<a class="bellitem${n.read_at ? '' : ' unread'}" href="${esc(n.href || '#/alerts')}" onclick="bellOpen(${n.id})">
+      <i class="ti ${ic}" style="color:var(--${col})"></i><span style="flex:1;min-width:0">${esc(n.title)}<br><span class="small sec-muted">${esc(String(n.created_at).replace('T', ' ').slice(0, 16))}</span></span></a>`; }).join('') || '<div style="padding:12px" class="muted">Nothing yet.</div>'}
+    <a class="bellfoot" href="#/alerts" onclick="$('#bellPanel').hidden=true">All alerts &amp; notification settings</a>`;
+}
+async function bellOpen(id) { $('#bellPanel').hidden = true; try { await api('/notifications/read', { method: 'POST', body: JSON.stringify({ ids: [id] }) }); } catch {} refreshBell(); }
+async function bellReadAll() { try { await api('/notifications/read', { method: 'POST', body: JSON.stringify({}) }); } catch {} refreshBell(); toggleBell(); }
+document.addEventListener('click', (e) => { const p = document.getElementById('bellPanel'); if (p && !p.hidden && !e.target.closest('.bellwrap')) p.hidden = true; });
 
 /**
  * Cellular signal history.

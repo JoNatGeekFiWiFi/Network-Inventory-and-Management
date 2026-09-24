@@ -1317,7 +1317,10 @@ export default function registerNetwork(app, ctx) {
   async function rosLatency(d) {
     const H = rosHeaders(d);
     const rp = await restReq(d.mgmt_address, '/rest/ping', { headers: H, method: 'POST', body: { address: '8.8.8.8', count: '3' }, timeoutMs: 7000 });
-    if (rp.status >= 400) return null;
+    // An error here means we could not RUN the ping (permissions, REST off) — not that the internet
+    // is down. Throwing keeps the health check from reporting a WAN outage that is really a login
+    // problem; null below means the ping ran and nothing came back.
+    if (rp.status >= 400) throw new Error('ping not permitted (' + rp.status + ')');
     const p = JSON.parse(rp.body);
     const times = (Array.isArray(p) ? p : []).map(x => parseRtt(x.time)).filter(v => v != null);
     if (!times.length) return null;
@@ -1336,20 +1339,31 @@ export default function registerNetwork(app, ctx) {
     if (key === 'unknown') return;                 // nothing to ask, and asking wastes a minute
     const now = Date.now(), ts = new Date(now).toISOString();
 
-    let counters = [], ms = null;
+    let counters = [], ms = null, pinged = false;
     if (key === 'routeros') {
       counters = await rosCounters(d);
-      try { ms = await rosLatency(d); } catch {}
+      try { ms = await rosLatency(d); pinged = true; } catch {}
     } else {
       const driver = await driverFor(d, { sshExec });
       if (driver.counters) counters = await driver.counters();
       // Latency is best-effort and must not cost the traffic sample: on a device where ping is
       // missing or blocked, the byte counters are still worth having.
-      if (driver.latency) { try { ms = await driver.latency(); } catch {} }
+      if (driver.latency) { try { ms = await driver.latency(); pinged = true; } catch {} }
     }
 
     recordCounters(d, counters, now, ts);
     if (ms != null) db.prepare('INSERT INTO dev_latency (device_id,ts,ms) VALUES (?,?,?)').run(d.id, ts, ms);
+    // Health checks (domains/health.js). Reaching this line means the device answered. The WAN
+    // checks are only reported when the ping actually ran: "could not ask" is not "internet down".
+    if (ctx.health) {
+      try {
+        ctx.health.observe(d, 'reachable', 1, now);
+        if (pinged) {
+          ctx.health.observe(d, 'wan_ping', ms != null ? 1 : 0, now);
+          if (ms != null) ctx.health.observe(d, 'latency', ms, now);
+        }
+      } catch (e) { console.warn('health observe:', e.message); }
+    }
     return counters.length;
   }
 
@@ -1383,11 +1397,14 @@ export default function registerNetwork(app, ctx) {
           // which is exactly what happened when the sampler was still speaking RouterOS to an
           // OpenWrt box. Kept in memory: it is a live diagnostic, not history.
           _sampleStatus.set(d.id, { ok: false, at: new Date().toISOString(), ifaces: 0, error: String(e && e.message || e).slice(0, 300) });
+          if (ctx.health) { try { ctx.health.observe(d, 'reachable', 0); } catch {} }
         }
         try {
           if (can(d, 'logRead') && platformOf(d) === 'routeros') await harvestThreats(d);
         } catch {}
       }
+      // Tell people about anything that changed this pass — one digest each, not one per device.
+      if (ctx.health) { try { await ctx.health.flush(); } catch (e) { console.warn('alert notify:', e.message); } }
       // auto-push the blocklist when it changed (or every 10 min to repair drift)
       if (process.env.AUTO_PUSH !== 'off') {
         const sig = blocklistSig();

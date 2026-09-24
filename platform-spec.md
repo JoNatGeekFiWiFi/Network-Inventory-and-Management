@@ -449,6 +449,21 @@ Devices can enter inventory **two ways, and both coexist:**
 
 Each controller has a `sync_enabled` flag and records last-sync time/result. Sync is read-from-controller for inventory; config push still goes back out through the controller's API.
 
+## 7a. Health checks & alerts
+
+Every minute the sampler reports three checks per monitored device: **Reachable** (critical),
+**Internet (WAN ping)** and **WAN latency**. A rule per check (operator, threshold, tolerance in
+minutes; global default, per-device override) decides when it alerts. An alert fires once when a
+breach outlasts its tolerance and a recovery fires once when it clears. Device health is derived:
+Critical (unreachable), Problem (any other alert), OK, Unknown (nothing heard for 15 min),
+Not monitored, Deactivated. The device's online flag follows the reachability alert.
+
+People are told per check round, not per device: one email and one text each per round, plus a
+line per event in the in-app bell. NOC/admin get web + email by default; everyone sets their own
+channels, phone number and whether they want recoveries on the Alerts page. A device can be muted
+for maintenance: checks and events continue, notifications stop. (Design borrowed from OpenWISP
+Monitoring's alert settings and health status; code is our own.)
+
 ## 7b. Public demo
 
 A second copy of the app on the same server (`deploy/demo-setup.sh`), for showing the platform to

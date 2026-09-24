@@ -66,6 +66,7 @@ import registerWireguard from './domains/wireguard.js';
 import registerDocuments from './domains/documents.js';
 import registerMail from './domains/mail.js';
 import registerVendors from './domains/vendors.js';
+import registerHealth from './domains/health.js';
 import { demoGate, registerDemo, registerShapeExport, startDemoTraffic, DEMO_INFO } from './domains/demo.js';
 import { populateDemo } from './lib/demodata.js';
 import { addressKey, unitFromAddress } from './lib/address.js';
@@ -2274,6 +2275,8 @@ const ctx = {
 // Demo read overrides go first so they answer before the routes that would try to reach a router.
 registerDemo(app, ctx);
 registerShapeExport(app, ctx);
+// Health first: the sampler in domains/network.js reports every check to ctx.health.
+registerHealth(app, ctx);
 registerNetwork(app, ctx);
 registerFiber(app, ctx);
 registerSearch(app, ctx);
