@@ -259,9 +259,28 @@ export async function startDemoTraffic(ctx, { dbPath, intervalMs = 60000 } = {})
         ctx.health.observe(d, 'wan_ping', 1, t);
         if (last) ctx.health.observe(d, 'latency', last.ms, t);
       }
+      // CPU / memory / storage, every five minutes, loosely following the traffic.
+      if (Math.floor(t / 60000) % 5 === 0 || !db.prepare('SELECT 1 FROM dev_resources WHERE device_id=? LIMIT 1').get(d.id)) demoResources(d, t);
     }
     ctx.health.flush().catch(() => {});
   };
+  function demoResources(d, t) {
+    const seed = (d.id * 2654435761) >>> 0, h = new Date(t).getUTCHours();
+    const busy = 0.5 + 0.5 * Math.sin(((h - 13) / 24) * 2 * Math.PI);      // afternoon in Phoenix
+    const cpu = Math.round((4 + (seed % 11) + busy * 18 + Math.random() * 6) * 10) / 10;
+    const mem = Math.round((32 + (seed % 23) + busy * 6 + Math.random() * 2) * 10) / 10;
+    const disk = Math.round((18 + (seed % 37)) * 10) / 10;
+    db.prepare('INSERT INTO dev_resources (device_id, ts, cpu, mem_pct, disk_pct, uptime_s) VALUES (?,?,?,?,?,?)')
+      .run(d.id, new Date(t).toISOString(), cpu, mem, disk, 86400 * (3 + (seed % 40)) + Math.floor((t / 1000) % 86400));
+    ctx.health.observe(d, 'cpu', cpu, t); ctx.health.observe(d, 'memory', mem, t); ctx.health.observe(d, 'disk', disk, t);
+  }
+  // A day of resource history on first start, so the chart is not empty.
+  if (!db.prepare('SELECT 1 FROM dev_resources LIMIT 1').get() && ctx.health) {
+    const devsNow = db.prepare('SELECT * FROM devices WHERE archived_at IS NULL').all().filter(d => ctx.health.isMonitored(d) && !downIds.has(d.id));
+    db.exec('BEGIN');
+    try { for (let t = Date.now() - 86400000; t < Date.now() - 300000; t += 300000) for (const d of devsNow) demoResources(d, t); db.exec('COMMIT'); }
+    catch (e) { try { db.exec('ROLLBACK'); } catch {} }
+  }
   try { healthTick(Date.now()); } catch (e) { console.warn('Demo health:', e.message); }
 
   const tick = () => {

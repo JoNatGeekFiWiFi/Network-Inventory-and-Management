@@ -1436,6 +1436,8 @@ export default function registerNetwork(app, ctx) {
         try {
           const n = await sampleDevice(d);
           _sampleStatus.set(d.id, { ok: true, at: new Date().toISOString(), ifaces: n, error: null });
+          // Every five minutes: CPU/memory/storage and who is on the Wi-Fi (domains/monitoring.js).
+          if (ctx.monitoring && _tickN % 5 === 0) await ctx.monitoring.everyFiveMinutes(d);
         } catch (e) {
           // Recorded rather than discarded. `catch {}` meant a device could fail every minute for
           // an hour with two empty graphs as the only symptom and nothing, anywhere, saying why —
@@ -1448,6 +1450,8 @@ export default function registerNetwork(app, ctx) {
           if (can(d, 'logRead') && ['routeros', 'openwrt'].includes(platformOf(d))) await harvestThreats(d);
         } catch {}
       }
+      // Hourly: configuration drift against templates, and monitoring retention.
+      if (ctx.monitoring && _tickN % 60 === 30) { try { await ctx.monitoring.hourly(); } catch (e) { console.warn('monitoring hourly:', e.message); } }
       // Tell people about anything that changed this pass — one digest each, not one per device.
       if (ctx.health) { try { await ctx.health.flush(); } catch (e) { console.warn('alert notify:', e.message); } }
       // auto-push the blocklist when it changed (or every 10 min to repair drift)
@@ -1564,4 +1568,5 @@ export default function registerNetwork(app, ctx) {
   // shared with the sampler + pollDeviceCore
   Object.assign(ctx.jobs, { runWeeklyBackups, pruneOldBackups, sampleDevice, blocklistSig });
   ctx.readWifi = readWifi;
+  ctx.readWifiClients = readWifiClients;
 }

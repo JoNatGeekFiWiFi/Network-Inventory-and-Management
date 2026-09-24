@@ -161,6 +161,7 @@ async function checkOpenWrt(d) {
   row(name, 'WAN ports tagged', wan.length ? 'ok' : 'warn', wan.length ? wan.join(', ') : 'none — tag WAN1/WAN2 on the device page or the WAN graph stays empty');
   await probe(name, 'WAN ping (health)', async () => { const m = await drv.latency(); return m == null ? { status: 'warn', detail: 'ping ran, no replies — the internet check would report DOWN' } : `${m} ms`; });
   await probe(name, 'DHCP leases', async () => `${(await drv.dhcpLeases()).length} leases`);
+  await probe(name, 'CPU / memory / storage', async () => { const i = await drv.systemInfo(); const m = i.memory || {}; return `load ${i.load ? (i.load[0] / 65536).toFixed(2) : '?'} · memory ${m.total ? Math.round(100 * (m.total - (m.available ?? m.free)) / m.total) + '%' : '?'} used${i.root ? ' · flash ' + Math.round(100 * (i.root.total - i.root.free) / i.root.total) + '%' : ''}`; });
   await probe(name, 'Wi-Fi', async () => { const w = await drv.wifi(); return w && w.radios && w.radios.length ? `${w.radios.length} radio(s)` : { status: 'skip', detail: 'no radios' }; });
   await probe(name, 'Wi-Fi clients', async () => `${(await drv.wifiClients()).length} connected`);
   await probe(name, 'log', async () => `${(await drv.log({ lines: 20 })).length} lines`);

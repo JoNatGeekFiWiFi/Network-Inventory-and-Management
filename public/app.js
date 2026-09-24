@@ -102,6 +102,7 @@ function setupHeader() {
   $('#navPnl').style.display = isPriv() ? '' : 'none';
   $('#navVendors').style.display = isPriv() ? '' : 'none';
   $('#navSusp').style.display = isPriv() ? '' : 'none';
+  $('#navTpl').style.display = isPriv() ? '' : 'none';
   $('#navTickets').style.display = isPriv() ? '' : 'none';
   $('#navPackages').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
@@ -250,6 +251,8 @@ async function route() {
     if (p[0] === 'customer') { setNav('accounts'); return await renderCust(p[1]); }
     if (p[0] === 'inventory') { setNav('inventory'); return await renderInventory(); }
     if (p[0] === 'alerts') { setNav('alerts'); return await renderAlerts(); }
+    if (p[0] === 'topology') { setNav('topology'); return await renderTopology(); }
+    if (p[0] === 'templates') { setNav('templates'); return await renderCfgTemplates(); }
     if (p[0] === 'suspensions') { setNav('suspensions'); return await renderSuspensions(); }
     if (p[0] === 'device' && p[1] === 'new') { setNav('inventory'); return await formDevice(q); }
     if (p[0] === 'device' && p[2] === 'edit') { setNav('inventory'); return await formDevice({ id: p[1] }); }
@@ -1583,7 +1586,8 @@ async function renderDevice(id) {
     <div class="card"><div class="hd"><h2><i class="ti ti-activity"></i> WAN latency</h2><div class="seg" style="flex:none" id="latrng">
       <button class="segbtn on" data-r="1h" onclick="setLatRange('1h')">1h</button><button class="segbtn" data-r="24h" onclick="setLatRange('24h')">24h</button><button class="segbtn" data-r="7d" onclick="setLatRange('7d')">7d</button></div></div>
       <div style="padding:0 14px 14px"><div style="position:relative;height:180px"><canvas id="latchart"></canvas></div>
-      <div class="help">Ping to 8.8.8.8 from the device · sampled every minute</div></div></div>`}
+      <div class="help">Ping to 8.8.8.8 from the device · sampled every minute · <a class="iplink" href="/api/devices/${d.id}/export/latency.csv?range=7d">CSV</a> · <a class="iplink" href="/api/devices/${d.id}/export/traffic.csv?range=7d">traffic CSV</a></div></div></div>
+    <div id="monCards"></div>`}
 
     <div class="card"><div class="hd"><h2>Details</h2></div><div style="padding:0 14px 10px">${info.map(([k, v]) => `<div class="kv"><span class="small sec-muted">${esc(k)}</span><span class="mono small">${v}</span></div>`).join('')}</div></div>
 
@@ -1607,6 +1611,181 @@ async function renderDevice(id) {
   if (d.management_mode !== 'provider') { setWanRange('1h'); setLatRange('1h'); }
   if (signalCard) setSignalRange(d.id, '1h');
   loadDeviceHealth(d.id);
+  if (d.management_mode !== 'provider') loadMonitoringCards(d, capable);
+}
+
+// ---------- Resources, Wi-Fi sessions, speed test, configuration templates ----------
+let _resChart = null;
+function loadMonitoringCards(d, capable) {
+  const box = $('#monCards'); if (!box) return;
+  const hasWifi = capable('wifiClients') && !!d.wifi_json;
+  box.innerHTML = `
+    <div class="card"><div class="hd"><h2><i class="ti ti-cpu"></i> CPU, memory &amp; storage</h2><div class="seg" style="flex:none" id="resrng">
+      <button class="segbtn" data-r="1h" onclick="setResRange('1h')">1h</button><button class="segbtn on" data-r="24h" onclick="setResRange('24h')">24h</button><button class="segbtn" data-r="7d" onclick="setResRange('7d')">7d</button></div></div>
+      <div style="padding:0 14px 14px"><div style="position:relative;height:170px"><canvas id="reschart"></canvas></div>
+      <div class="help" id="reshelp">Read every five minutes · <a class="iplink" href="/api/devices/${d.id}/export/resources.csv?range=7d">CSV</a>${isPriv() ? ` · <a class="iplink" href="#" onclick="resNow(${d.id});return false">read now</a>` : ''}</div></div></div>
+    ${hasWifi && isPriv() ? `<div class="card"><div class="hd"><h2><i class="ti ti-history"></i> Wi-Fi sessions</h2><a class="btn sm" href="/api/devices/${d.id}/export/wifi-sessions.csv?range=30d">CSV</a></div><div id="wsess"><div class="loading" style="padding:10px">Loading…</div></div></div>` : ''}
+    ${isPriv() ? `<div class="card"><div class="hd"><h2><i class="ti ti-gauge"></i> Speed test</h2><button class="btn sm" onclick="runSpeedTest(${d.id})"><i class="ti ti-player-play"></i> Run now</button></div><div id="stests"></div></div>` : ''}
+    ${isPriv() ? `<div class="card"><div class="hd"><h2><i class="ti ti-template"></i> Configuration templates</h2><span id="cfgPill"></span></div><div id="cfgBody"><div class="loading" style="padding:10px">Loading…</div></div></div>` : ''}`;
+  window._resDev = d.id;
+  setResRange('24h');
+  if (hasWifi && isPriv()) loadWifiSessions(d.id);
+  if (isPriv()) { loadSpeedTests(d.id); loadDeviceConfig(d.id); }
+}
+async function setResRange(range) {
+  document.querySelectorAll('#resrng .segbtn').forEach(b => b.classList.toggle('on', b.dataset.r === range));
+  let rows = []; try { rows = await api(`/devices/${window._resDev}/resources?range=${range}`); } catch {}
+  const cv = $('#reschart'); if (!cv) return;
+  if (_resChart) _resChart.destroy();
+  const ds = (label, key, col) => ({ label, data: rows.map(r => r[key]), borderColor: col, backgroundColor: 'transparent', tension: .3, pointRadius: 0, borderWidth: 2, spanGaps: true });
+  _resChart = new Chart(cv, { type: 'line', data: { labels: rows.map(r => fmtTs(r.ts, range)), datasets: [ds('CPU', 'cpu', '#378ADD'), ds('Memory', 'mem_pct', '#7F77DD'), ds('Storage', 'disk_pct', '#D85A30')] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: true, labels: { boxWidth: 10 } }, tooltip: { callbacks: { label: c => c.dataset.label + ': ' + c.parsed.y + '%' } } }, scales: { y: { min: 0, max: 100, ticks: { callback: v => v + '%' } } } } });
+  const last = rows[rows.length - 1];
+  const help = $('#reshelp');
+  if (help && last && last.uptime_s != null && !help.dataset.up) { help.dataset.up = 1; help.insertAdjacentHTML('afterbegin', `Up ${fmtDuration(last.uptime_s)} · `); }
+  if (!rows.length && cv.parentElement) cv.parentElement.insertAdjacentHTML('afterend', '<div class="help" style="padding:4px 0">No readings yet — they start with the next five-minute sample.</div>');
+}
+function fmtDuration(s) { s = Number(s) || 0; const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`; }
+async function resNow(id) { try { const r = await api(`/devices/${id}/resources/now`, { method: 'POST', body: '{}' }); toast(`CPU ${r.cpu ?? '?'}% · memory ${r.mem_pct ?? '?'}% · storage ${r.disk_pct ?? '?'}%`); setResRange('24h'); } catch (e) { toast(e.message); } }
+async function loadWifiSessions(id) {
+  const box = $('#wsess'); if (!box) return;
+  let rows = []; try { rows = await api(`/devices/${id}/wifi-sessions?range=7d`); } catch (e) { box.innerHTML = `<div class="row muted small">${esc(e.message)}</div>`; return; }
+  if (!rows.length) { box.innerHTML = '<div class="row muted small">No sessions yet — recorded every five minutes.</div>'; return; }
+  const dur = (a, b) => fmtDuration((Date.parse(b) - Date.parse(a)) / 1000);
+  box.innerHTML = rows.slice(0, 80).map(w => `<div class="row small">
+    <span class="dot" style="width:8px;height:8px;border-radius:50%;flex:none;background:${w.ended_at ? 'var(--text3)' : 'var(--success)'}"></span>
+    <div style="flex:1;min-width:0"><div><span class="mono">${esc(w.mac)}</span> <span class="sec-muted">${esc(w.vendor || 'unknown vendor')}</span></div>
+      <div class="sec-muted">${esc(w.ssid || w.iface || '')} · ${w.ended_at ? `${esc(String(w.started_at).slice(5, 16).replace('T', ' '))} → ${esc(String(w.ended_at).slice(11, 16))} (${dur(w.started_at, w.ended_at)})` : `connected ${dur(w.started_at, new Date().toISOString())}`}${w.signal_last != null ? ` · ${w.signal_last} dBm${w.signal_min != null && w.signal_min < w.signal_last ? ` (worst ${w.signal_min})` : ''}` : ''}</div></div>
+    <a class="iplink" href="#" onclick="findMac('${esc(w.mac)}');return false">where else?</a></div>`).join('');
+}
+async function findMac(mac) {
+  try {
+    const r = await api('/wifi-sessions?mac=' + encodeURIComponent(mac));
+    const aps = [...new Set(r.map(x => x.device_name))];
+    toast(`${mac}: seen on ${aps.length} access point(s) — ${aps.slice(0, 4).join(', ')}${aps.length > 4 ? '…' : ''}`);
+  } catch (e) { toast(e.message); }
+}
+async function loadSpeedTests(id) {
+  const box = $('#stests'); if (!box) return;
+  let rows = []; try { rows = await api(`/devices/${id}/speedtests`); } catch {}
+  box.innerHTML = rows.length ? rows.slice(0, 10).map(t => `<div class="row small"><span style="flex:1">${esc(String(t.created_at).slice(0, 16))}</span>${t.error ? `<span style="color:var(--danger)">${esc(t.error)}</span>` : `<b>${t.mbps} Mbps</b> <span class="sec-muted">${Math.round((t.bytes || 0) / 1e6)} MB in ${t.seconds}s</span>`}</div>`).join('') + `<div class="help" style="padding:6px 14px"><a class="iplink" href="/api/devices/${id}/export/speedtests.csv">CSV</a> · downloads a test file on the router itself, so it measures the customer's line</div>`
+    : '<div class="help" style="padding:8px 14px">Downloads a 25 MB test file on the router itself and times it — the speed of the customer\'s line, not of this server.</div>';
+}
+async function runSpeedTest(id) {
+  toast('Running the speed test on the router (up to a minute)…');
+  try { const r = await api(`/devices/${id}/speedtest`, { method: 'POST', body: '{}' }); toast(`${r.mbps} Mbps download`); } catch (e) { toast(e.message); }
+  loadSpeedTests(id);
+}
+const CFG_LOOK = { 'in-sync': ['s-up', 'In sync'], drifted: ['s-warn', 'Drifted'], error: ['s-down', 'Error'] };
+async function loadDeviceConfig(id) {
+  const box = $('#cfgBody'); if (!box) return;
+  let c; try { c = await api(`/devices/${id}/config`); } catch (e) { box.innerHTML = `<div class="row muted small">${esc(e.message)}</div>`; return; }
+  window._cfg = { id, ...c };
+  const st = c.status;
+  $('#cfgPill').innerHTML = st ? `<span class="pill ${(CFG_LOOK[st.status] || CFG_LOOK.error)[0]}">${(CFG_LOOK[st.status] || CFG_LOOK.error)[1]}</span>` : '';
+  const rows = c.assigned.map((t, i) => `<div class="row small" style="flex-wrap:wrap;gap:8px"><b style="flex:1">${esc(t.name)}${t.matches_platform ? '' : ' <span class="tag">other platform — ignored</span>'}</b>
+      <button class="btn sm" onclick="cfgRemove(${i})">Remove</button>
+      <textarea id="cfgv${i}" rows="2" placeholder="variables for this device: key=value, one per line" style="width:100%;font-family:var(--mono);font-size:12px">${esc(Object.entries(t.vars).map(([k, v]) => k + '=' + v).join('\n'))}</textarea></div>`).join('');
+  const diff = st && st.diff && st.diff.length ? `<div class="small sec-muted" style="padding:8px 14px 2px">Differences (checked ${esc(String(st.checked_at || '').slice(0, 16))})</div>${st.diff.map(x => `<div class="row small" style="${x.error ? 'color:var(--danger)' : ''}">${x.template ? '<span class="tag">' + esc(x.template) + '</span> ' : ''}${esc(x.what)}</div>`).join('')}` : '';
+  box.innerHTML = `${rows || '<div class="row muted small">No templates on this device.</div>'}
+    ${c.problems.length ? `<div class="row small" style="color:var(--danger)">${c.problems.map(esc).join('<br>')}</div>` : ''}
+    ${st && st.error ? `<div class="row small" style="color:var(--danger)">${esc(st.error)}</div>` : ''}
+    ${diff}
+    <div style="display:flex;gap:8px;padding:8px 14px 12px;flex-wrap:wrap;align-items:center">
+      <select id="cfgAdd" style="width:auto"><option value="">Add a template…</option>${c.available.filter(a => !c.assigned.some(t => t.id === a.id)).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select>
+      <button class="btn sm" onclick="cfgSave()"><i class="ti ti-device-floppy"></i> Save</button>
+      <button class="btn sm" onclick="cfgCheck()"><i class="ti ti-zoom-check"></i> Check now</button>
+      <button class="btn sm primary" onclick="cfgApply()"><i class="ti ti-upload"></i> Apply to router</button>
+      <a class="iplink small" href="#/templates">Manage templates</a></div>`;
+}
+function cfgCollect() {
+  const c = window._cfg; const list = c.assigned.map((t, i) => ({ id: t.id, vars: $('#cfgv' + i) ? $('#cfgv' + i).value : '' }));
+  const add = $('#cfgAdd') && $('#cfgAdd').value; if (add) list.push({ id: Number(add), vars: '' });
+  return list;
+}
+function cfgRemove(i) { window._cfg.assigned.splice(i, 1); cfgSave(true); }
+async function cfgSave(quiet) {
+  try { await api(`/devices/${window._cfg.id}/config`, { method: 'PUT', body: JSON.stringify({ templates: cfgCollect() }) }); if (!quiet) toast('Saved'); loadDeviceConfig(window._cfg.id); } catch (e) { toast(e.message); }
+}
+async function cfgCheck() {
+  await cfgSave(true);
+  toast('Comparing with the router…');
+  try { const r = await api(`/devices/${window._cfg.id}/config/check`, { method: 'POST', body: '{}' }); toast(r.status === 'in-sync' ? 'The router matches' : r.status === 'drifted' ? `${r.diff.length} difference(s)` : (r.error || 'Could not check')); } catch (e) { toast(e.message); }
+  loadDeviceConfig(window._cfg.id);
+}
+async function cfgApply() {
+  await cfgSave(true);
+  if (!confirm('Apply the templates to this router now? Only the differences are changed.')) return;
+  toast('Applying…');
+  try { const r = await api(`/devices/${window._cfg.id}/config/apply`, { method: 'POST', body: '{}' }); toast(r.changed ? `Applied ${r.changed} change(s) · ${r.status}` : 'Nothing to change — already in sync'); }
+  catch (e) { toast(e.message); }
+  loadDeviceConfig(window._cfg.id);
+}
+
+// ---- the Templates page ----
+async function renderCfgTemplates() {
+  const [list, vars] = await Promise.all([api('/config-templates'), api('/config-vars')]);
+  view().innerHTML = `<div class="head"><div class="t"><h1>Configuration templates</h1><div class="small sec-muted" style="margin-top:3px">Write a setting once, apply it to many routers, and see when a router drifts</div></div>
+      <button class="btn primary" onclick="editCfgTemplate()"><i class="ti ti-plus"></i> New template</button></div>
+    <div class="card" style="margin-top:14px">${list.map(t => `<div class="row rowlink" onclick="editCfgTemplate(${t.id})"><i class="ti ti-template sec-muted"></i>
+      <div style="flex:1"><div><b>${esc(t.name)}</b> <span class="tag">${t.platform === 'routeros' ? 'MikroTik' : 'OpenWrt'}</span></div><div class="small sec-muted">${esc(t.description || '')} · on ${t.devices} device(s)</div></div><i class="ti ti-chevron-right muted"></i></div>`).join('') || '<div class="row muted">No templates yet.</div>'}</div>
+    <div class="card"><div class="hd"><h2>Global variables</h2></div><div style="padding:6px 14px 12px">
+      <textarea id="gvars" rows="4" style="width:100%;font-family:var(--mono)" placeholder="dns=1.1.1.1,8.8.8.8">${esc(Object.entries(vars).map(([k, v]) => k + '=' + v).join('\n'))}</textarea>
+      <div class="help">Available in every template as {{name}}. A device's own variables override these; each device also has {{name}}, {{mgmt_address}}, {{site}}, {{customer}}, {{pop}}, {{company}}.</div>
+      <button class="btn sm primary" onclick="saveGlobalVars()"><i class="ti ti-check"></i> Save</button></div></div>
+    <div id="tplEdit"></div>`;
+}
+async function saveGlobalVars() { try { await api('/config-vars', { method: 'PUT', body: JSON.stringify({ text: $('#gvars').value }) }); toast('Saved'); } catch (e) { toast(e.message); } }
+const TPL_EXAMPLE = {
+  routeros: '# MikroTik: one setting per line\n/ip/dns set servers={{dns}}\n/system/ntp/client set enabled=yes servers=time.cloudflare.com\n/ip/service[name=telnet] set disabled=yes\n/ip/firewall/filter add chain=input action=drop protocol=tcp dst-port=23 comment="netinv: no telnet"',
+  openwrt: '# OpenWrt (UCI): one setting per line\nset system.@system[0].hostname={{name}}\nset system.ntp.enabled=1\nset firewall.netinv_no_telnet=rule\nset firewall.netinv_no_telnet.src=wan\nset firewall.netinv_no_telnet.dest_port=23\nset firewall.netinv_no_telnet.target=DROP'
+};
+async function editCfgTemplate(id) {
+  const list = await api('/config-templates');
+  const t = id ? list.find(x => x.id === id) : { name: '', platform: 'routeros', description: '', body: TPL_EXAMPLE.routeros, defaults: {} };
+  const box = $('#tplEdit');
+  box.innerHTML = `<div class="card" style="padding:14px" id="tf"><h2 style="margin-top:0">${id ? 'Edit' : 'New'} template</h2>
+    <div class="grid2">${field('Name', 'name', t.name)}${field('Platform', 'platform', t.platform, { type: 'select', options: [{ v: 'routeros', l: 'MikroTik (RouterOS)' }, { v: 'openwrt', l: 'OpenWrt' }] })}</div>
+    ${field('Description', 'description', t.description || '')}
+    <div class="fld"><label class="fl">Settings</label><textarea name="body" rows="10" style="width:100%;font-family:var(--mono);font-size:12.5px">${esc(t.body)}</textarea></div>
+    <div class="fld"><label class="fl">Default variable values (key=value per line)</label><textarea name="defaults" rows="3" style="width:100%;font-family:var(--mono)">${esc(Object.entries(t.defaults || {}).map(([k, v]) => k + '=' + v).join('\n'))}</textarea></div>
+    <div class="help">MikroTik lines: <span class="mono">/menu/path set key=value</span> · <span class="mono">/menu/path[name=x] set key=value</span> · <span class="mono">/menu/path add … comment="unique"</span>. OpenWrt lines: <span class="mono">set config.section.option=value</span> · <span class="mono">set config.section=type</span> · <span class="mono">add_list …</span> · <span class="mono">delete …</span>. Each line says how things should BE, so applying twice changes nothing and the hourly check can spot drift.</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">${id ? `<button class="btn" onclick="deleteCfgTemplate(${id})">Delete</button>` : ''}<button class="btn" onclick="$('#tplEdit').innerHTML=''">Cancel</button><button class="btn primary" onclick="saveCfgTemplate(${id || 'null'})"><i class="ti ti-check"></i> Save</button></div></div>`;
+  box.scrollIntoView({ behavior: 'smooth' });
+}
+async function saveCfgTemplate(id) {
+  const d = collect('#tf');
+  try { await api('/config-templates' + (id ? '/' + id : ''), { method: id ? 'PUT' : 'POST', body: JSON.stringify(d) }); toast('Saved'); renderCfgTemplates(); } catch (e) { toast(e.message); }
+}
+async function deleteCfgTemplate(id) { if (!confirm('Delete this template?')) return; try { await api('/config-templates/' + id, { method: 'DELETE' }); toast('Deleted'); renderCfgTemplates(); } catch (e) { toast(e.message); } }
+
+// ---- the Topology page ----
+async function renderTopology() {
+  const t = await api('/topology');
+  const col = { critical: 'var(--danger)', problem: 'var(--warning)', ok: 'var(--success)', unknown: 'var(--text3)', unmonitored: 'var(--text3)', deactivated: 'var(--text3)' };
+  const W = 1000, colX = [60, 330, 640], rowH = 34;
+  const left = [...t.pops, ...t.carriers];
+  const H = Math.max(left.length, t.sites.length, 1) * rowH + 80;
+  const pos = { hub: { x: colX[0], y: H / 2 } };
+  left.forEach((n, i) => { pos[n.id] = { x: colX[1], y: 50 + i * (H - 80) / Math.max(1, left.length - 1 || 1) }; });
+  if (left.length === 1) pos[left[0].id].y = H / 2;
+  t.sites.forEach((n, i) => { pos[n.id] = { x: colX[2], y: 40 + i * rowH }; });
+  const stroke = { up: 'var(--success)', down: 'var(--danger)', standby: 'var(--warning)', unknown: 'var(--text3)' };
+  const edges = t.edges.filter(e => pos[e.from] && pos[e.to]).map(e => { const a = pos[e.from], b = pos[e.to];
+    return `<path d="M${a.x + 70},${a.y} C${(a.x + b.x) / 2},${a.y} ${(a.x + b.x) / 2},${b.y} ${b.x - 8},${b.y}" fill="none" stroke="${stroke[e.status] || stroke.unknown}" stroke-width="1.6" ${e.status === 'standby' ? 'stroke-dasharray="4 4"' : ''} opacity=".85"><title>${esc(e.label || '')} · ${esc(e.status)}</title></path>`; }).join('');
+  const node = (n, x, y, w, href) => `<a href="${href}"><g transform="translate(${x},${y})"><rect x="-8" y="-13" width="${w}" height="26" rx="6" fill="var(--surface)" stroke="${col[n.health] || col.unknown}" stroke-width="1.6"/>
+    <circle cx="4" cy="0" r="4" fill="${col[n.health] || col.unknown}"/><text x="14" y="4" font-size="12" fill="var(--text)">${esc(String(n.name).slice(0, 34))}</text>
+    ${(n.routers || []).length ? `<text x="${w - 14}" y="4" font-size="10" fill="var(--text3)" text-anchor="end">${n.routers.map(r => r.overlay === 'WireGuard' ? (r.handshake_s != null && r.handshake_s < 180 ? 'WG●' : 'WG○') : r.overlay === 'ZeroTier' ? 'ZT' : '').filter(Boolean).join(' ')}</text>` : ''}
+    <title>${esc(n.full || n.name)} — ${esc(n.health)}${(n.routers || []).map(r => `\n${r.name}: ${r.health}${r.overlay ? ' · ' + r.overlay : ''}${r.handshake_s != null ? ' · handshake ' + r.handshake_s + 's ago' : ''}`).join('')}</title></g></a>`;
+  const svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;min-width:760px;height:auto;font-family:inherit">${edges}
+    ${node(t.hub, colX[0] - 40, pos.hub.y, 150, '#/wireguard')}
+    ${left.map(n => node(n, colX[1], pos[n.id].y, 200, n.kind === 'pop' ? '#/pop/' + n.pop_id : '#/vendors')).join('')}
+    ${t.sites.map(n => node(n, colX[2], pos[n.id].y, 330, '#/site/' + n.site_id)).join('')}</svg>`;
+  const count = (h) => [...t.pops, ...t.sites].filter(n => n.health === h).length;
+  view().innerHTML = `<div class="head"><div class="t"><h1>Network map</h1><div class="small sec-muted" style="margin-top:3px">This server → POPs and carriers → customer sites, coloured by health · ${count('critical')} critical · ${count('problem')} with problems</div></div>
+      <button class="btn" onclick="renderTopology()"><i class="ti ti-refresh"></i> Refresh</button></div>
+    <div class="card" style="margin-top:14px;overflow:auto;padding:10px">${svg}</div>
+    <div class="small sec-muted" style="margin:6px 2px">Lines: <span style="color:var(--success)">━</span> up · <span style="color:var(--warning)">┅</span> standby · <span style="color:var(--danger)">━</span> down. WG● = WireGuard handshake in the last 3 minutes, WG○ = none; ZT = managed over ZeroTier. Hover a box for its routers.</div>`;
 }
 
 // ---------- Maintenance: reboot, firmware, packages ----------
@@ -1777,7 +1956,7 @@ async function renderAlerts() {
     <div class="card"><div class="hd"><h2><i class="ti ti-adjustments"></i> Alert rules</h2></div>
       ${rules.map(ruleRow).join('')}
       <div class="help" style="padding:8px 14px">These apply to every device. A device's own page can override a rule for that device. The "for … min" tolerance is how long a check must keep failing before anyone is told.</div></div>
-    <div class="card"><div class="hd"><h2><i class="ti ti-history"></i> History</h2></div>${ev || '<div class="row muted">No alerts yet.</div>'}</div>`;
+    <div class="card"><div class="hd"><h2><i class="ti ti-history"></i> History</h2><a class="btn sm" href="/api/export/alerts.csv?range=30d">CSV (30 days)</a></div>${ev || '<div class="row muted">No alerts yet.</div>'}</div>`;
 }
 async function saveGlobalRule(metric) {
   const body = { enabled: $('#gr-en-' + metric).checked, op: $('#gr-op-' + metric).value, threshold: Number($('#gr-th-' + metric).value), tolerance_min: Number($('#gr-tol-' + metric).value) };

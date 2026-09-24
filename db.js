@@ -921,6 +921,32 @@ export function migrate() {
     device_id INTEGER PRIMARY KEY, customer_id INTEGER, want TEXT NOT NULL,   -- suspended | normal
     state TEXT NOT NULL, detail TEXT, attempts INTEGER NOT NULL DEFAULT 0,  -- applied | pending | error | skipped
     updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+
+  // ---- Monitoring additions (lib/monitoring.js, lib/configtemplates.js, domains/monitoring.js) ---
+  db.exec(`CREATE TABLE IF NOT EXISTS dev_resources (
+    device_id INTEGER NOT NULL, ts TEXT NOT NULL, cpu REAL, mem_pct REAL, disk_pct REAL, uptime_s INTEGER)`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_dev_resources ON dev_resources(device_id, ts)');
+  // One row per client visit to an access point: from first seen to gone.
+  db.exec(`CREATE TABLE IF NOT EXISTS wifi_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER NOT NULL, mac TEXT NOT NULL, vendor TEXT,
+    iface TEXT, ssid TEXT, started_at TEXT NOT NULL, last_seen TEXT NOT NULL, ended_at TEXT,
+    signal_last INTEGER, signal_min INTEGER)`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_wifi_sessions_dev ON wifi_sessions(device_id, ended_at)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_wifi_sessions_mac ON wifi_sessions(mac)');
+  db.exec(`CREATE TABLE IF NOT EXISTS speed_tests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER NOT NULL, url TEXT, bytes INTEGER, seconds REAL,
+    mbps REAL, error TEXT, actor TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_speed_tests_dev ON speed_tests(device_id, id)');
+  db.exec(`CREATE TABLE IF NOT EXISTS config_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, platform TEXT NOT NULL, description TEXT,
+    body TEXT NOT NULL DEFAULT '', defaults_json TEXT NOT NULL DEFAULT '{}',
+    created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec(`CREATE TABLE IF NOT EXISTS device_templates (
+    device_id INTEGER NOT NULL, template_id INTEGER NOT NULL, vars_json TEXT NOT NULL DEFAULT '{}', position INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (device_id, template_id))`);
+  db.exec(`CREATE TABLE IF NOT EXISTS device_config_status (
+    device_id INTEGER PRIMARY KEY, status TEXT NOT NULL, diff_json TEXT NOT NULL DEFAULT '[]', error TEXT,
+    checked_at TEXT, applied_at TEXT)`);
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

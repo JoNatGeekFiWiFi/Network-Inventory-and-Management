@@ -41,6 +41,8 @@ export default function registerWireguard(app, ctx) {
   const { db, audit, requireNoc, getSetting, setSetting, restReq, rosHeaders, rosErr } = ctx;
 
   const hub = () => createHub({ iface: getSetting('wg_iface') || 'wg0' });
+  // The topology map shows each router's last handshake.
+  ctx.wgHubStatus = () => hub().status();
 
   /**
    * Everything that should exist as a peer on the hub.

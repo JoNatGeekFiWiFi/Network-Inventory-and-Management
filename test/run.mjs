@@ -30,7 +30,7 @@ for (const suite of suites) {
   rmSync(DB, { force: true }); rmSync(DB + '-wal', { force: true }); rmSync(DB + '-shm', { force: true });
   const srv = spawn(process.execPath, ['server.js'], {
     cwd: ROOT, stdio: 'ignore',
-    env: { ...process.env, DB_PATH: DB, PORT: String(PORT), SAMPLER: 'off', IMAP: 'off' }
+    env: { ...process.env, DB_PATH: DB, PORT: String(PORT), SAMPLER: 'off', IMAP: 'off', OUI_FETCH: 'off' }
   });
   const ok = await up(`http://localhost:${PORT}/portal`);
   if (!ok) { console.log(`✗ ${suite} — server failed to start`); failedSuites.push(suite); totalFail++; srv.kill(); continue; }

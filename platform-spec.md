@@ -488,6 +488,23 @@ and reported. Failed router changes retry hourly.
 **Report:** Suspensions page — suspended now (with per-router status), late, payment arrangements,
 overrides, history, and the policy settings.
 
+## 7a-3. Monitoring additions (from the OpenWISP review)
+
+- **Resources:** CPU, memory, storage and uptime every five minutes (RouterOS /system/resource;
+  OpenWrt system info, load over cores, memory by "available", flash from df). Health checks with
+  OpenWISP's defaults: CPU > 90% for 30 min, memory > 95% for 30 min, storage > 90%. Restarts are
+  recorded in the device history.
+- **Wi-Fi sessions:** every five minutes, each client's visit to an access point (first seen → gone),
+  with signal and device vendor (IEEE OUI list cached on the server; randomized addresses labelled);
+  searchable by MAC across all access points; kept a year.
+- **Speed test:** on demand, the router itself downloads a 25 MB test file and times it.
+- **CSV:** traffic, latency, resources, Wi-Fi sessions, alerts and speed tests.
+- **Network map:** this server → POPs and carriers → customer sites, coloured by health, with
+  WireGuard handshake state.
+- **Configuration templates:** declarative lines (RouterOS REST menus; OpenWrt UCI) with variables
+  (template defaults < global < device facts < device overrides). Apply changes only what differs;
+  an hourly check reports drift as a health check.
+
 ## 7b. Public demo
 
 A second copy of the app on the same server (`deploy/demo-setup.sh`), for showing the platform to

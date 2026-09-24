@@ -146,7 +146,7 @@ const MIN = 60000, T0 = Date.UTC(2026, 8, 24, 12, 0);
   const sup = client(); await sup('/api/login', { body: { email: 'support@geekitek.test', password: 'support123' } });
 
   const rules = (await admin('/api/health/rules')).json;
-  ok(rules.length === 3 && rules.find(r => r.metric === 'reachable').tolerance_min === 5, 'the rules list the three checks with their defaults');
+  ok(rules.length >= 3 && rules.find(r => r.metric === 'reachable').tolerance_min === 5 && rules.some(r => r.metric === 'cpu'), 'the rules list every check with its defaults');
   ok((await admin('/api/health/rules/latency', { method: 'PUT', body: { threshold: 'lots' } })).status === 400, 'a bad rule is refused');
   ok((await sup('/api/health/rules/latency', { method: 'PUT', body: { threshold: 90 } })).status === 403, 'support staff cannot change rules');
   ok((await admin('/api/health/rules/latency', { method: 'PUT', body: { threshold: 120 } })).status === 200
@@ -155,7 +155,7 @@ const MIN = 60000, T0 = Date.UTC(2026, 8, 24, 12, 0);
   const devs = (await admin('/api/devices')).json;
   const d = devs.find(x => x.name === 'Edge Router');
   const h = (await admin('/api/devices/' + d.id + '/health')).json;
-  ok(h.status && Array.isArray(h.checks) && h.checks.length === 3 && h.monitored === true, 'a device reports its health and each check');
+  ok(h.status && Array.isArray(h.checks) && h.checks.length >= 3 && h.monitored === true, 'a device reports its health and each check');
   ok((await admin('/api/devices/' + d.id + '/health/mute', { body: { hours: 0 } })).status === 400, 'mute needs a duration');
   ok((await admin('/api/devices/' + d.id + '/health/mute', { body: { hours: 2, reason: 'fiber cut repair' } })).status === 200
     && (await admin('/api/devices/' + d.id + '/health')).json.mute_reason === 'fiber cut repair', 'a device can be muted for maintenance, with a reason');

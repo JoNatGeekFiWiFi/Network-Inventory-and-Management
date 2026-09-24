@@ -69,6 +69,7 @@ import registerVendors from './domains/vendors.js';
 import registerHealth from './domains/health.js';
 import registerSuspension from './domains/suspension.js';
 import registerMaintenance from './domains/maintenance.js';
+import registerMonitoring from './domains/monitoring.js';
 import { demoGate, registerDemo, registerShapeExport, startDemoTraffic, DEMO_INFO } from './domains/demo.js';
 import { populateDemo } from './lib/demodata.js';
 import { addressKey, unitFromAddress } from './lib/address.js';
@@ -2327,6 +2328,7 @@ registerVendors(app, ctx);
 // Suspension for nonpayment. Billing calls ctx.suspension.onPayment() at payment time, looked up then.
 registerSuspension(app, ctx);
 registerMaintenance(app, ctx);
+registerMonitoring(app, ctx);
 
 // ---- Files (admin only) ----
 //
