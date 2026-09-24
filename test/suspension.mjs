@@ -170,6 +170,8 @@ function fakeRouter({ lan = true, v6 = true } = {}) {
   };
   await call('/api/login', { body: { email: 'admin@geekitek.test', password: 'admin123' } });
   await call('/api/settings', { method: 'PUT', body: { public_base_url: 'https://noc.example.com' } });
+  ok((await call('/api/suspension/settings')).json.auto === false, 'automatic suspension starts OFF until someone reviews and turns it on');
+  await call('/api/suspension/settings', { method: 'PUT', body: { auto: true } });
 
   const acct = (await call('/api/accounts')).json[0];
   const cust = (await call('/api/customers', { body: { name: 'Late Payer LLC', account_ids: [acct.id], billing_email: '' } })).json;

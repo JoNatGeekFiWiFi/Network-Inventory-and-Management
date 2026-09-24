@@ -32,7 +32,10 @@ export default function registerSuspension(app, ctx) {
       arrangementGraceDays: n('suspend_arrangement_grace_days', DEFAULTS.arrangementGraceDays)
     };
   }
-  const autoOn = () => getSetting('suspend_auto') !== '0';
+  // Off until someone switches it on. The first pass would otherwise suspend every customer who is
+  // already 10+ days late the moment this ships — including anyone whose "late" invoice is really a
+  // stale import. Someone should look at the Late list once, then turn it on.
+  const autoOn = () => getSetting('suspend_auto') === '1';
   const pubBase = () => String(getSetting('public_base_url') || '').replace(/\/$/, '');
 
   // ---- reading a customer's position ----
