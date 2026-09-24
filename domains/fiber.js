@@ -11,6 +11,7 @@ import { r2 } from '../lib/core.js';
 import { extractKmlFromKmz, looksLikeZip, listZipEntries, readZipEntry } from '../lib/unzip.js';
 import { shapefileToFeatures } from '../lib/shapefile.js';
 import { looksLikeIqgeo, parseIqgeo } from '../lib/iqgeo.js';
+import { parseLayers, layerWhere, layerCounts, LAYER_TREE, placementGroup } from '../lib/fiberlayers.js';
 import { bboxOf, simplifyPath, clipPathToBox, robustExtent } from '../lib/geo.js';
 
 /**
@@ -538,6 +539,13 @@ export default function registerFiber(app, ctx) {
     res.json({ empty: false, bbox: [e.minLat, e.minLng, e.maxLat, e.maxLng], outliers: e.outliers, total: e.total });
   });
 
+  // The layer tree with a count on every node, for the map's layer panel.
+  app.get('/api/fiber/layers', (req, res) => {
+    const counts = layerCounts(db);
+    res.json({ tree: LAYER_TREE.map(g => ({ ...g, count: g.children.reduce((n, c) => n + (counts[c.key] || 0), 0),
+      children: g.children.map(c => ({ ...c, count: counts[c.key] || 0 })) })) });
+  });
+
   app.get('/api/fiber/geojson', (req, res) => {
     const bbox = String(req.query.bbox || '').split(',').map(Number);
     const hasBox = bbox.length === 4 && bbox.every(Number.isFinite);
@@ -554,10 +562,13 @@ export default function registerFiber(app, ctx) {
     for (const c of db.prepare('SELECT route_id, COUNT(*) n, COALESCE(SUM(strand_count),0) s FROM fiber_cables WHERE route_id IS NOT NULL GROUP BY route_id').all())
       cableAgg.set(c.route_id, c);
 
+    // Map layers switched on (lib/fiberlayers.js). Filtered in SQL so hidden layers do not use up
+    // the viewport cap. No ?layers= at all means every layer.
+    const lw = layerWhere(parseLayers(req.query.layers));
     const routeSql = hasBox
-      ? `SELECT id,name,status,placement,length_m,geom_json FROM fiber_routes
-         WHERE min_lat IS NOT NULL AND min_lat <= ? AND max_lat >= ? AND min_lng <= ? AND max_lng >= ? LIMIT ?`
-      : 'SELECT id,name,status,placement,length_m,geom_json FROM fiber_routes LIMIT ?';
+      ? `SELECT id,name,status,placement,length_m,geom_json,network FROM fiber_routes
+         WHERE min_lat IS NOT NULL AND min_lat <= ? AND max_lat >= ? AND min_lng <= ? AND max_lng >= ? AND ${lw.routes || '0'} LIMIT ?`
+      : `SELECT id,name,status,placement,length_m,geom_json,network FROM fiber_routes WHERE ${lw.routes || '0'} LIMIT ?`;
     const routes = hasBox
       ? db.prepare(routeSql).all(bbox[3], bbox[1], bbox[2], bbox[0], limit + 1)
       : db.prepare(routeSql).all(limit + 1);
@@ -580,18 +591,18 @@ export default function registerFiber(app, ctx) {
           : { type: 'MultiLineString', coordinates: parts };
       }
       const agg = cableAgg.get(r.id);
-      features.push({ type: 'Feature', geometry: geom, properties: { kind: 'route', id: r.id, name: r.name, status: r.status, placement: r.placement, length_m: r.length_m, cables: agg ? agg.n : 0, strand_total: agg ? agg.s : 0 } });
+      features.push({ type: 'Feature', geometry: geom, properties: { kind: 'route', id: r.id, name: r.name, status: r.status, placement: r.placement, placement_group: placementGroup(r.placement), network: r.network || 'own', length_m: r.length_m, cables: agg ? agg.n : 0, strand_total: agg ? agg.s : 0 } });
     }
 
     const structSql = hasBox
-      ? 'SELECT id,name,kind,lat,lng,status FROM fiber_structures WHERE lat BETWEEN ? AND ? AND lng BETWEEN ? AND ? LIMIT ?'
-      : 'SELECT id,name,kind,lat,lng,status FROM fiber_structures WHERE lat IS NOT NULL AND lng IS NOT NULL LIMIT ?';
+      ? `SELECT id,name,kind,lat,lng,status,network FROM fiber_structures WHERE lat BETWEEN ? AND ? AND lng BETWEEN ? AND ? AND ${lw.structures || '0'} LIMIT ?`
+      : `SELECT id,name,kind,lat,lng,status,network FROM fiber_structures WHERE lat IS NOT NULL AND lng IS NOT NULL AND ${lw.structures || '0'} LIMIT ?`;
     const structs = hasBox
       ? db.prepare(structSql).all(bbox[1], bbox[3], bbox[0], bbox[2], limit + 1)
       : db.prepare(structSql).all(limit + 1);
     if (structs.length > limit) { structs.length = limit; truncated = true; }
     for (const s of structs)
-      features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [s.lng, s.lat] }, properties: { kind: 'structure', id: s.id, name: s.name, structure_kind: s.kind, status: s.status } });
+      features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [s.lng, s.lat] }, properties: { kind: 'structure', id: s.id, name: s.name, structure_kind: s.kind, status: s.status, network: s.network || 'own' } });
 
     res.json({ type: 'FeatureCollection', features, truncated });
   });
@@ -627,7 +638,9 @@ export default function registerFiber(app, ctx) {
     // ext_ref (source system id) makes re-import idempotent; fall back to name for formats
     // that carry no stable identifier.
     const routeIdByRef = new Map(), structIdByRef = new Map();
-    const insR = db.prepare('INSERT INTO fiber_routes (name,status,placement,owner,geom_json,length_m,notes,ext_ref,min_lat,min_lng,max_lat,max_lng,fibre_m) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    // Anything from Zayo's IQGeo goes in the Zayo map layer; every other format is our own plant.
+    const network = format === 'iqgeo' ? 'zayo' : null;
+    const insR = db.prepare('INSERT INTO fiber_routes (name,status,placement,owner,geom_json,length_m,notes,ext_ref,min_lat,min_lng,max_lat,max_lng,fibre_m,network) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     for (const r of parsed.routes) {
       const existing = r.ext_ref
         ? db.prepare('SELECT id FROM fiber_routes WHERE ext_ref=?').get(r.ext_ref)
@@ -641,18 +654,18 @@ export default function registerFiber(app, ctx) {
         rbb && rbb.minLat, rbb && rbb.minLng, rbb && rbb.maxLat, rbb && rbb.maxLng,
         // Measured fibre length, where the source gave one. Only IQGeo does today; a KML or
         // shapefile has no such field, so those routes fall back to the chosen slack percentage.
-        r.fibre_m != null ? r.fibre_m : null);
+        r.fibre_m != null ? r.fibre_m : null, network);
       if (r.ext_ref) routeIdByRef.set(r.ext_ref, info.lastInsertRowid);
       result.routes_created++; result.total_length_m += len;
     }
-    const insS = db.prepare('INSERT INTO fiber_structures (name,kind,lat,lng,status,notes,ext_ref) VALUES (?,?,?,?,?,?,?)');
+    const insS = db.prepare('INSERT INTO fiber_structures (name,kind,lat,lng,status,notes,ext_ref,network) VALUES (?,?,?,?,?,?,?,?)');
     for (const s of parsed.structures) {
       const existing = s.ext_ref
         ? db.prepare('SELECT id FROM fiber_structures WHERE ext_ref=?').get(s.ext_ref)
         : db.prepare('SELECT id FROM fiber_structures WHERE name=? AND lat=? AND lng=?').get(s.name, s.lat, s.lng);
       if (existing) { if (s.ext_ref) structIdByRef.set(s.ext_ref, existing.id); result.skipped++; continue; }
       const kind = STRUCTURE_KINDS.includes(s.kind) ? s.kind : (STRUCTURE_KINDS.includes(b.structure_kind) ? b.structure_kind : 'handhole');
-      const info = insS.run(String(s.name).slice(0, 160), kind, s.lat, s.lng, status, s.notes, s.ext_ref || null);
+      const info = insS.run(String(s.name).slice(0, 160), kind, s.lat, s.lng, status, s.notes, s.ext_ref || null, network);
       if (s.ext_ref) structIdByRef.set(s.ext_ref, info.lastInsertRowid);
       result.structures_created++;
     }

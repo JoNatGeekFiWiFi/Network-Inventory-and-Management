@@ -4861,6 +4861,7 @@ async function renderFiber() {
     <div class="card" style="padding:0;overflow:hidden"><div id="fibermap" style="height:520px;width:100%"></div></div>
     <div class="small sec-muted" style="margin:8px 0 14px">
       ${FIBER_ROUTE_STATUS.map(s => `<span style="margin-right:12px"><span style="display:inline-block;width:14px;height:3px;background:${ROUTE_STATUS_COL[s]};vertical-align:middle"></span> ${s.replace('_', ' ')}</span>`).join('')}
+      <span style="margin-right:12px">· ${fiberLayerSwatch('x.underground')} underground</span><span style="margin-right:12px">${fiberLayerSwatch('x.aerial')} aerial</span>
       <span id="fibertrunc" style="margin-left:6px"></span>
     </div>
     <div class="card"><div class="hd"><h2>Cables</h2>${isPriv() ? `<button class="btn sm" onclick="formCable()"><i class="ti ti-plus"></i> Add cable</button>` : ''}</div>
@@ -4877,6 +4878,7 @@ function fiberMapInit() {
   _fiberMap.on('click', e => { if (_fiberDraw) fiberMapClick(e); });
   // Redraw as the user pans/zooms, since we only ever fetch the current viewport.
   _fiberMap.on('moveend zoomend', fiberMapReload);
+  fiberLayerControl();
   // Drop the pin before the plant layer loads — with a large import that fetch can take seconds,
   // and someone who searched an address shouldn't stare at Phoenix while it downloads.
   fiberApplyPendingLocate();
@@ -4907,7 +4909,7 @@ async function fiberMapLoad() {
   // is ~95 MB once a state-sized import lands, which locks the browser up for the better part of
   // a minute.
   const b = _fiberMap.getBounds();
-  const q = `?bbox=${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}&zoom=${_fiberMap.getZoom()}`;
+  const q = `?bbox=${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}&zoom=${_fiberMap.getZoom()}&layers=${encodeURIComponent([...fiberLayersOn()].join(','))}`;
   const seq = ++_fiberLoadSeq;
   let gj;
   try { gj = await api('/fiber/geojson' + q); } catch { return; }
@@ -4917,18 +4919,82 @@ async function fiberMapLoad() {
     ? `<span class="muted small"><i class="ti ti-alert-triangle"></i> Showing part of the plant in this view — zoom in to see all of it.</span>` : '';
   if (window._fiberLayer) _fiberMap.removeLayer(window._fiberLayer);
   window._fiberLayer = L.geoJSON(gj, {
-    style: f => ({ color: ROUTE_STATUS_COL[f.properties.status] || '#378ADD', weight: 4, opacity: .9, dashArray: f.properties.status === 'planned' ? '6,6' : null }),
+    // Colour says status; line style says placement — solid underground, dotted aerial, thin when unknown.
+    style: f => {
+      const p = f.properties, pg = p.placement_group;
+      return { color: ROUTE_STATUS_COL[p.status] || '#378ADD', weight: pg === 'unknown' ? 3 : 4, opacity: .9, lineCap: 'round',
+        dashArray: p.status === 'planned' ? '6,6' : pg === 'aerial' ? '1,7' : null };
+    },
     pointToLayer: (f, latlng) => L.circleMarker(latlng, { radius: 6, color: '#fff', weight: 2, fillColor: '#378ADD', fillOpacity: 1 }),
     onEachFeature: (f, layer) => {
       const p = f.properties;
       if (p.kind === 'route') {
-        layer.bindPopup(`<b>${esc(p.name)}</b><br>${esc((p.status || '').replace('_', ' '))}${p.placement ? ' · ' + esc(p.placement) : ''}<br>${(p.length_m / 1000).toFixed(2)} km · ${p.cables} cable(s), ${p.strand_total} strands<br><a href="#/fiber/route/${p.id}">Open route</a>`);
+        layer.bindPopup(`<b>${esc(p.name)}</b><br>${p.network === 'zayo' ? 'Zayo · ' : ''}${esc((p.status || '').replace('_', ' '))}${p.placement ? ' · ' + esc(p.placement) : ''}<br>${(p.length_m / 1000).toFixed(2)} km · ${p.cables} cable(s), ${p.strand_total} strands<br><a href="#/fiber/route/${p.id}">Open route</a>`);
       } else {
         layer.bindPopup(`<b>${esc(p.name)}</b><br>${esc(p.structure_kind)}<br><a href="#/fiber/structure/${p.id}">Open structure</a>`);
       }
     }
   }).addTo(_fiberMap);
   fiberApplyPendingLocate();
+}
+
+// ---- map layers: Zayo › Underground / Aerial / Placement unknown / Structures, and our own plant ----
+// Which sub-layers are on, remembered per browser. Stored as the list switched OFF, so a layer added
+// in a later release starts visible rather than silently hidden.
+const FIBER_LAYERS_KEY = 'fiberLayersOff';
+let _fiberLayerTree = null;
+function fiberLayersOff() { try { return new Set(JSON.parse(localStorage.getItem(FIBER_LAYERS_KEY) || '[]')); } catch { return new Set(); } }
+function fiberLayersOn() {
+  const off = fiberLayersOff();
+  const all = _fiberLayerTree ? _fiberLayerTree.flatMap(g => g.children.map(c => c.key))
+    : ['zayo.underground', 'zayo.aerial', 'zayo.unknown', 'zayo.structures', 'own.routes', 'own.structures'];
+  return new Set(all.filter(k => !off.has(k)));
+}
+function fiberSetLayers(keys, on) {
+  const off = fiberLayersOff();
+  for (const k of keys) on ? off.delete(k) : off.add(k);
+  try { localStorage.setItem(FIBER_LAYERS_KEY, JSON.stringify([...off])); } catch {}
+  fiberLayerPanelSync();
+  fiberMapLoad();
+}
+async function fiberLayerControl() {
+  if (!_fiberMap) return;
+  const ctl = L.control({ position: 'topright' });
+  ctl.onAdd = () => {
+    const d = L.DomUtil.create('div', 'fiber-layers');
+    d.id = 'fiberLayers';
+    d.innerHTML = '<div class="fl-hd"><i class="ti ti-stack-2"></i> Layers</div><div class="small sec-muted">Loading…</div>';
+    L.DomEvent.disableClickPropagation(d); L.DomEvent.disableScrollPropagation(d);
+    return d;
+  };
+  ctl.addTo(_fiberMap);
+  try { _fiberLayerTree = (await api('/fiber/layers')).tree; } catch { return; }
+  const box = $('#fiberLayers'); if (!box) return;
+  const on = fiberLayersOn();
+  // Groups with nothing in them (no plant of our own yet, say) are left out rather than shown empty.
+  box.innerHTML = '<div class="fl-hd"><i class="ti ti-stack-2"></i> Layers</div>' + _fiberLayerTree.filter(g => g.count > 0).map(g => `
+    <label class="fl-group"><input type="checkbox" data-group="${g.key}" onchange="fiberSetLayers(${esc(JSON.stringify(g.children.map(c => c.key)))}, this.checked)"> <b>${esc(g.label)}</b> <span class="sec-muted">${g.count.toLocaleString()}</span></label>
+    ${g.children.map(c => `<label class="fl-sub"><input type="checkbox" data-layer="${c.key}" ${on.has(c.key) ? 'checked' : ''} onchange="fiberSetLayers(['${c.key}'], this.checked)">
+      ${fiberLayerSwatch(c.key)} ${esc(c.label)} <span class="sec-muted">${c.count.toLocaleString()}</span></label>`).join('')}`).join('');
+  fiberLayerPanelSync();
+}
+/** A small sample of how each layer is drawn, beside its checkbox. */
+function fiberLayerSwatch(key) {
+  if (key.endsWith('structures')) return '<span class="fl-sw" style="width:9px;height:9px;border-radius:50%;background:#378ADD;border:1.5px solid #fff;box-shadow:0 0 0 1px #888"></span>';
+  const dash = key.endsWith('aerial') ? 'stroke-dasharray="1 5"' : '';
+  const w = key.endsWith('unknown') ? 2 : 3;
+  return `<svg class="fl-sw" width="22" height="8"><line x1="2" y1="4" x2="20" y2="4" stroke="var(--text2)" stroke-width="${w}" stroke-linecap="round" ${dash}/></svg>`;
+}
+/** Parent boxes reflect their children: ticked, unticked, or the in-between state. */
+function fiberLayerPanelSync() {
+  const box = $('#fiberLayers'); if (!box || !_fiberLayerTree) return;
+  const on = fiberLayersOn();
+  for (const g of _fiberLayerTree) {
+    const el = box.querySelector(`[data-group="${g.key}"]`); if (!el) continue;
+    const n = g.children.filter(c => on.has(c.key)).length;
+    el.checked = n === g.children.length; el.indeterminate = n > 0 && n < g.children.length;
+    for (const c of g.children) { const cb = box.querySelector(`[data-layer="${c.key}"]`); if (cb) cb.checked = on.has(c.key); }
+  }
 }
 
 // ---- map search / locate ----

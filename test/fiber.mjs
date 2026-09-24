@@ -568,4 +568,42 @@ import { looksLikeIqgeo, parseIqgeo, parsePins } from '../lib/iqgeo.js';
   ok(rr.json.cables_created === 1 && rr.json.circuits_created === 0, 'span without a CID makes a cable but no circuit');
 }
 
+// ---- map layers: Zayo › Underground / Aerial / Placement unknown / Structures; our own plant ----
+{
+  // Two IQGeo physical routes near each other, one overhead and one bored, in an empty corner of the map.
+  const bb = [-70.2, 20.0, -70.0, 20.2];
+  const route = (id, desc, props) => ({ ID: id, myw_title: 'Route ' + id, myw_short_description: desc,
+    geometry: { type: 'LineString', coordinates: [[-70.15, 20.05], [-70.05, 20.15]] },
+    properties: { user_name: 'LYR-' + id, user_construction_status: 'In Service', in_structure: 'manhole/L' + id, out_structure: 'manhole/M' + id, ...props } });
+  const fc = { type: 'FeatureCollection', features: [
+    route('71001', 'Route (Overhead)', { user_opgw: 'No' }),
+    route('71002', '', { user_route_type: 'Bore' }),
+    route('71003', '', { user_route_type: 'Unknown' })
+  ] };
+  const rr = await call('/api/fiber/import', { method: 'POST', body: { data: JSON.stringify(fc), commit: true } });
+  ok(rr.json.routes_created === 3, 'three IQGeo routes imported');
+  await call('/api/fiber/routes', { method: 'POST', body: { name: 'LYR-OWN', status: 'as_built', placement: 'aerial', geometry: { type: 'LineString', coordinates: [[-70.12, 20.02], [-70.08, 20.18]] } } });
+
+  const names = async (layers) => {
+    const q = `/api/fiber/geojson?bbox=${bb.join(',')}&zoom=14` + (layers === undefined ? '' : '&layers=' + encodeURIComponent(layers));
+    return (await call(q)).json.features.filter(f => f.properties.kind === 'route').map(f => f.properties.name).sort();
+  };
+  ok(JSON.stringify(await names('zayo.aerial')) === '["Route 71001"]', 'Zayo › Aerial is the overhead route only');
+  ok(JSON.stringify(await names('zayo.underground')) === '["Route 71002"]', 'Zayo › Underground is the bored route only');
+  ok(JSON.stringify(await names('zayo.unknown')) === '["Route 71003"]', 'a route with no placement is under Placement unknown, not lost');
+  ok(JSON.stringify(await names('own.routes')) === '["LYR-OWN"]', 'a route drawn here is our own plant, even when aerial');
+  ok((await names()).length === 4, 'no layers parameter shows everything, as before');
+  ok((await names('')).length === 0, 'every layer off shows nothing');
+  const all = (await call(`/api/fiber/geojson?bbox=${bb.join(',')}&zoom=14`)).json.features;
+  ok(all.find(f => f.properties.name === 'Route 71001').properties.placement_group === 'aerial' && all.find(f => f.properties.name === 'LYR-OWN').properties.network === 'own',
+    'features say which layer they are in, so the map can style them');
+  const structs = (layers) => call(`/api/fiber/geojson?bbox=${bb.join(',')}&zoom=14&layers=${layers}`).then(r => r.json.features.filter(f => f.properties.kind === 'structure').length);
+  ok(await structs('zayo.structures') >= 2 && await structs('zayo.aerial') === 0, 'Zayo structures are their own sub-layer');
+
+  const tree = (await call('/api/fiber/layers')).json.tree;
+  const zayo = tree.find(g => g.key === 'zayo');
+  ok(zayo && JSON.stringify(zayo.children.map(c => c.label)) === '["Underground","Aerial","Placement unknown","Structures"]', 'the layer tree is Zayo › Underground, Aerial, Placement unknown, Structures');
+  ok(zayo.children.find(c => c.key === 'zayo.aerial').count >= 1 && zayo.count === zayo.children.reduce((n, c) => n + c.count, 0), 'with counts that add up');
+}
+
 console.log('\nRESULT:', pass, 'passed,', fail, 'failed'); process.exit(fail ? 1 : 0);

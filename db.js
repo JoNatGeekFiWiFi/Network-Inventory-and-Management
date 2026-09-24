@@ -318,6 +318,14 @@ export function migrate() {
   // length computed from the geometry this gives a REAL slack ratio per route, which beats a flat
   // assumption. NULL means the source had nothing to say and the default applies.
   ensure('fiber_routes', 'fibre_m', 'REAL');
+  // Whose plant it is — drives the map's layer tree (lib/fiberlayers.js). 'zayo' for everything the
+  // IQGeo importer brought in; NULL for our own. Backfilled from ext_ref, which only that importer
+  // sets, so existing imports land in the Zayo layer without being re-imported.
+  ensure('fiber_routes', 'network', 'TEXT');
+  ensure('fiber_structures', 'network', 'TEXT');
+  db.exec("UPDATE fiber_routes SET network='zayo' WHERE network IS NULL AND ext_ref IS NOT NULL");
+  db.exec("UPDATE fiber_structures SET network='zayo' WHERE network IS NULL AND ext_ref IS NOT NULL");
+  db.exec('CREATE INDEX IF NOT EXISTS idx_fiber_routes_network ON fiber_routes(network, placement)');
   // Ledger of every file put through the fault locator.
   //
   // Signed-in uploads keep the file (stored_name set) so an investigation can be revisited.

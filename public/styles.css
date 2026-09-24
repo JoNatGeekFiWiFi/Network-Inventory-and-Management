@@ -208,3 +208,14 @@ label.fl{display:block;font-size:13px;color:var(--text2);margin-bottom:5px}
   background:var(--warning-bg);color:var(--warning);border-bottom:.5px solid var(--border);line-height:1.35}
 .demo-bar .ti{font-size:16px}
 .demo-login{margin-top:14px;padding:12px;border:1px dashed var(--border);border-radius:8px;background:var(--surface)}
+
+/* Fiber map layer panel (Leaflet control, top right) */
+.fiber-layers{background:var(--surface);color:var(--text);border:.5px solid var(--border);border-radius:8px;padding:8px 10px;
+  font-size:12.5px;line-height:1.5;min-width:190px;box-shadow:0 1px 4px rgba(0,0,0,.15)}
+.fiber-layers .fl-hd{font-weight:600;margin-bottom:4px;display:flex;gap:6px;align-items:center}
+.fiber-layers label{display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+.fiber-layers .fl-group{margin-top:4px}
+.fiber-layers .fl-sub{padding-left:20px}
+.fiber-layers .sec-muted{margin-left:auto;padding-left:8px}
+.fiber-layers input{margin:0}
+.fl-sw{display:inline-block;flex:none;vertical-align:middle}

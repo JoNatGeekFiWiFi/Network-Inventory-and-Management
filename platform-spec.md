@@ -186,6 +186,12 @@ On each check, if the observed IP differs from `current_ip`, update it and appen
 
 ### 3.6 Circuit (POP uplinks — NOC)
 
+**Fiber map layers.** Zayo (everything from the IQGeo import) is the main layer, with sub-layers
+Underground (buried/conduit), Aerial, Placement unknown and Structures; our own drawn or imported
+plant is a second group. Toggles are remembered per browser and filtered server-side. Placement
+comes from IQGeo's physical *route* export; span paths carry none, so they sit under Placement
+unknown.
+
 **Service circuits vs GIS circuits.** The Circuits page lists only circuits with at least one end at
 one of our sites or POPs. Circuits imported with the fiber plant (IQGeo/Zayo CIDs, both ends at
 fiber structures) are kept in the GIS only: they open from the fiber map, strands and search
