@@ -160,7 +160,7 @@ found=0
 for f in /etc/cron.d/* /etc/cron.daily/* /var/spool/cron/crontabs/*; do
   [ -f "$f" ] && grep -qiE 'data\.db|netinv|sqlite' "$f" 2>/dev/null && { echo "cron: $f"; found=1; }
 done
-have systemctl && systemctl list-timers --all --no-pager 2>/dev/null | grep -iE 'netinv|backup' | grep -v dpkg && found=1
+have systemctl && systemctl list-timers --all --no-pager 2>/dev/null | grep -iE 'netinv|backup' | grep -v -e dpkg -e netinv-demo-reset && found=1
 DEPLOY_BAK="$DATA_DIR/deploy-backups"
 [ -d "$DEPLOY_BAK" ] && echo "deploy-time backups: $(ls "$DEPLOY_BAK" 2>/dev/null | wc -l) in $DEPLOY_BAK (same disk as the database — they do not survive losing it)"
 [ "$found" -eq 0 ] && echo "no SCHEDULED backup of $DB_PATH or the uploads folder, and nothing copied off this server"
