@@ -1442,7 +1442,8 @@ export default function registerNetwork(app, ctx) {
       }
     } finally { _sampling = false; }
   }
-  if (process.env.SAMPLER !== 'off') {
+  // Never in the demo: it has no real routers, and domains/demo.js simulates the samples instead.
+  if (process.env.SAMPLER !== 'off' && process.env.DEMO_MODE !== '1') {
     setInterval(() => { sampleTick().catch(() => {}); }, 60000);
     console.log('Sampler enabled every 60s: traffic, latency, threat harvest + blocklist auto-push + weekly router backups (SAMPLER=off / AUTO_PUSH=off / BACKUPS=off to disable)');
   }

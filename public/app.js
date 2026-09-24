@@ -65,8 +65,14 @@ function renderLogin(msg) {
     <div class="fld"><label class="fl">Password</label><input id="li-pass" type="password" autocomplete="current-password"/></div>
     <button class="btn primary" style="width:100%;justify-content:center" onclick="doLogin()"><i class="ti ti-login"></i> Sign in</button>
     <div class="login-err" id="li-err">${esc(msg || '')}</div>
+    <div id="li-demo"></div>
   </div></div>`;
   $('#li-pass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+  window.BUILD_INFO.then(b => {
+    const box = $('#li-demo'); if (!b.demo || !box) return;
+    box.innerHTML = `<div class="demo-login"><div class="small">Demo sign-in: <span class="mono">${esc(b.demo.email)}</span> / <span class="mono">${esc(b.demo.password)}</span></div>
+      <button class="btn" style="width:100%;justify-content:center;margin-top:8px" onclick='fillDemoLogin(${JSON.stringify(b.demo.email)}, ${JSON.stringify(b.demo.password)})'><i class="ti ti-player-play"></i> Enter the demo</button></div>`;
+  });
 }
 async function doLogin() {
   const email = $('#li-email').value, password = $('#li-pass').value;
@@ -155,9 +161,26 @@ function setNav(name) { document.querySelectorAll('.sidebar a').forEach(a => a.c
  * the listener, plus a build id that makes "what are you actually running" answerable.
  */
 window.APP_BUILD = null;
-(async () => {
-  try { window.APP_BUILD = (await (await fetch('/api/build')).json()).build; } catch {}
-})();
+// Also says whether this is the public demo, and if so which sign-in to offer.
+window.BUILD_INFO = fetch('/api/build').then(r => r.json()).catch(() => ({}));
+window.BUILD_INFO.then(b => { window.APP_BUILD = b.build || null; if (b.demo) showDemoBanner(); });
+
+/**
+ * The demo's banner: always visible, so nobody mistakes the demo for a live system, or the live
+ * system for the demo.
+ */
+function showDemoBanner() {
+  if (document.getElementById('demoBar')) return;
+  const bar = document.createElement('div');
+  bar.id = 'demoBar';
+  bar.className = 'demo-bar';
+  bar.innerHTML = '<i class="ti ti-flask"></i><span><b>Demo</b> — made-up customers and simulated traffic. Explore freely: nothing here reaches real equipment, and everything resets nightly.</span>';
+  document.body.prepend(bar);
+  document.body.classList.add('has-demo-bar');
+}
+function fillDemoLogin(email, password) {
+  $('#li-email').value = email; $('#li-pass').value = password; doLogin();
+}
 
 window.addEventListener('app-update-ready', (e) => {
   if (document.getElementById('updateBar')) return;

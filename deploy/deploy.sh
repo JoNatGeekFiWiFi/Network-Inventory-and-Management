@@ -114,6 +114,11 @@ chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR"
 
 # 5. Restart
 systemctl restart "$SERVICE"
+# The public demo runs the same checkout (deploy/demo-setup.sh), so it gets the new code too. Its
+# data is kept — the nightly reset is what regenerates it.
+if systemctl list-unit-files netinv-demo.service >/dev/null 2>&1 && systemctl is-enabled netinv-demo >/dev/null 2>&1; then
+  systemctl restart netinv-demo && echo ">> Demo restarted"
+fi
 
 # 6. Health check. Allow a generous window: a release that adds a column to a large table has to
 #    backfill it before the app listens. Backfilling bounding boxes for a statewide fiber import

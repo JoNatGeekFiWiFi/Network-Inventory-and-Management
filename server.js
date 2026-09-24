@@ -1,4 +1,7 @@
 // Network Inventory & Management Platform — API + static server (testing build)
+// FIRST import, on purpose: with DEMO_MODE=1 it closes every outbound connection except loopback
+// before any other module is loaded. See lib/demoguard.js.
+import { DEMO } from './lib/demoguard.js';
 import express from 'express';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, extname, sep } from 'node:path';
@@ -63,6 +66,8 @@ import registerWireguard from './domains/wireguard.js';
 import registerDocuments from './domains/documents.js';
 import registerMail from './domains/mail.js';
 import registerVendors from './domains/vendors.js';
+import { demoGate, registerDemo, registerShapeExport, startDemoTraffic, DEMO_INFO } from './domains/demo.js';
+import { populateDemo } from './lib/demodata.js';
 import { addressKey, unitFromAddress } from './lib/address.js';
 import { PLATFORMS, platformOf, capMap, capsFor, driverFor, guessPlatform } from './lib/drivers/index.js';
 import { sshExec } from './lib/sshexec.js';
@@ -180,6 +185,9 @@ app.use((req, res, next) => {
   try { decodeURIComponent(req.path); return next(); }
   catch { return res.status(400).type('text/plain').send('Bad Request'); }
 });
+// Demo: refuse the few changes a visitor must not make, and every inbound webhook, before any
+// route (including the raw-body ones just below) can see the request.
+if (DEMO) app.use(demoGate);
 
 // Stripe webhook needs the RAW body for signature verification, so it registers before the JSON parser
 // handler lives in domains/billing.js; resolved at request time via ctx (registration must stay here,
@@ -197,10 +205,12 @@ app.use(express.urlencoded({ extended: false, limit: '10mb' })); // Twilio + Mai
 // First-run: create schema + seed if empty
 initSchema();
 migrate();
-if (isEmpty()) { seed(); console.log('Database seeded on first run.'); }
+// The demo fills itself with its own made-up company below, once the model catalog is loaded.
+if (isEmpty() && !DEMO) { seed(); console.log('Database seeded on first run.'); }
 backfillCustomers();
 backfillAccountCustomers();
 { const n = importModelCatalog(db); if (n) console.log(`Model catalog: added ${n} device model(s).`); }
+if (DEMO && isEmpty()) { populateDemo(db, { hashPassword }); console.log('Demo: generated a fresh demo company.'); }
 
 // Group existing uploads under the record they belong to. Safe to run on every start: a stored
 // value that already contains a slash is skipped, so the second run does nothing.
@@ -289,7 +299,8 @@ app.post('/api/logout', (req, res) => {
 
 // The build id, before the auth gate: the page shows it on the login screen too, and it is not
 // sensitive — it is a hash of file sizes.
-app.get('/api/build', (req, res) => res.json({ build: APP_BUILD }));
+// In the demo it also carries the demo sign-in, which the login page offers to fill in.
+app.get('/api/build', (req, res) => res.json(DEMO ? { build: APP_BUILD, demo: DEMO_INFO } : { build: APP_BUILD }));
 
 // The signing routes, listed here rather than in domains/documents.js on purpose: which paths skip
 // authentication is a property of the application's security boundary, and it should be readable in
@@ -2238,6 +2249,9 @@ const ctx = {
   createApiToken, clientIp,
   jobs: {}
 };
+// Demo read overrides go first so they answer before the routes that would try to reach a router.
+registerDemo(app, ctx);
+registerShapeExport(app, ctx);
 registerNetwork(app, ctx);
 registerFiber(app, ctx);
 registerSearch(app, ctx);
@@ -2657,4 +2671,8 @@ if (_sessionSweep.unref) _sessionSweep.unref();
 // reachable from the internet at all). Unset keeps the old behaviour — all interfaces — because
 // routers on the management overlay may be pushing backups to this port directly.
 const HOST = process.env.HOST || undefined;
-app.listen(PORT, HOST, () => console.log(`Network Inventory Platform running on http://${HOST || 'localhost'}:${PORT}`));
+app.listen(PORT, HOST, () => {
+  console.log(`Network Inventory Platform running on http://${HOST || 'localhost'}:${PORT}${DEMO ? ' (DEMO MODE)' : ''}`);
+  if (DEMO) startDemoTraffic(ctx, { dbPath: process.env.DB_PATH || join(__dirname, 'data.db') })
+    .catch(e => console.error('Demo traffic failed to start:', e));
+});

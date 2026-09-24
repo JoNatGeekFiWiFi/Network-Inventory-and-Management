@@ -436,6 +436,26 @@ Devices can enter inventory **two ways, and both coexist:**
 
 Each controller has a `sync_enabled` flag and records last-sync time/result. Sync is read-from-controller for inventory; config push still goes back out through the controller's API.
 
+## 7b. Public demo
+
+A second copy of the app on the same server (`deploy/demo-setup.sh`), for showing the platform to
+prospects. Same code, `DEMO_MODE=1`, its own user, database and subdomain; reset nightly.
+
+- **Made-up data only.** A generated Phoenix-area company (lib/demodata.js): random customer names,
+  invented street numbers, documentation-range IPs. Nothing is copied from production — no
+  customers, circuits or fiber (the IQGeo/Zayo data never goes near it).
+- **Cannot touch anything real.** Two independent walls: every outbound socket in the process is
+  refused unless it is loopback (lib/demoguard.js), and systemd firewalls the service to localhost
+  (`IPAddressDeny=any`). Polling, pushes, email, SMS, Stripe and ZeroTier all fail with a clear
+  "Demo mode" message.
+- **Click everything.** Visitors sign in as an admin and can create and edit freely; only users,
+  settings, mail setup, device tokens, WireGuard/ZeroTier and packages are read-only, plus the
+  public webhooks and visitor check-in are switched off.
+- **Traffic looks real because its shape is.** Production publishes anonymised weekly curves
+  (lib/trafficshape.js: normalised 5-minute slots, no ids, names or rates) on a loopback-only,
+  token-protected route; the demo replays them with noise — 60 days of history on first start,
+  then a new sample every minute. DHCP leases and Wi-Fi clients are generated per device.
+
 ## 8. Open Questions
 
 1. ~~Can a site be served by both a POP and a brokered carrier?~~ **Resolved 2026-06-09:** Yes — sites can have multiple connections (primary + failover) in any combination of POPs and brokered carriers. Modeled via the Connection entity.

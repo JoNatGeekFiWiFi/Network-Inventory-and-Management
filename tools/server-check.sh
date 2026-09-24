@@ -179,4 +179,19 @@ have ss && ss -ulnp 2>/dev/null | awk 'NR>1 {print "  " $4, $6}' | sed -E 's/use
 echo "  -- interfaces --"
 have ip && ip -br addr 2>/dev/null | awk '{print "  " $1, $3}' | head -12
 
+# ---- public demo (deploy/demo-setup.sh) ------------------------------------------------------------
+if have systemctl && systemctl list-unit-files netinv-demo.service >/dev/null 2>&1 && systemctl cat netinv-demo >/dev/null 2>&1; then
+  section "public demo"
+  echo "service          : $(systemctl is-active netinv-demo 2>/dev/null) (enabled: $(systemctl is-enabled netinv-demo 2>/dev/null))"
+  have curl && echo "answers          : $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/api/build 2>/dev/null)"
+  echo "kernel firewall  : $(systemctl show netinv-demo -p IPAddressDeny --value 2>/dev/null | head -c 60) / allow $(systemctl show netinv-demo -p IPAddressAllow --value 2>/dev/null | head -c 60)"
+  echo "next reset       : $(systemctl list-timers netinv-demo-reset.timer --no-pager 2>/dev/null | awk 'NR==2{print $1, $2, $3}')"
+  journalctl -u netinv-demo --since '-24h' --no-pager 2>/dev/null | grep -E 'Demo: (backfilled|traffic simulator)' | tail -1 | sed -E 's/.*(Demo:)/traffic          : \1/'
+  # The demo user must not be able to read production's database.
+  if id netinv-demo >/dev/null 2>&1 && [ -e "$DB_PATH" ]; then
+    if sudo -u netinv-demo test -r "$DB_PATH" 2>/dev/null; then echo "!! the demo user CAN read $DB_PATH — rerun deploy/demo-setup.sh"
+    else echo "prod DB isolation: ok (demo user cannot read it)"; fi
+  fi
+fi
+
 echo; echo "done — nothing was changed."
