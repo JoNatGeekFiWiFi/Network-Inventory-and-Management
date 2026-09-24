@@ -464,6 +464,30 @@ channels, phone number and whether they want recoveries on the Alerts page. A de
 for maintenance: checks and events continue, notifications stop. (Design borrowed from OpenWISP
 Monitoring's alert settings and health status; code is our own.)
 
+## 7a-2. Suspension for nonpayment
+
+**Policy (automatic):** a customer is late from the due date of their oldest unpaid invoice; warned
+3 days before and suspended 10 days after it (both settings); restored automatically the moment
+they are back in good standing (a payment triggers an immediate check). Only automatic suspensions
+lift themselves — a suspension a person made stays until a person lifts it.
+
+**Overrides:** exempt (never auto-suspend, with a reason), hold (keep on until a date — the quick
+override when restoring someone who still owes), and **payment arrangements**: an extension to a
+date, or the balance split into installments (cent-exact, on a schedule). Installments are tracked
+from money actually paid toward the covered invoices; missing one past the plan grace (3 days)
+breaks the plan. New bills that come due during an arrangement are judged separately.
+
+**On the router (MikroTik REST and OpenWrt UCI with confirmed apply):** LAN→internet forward
+traffic is rejected except DNS and a walled garden (our site + Stripe); IPv6 too on MikroTik; plain
+HTTP is DNATed to the server's captive port over the management overlay and masqueraded as the
+router, so the server knows exactly which customer is asking and redirects to their own page
+(/suspended/<token>: balance, invoices, Pay buttons, arrangement status). Only the forward path is
+touched, so management is never cut. Routers shared with other customers (MDU units) are skipped
+and reported. Failed router changes retry hourly.
+
+**Report:** Suspensions page — suspended now (with per-router status), late, payment arrangements,
+overrides, history, and the policy settings.
+
 ## 7b. Public demo
 
 A second copy of the app on the same server (`deploy/demo-setup.sh`), for showing the platform to

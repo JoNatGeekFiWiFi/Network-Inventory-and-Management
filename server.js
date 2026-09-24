@@ -67,6 +67,7 @@ import registerDocuments from './domains/documents.js';
 import registerMail from './domains/mail.js';
 import registerVendors from './domains/vendors.js';
 import registerHealth from './domains/health.js';
+import registerSuspension from './domains/suspension.js';
 import { demoGate, registerDemo, registerShapeExport, startDemoTraffic, DEMO_INFO } from './domains/demo.js';
 import { populateDemo } from './lib/demodata.js';
 import { addressKey, unitFromAddress } from './lib/address.js';
@@ -2293,6 +2294,8 @@ registerMail(app, ctx);
 // Vendors supply the expense side of P&L (ctx.recurringExpenseAttribution) and vendor mail filing
 // (ctx.vendorForAddress / ctx.fileVendorMail). Both are looked up at call time, so order is free.
 registerVendors(app, ctx);
+// Suspension for nonpayment. Billing calls ctx.suspension.onPayment() at payment time, looked up then.
+registerSuspension(app, ctx);
 
 // ---- Files (admin only) ----
 //

@@ -888,6 +888,39 @@ export function migrate() {
   // Maintenance mute: checks keep running and events are recorded, but nobody is told.
   ensure('devices', 'monitor_muted_until', 'TEXT');
   ensure('devices', 'monitor_mute_reason', 'TEXT');
+
+  // ---- Suspension for nonpayment (lib/suspension.js, domains/suspension.js) ---------------------
+  //
+  // customers.suspended_at/by/reason: current state. suspended_by is 'auto' or a person's email —
+  // only automatic suspensions are lifted automatically. suspend_exempt: never auto-suspend.
+  // suspend_token: the unguessable link on the "your service is paused" page.
+  ensure('customers', 'suspended_at', 'TEXT');
+  ensure('customers', 'suspended_by', 'TEXT');
+  ensure('customers', 'suspended_reason', 'TEXT');
+  ensure('customers', 'suspend_exempt', 'INTEGER NOT NULL DEFAULT 0');
+  ensure('customers', 'suspend_exempt_reason', 'TEXT');
+  ensure('customers', 'suspend_token', 'TEXT');
+  ensure('customers', 'suspend_warned_for', 'TEXT');
+  ensure('customers', 'suspend_hold_until', 'TEXT');     // staff override: keep on until this date   // the suspension date a warning was sent for
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_suspend_token ON customers(suspend_token) WHERE suspend_token IS NOT NULL');
+  // Every suspend and restore, kept — the report staff review and override from.
+  db.exec(`CREATE TABLE IF NOT EXISTS suspension_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL, action TEXT NOT NULL,
+    reason TEXT, balance REAL, days_late INTEGER, actor TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_suspension_log_cust ON suspension_log(customer_id, id)');
+  db.exec(`CREATE TABLE IF NOT EXISTS payment_arrangements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,                         -- extension | installments
+    status TEXT NOT NULL DEFAULT 'active',      -- active | completed | broken | cancelled
+    extend_until TEXT, invoice_ids TEXT NOT NULL DEFAULT '[]', installments_json TEXT NOT NULL DEFAULT '[]',
+    balance_at_start REAL, notes TEXT, created_by TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at TEXT, closed_reason TEXT)`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_arrangements_cust ON payment_arrangements(customer_id, status)');
+  // What we did to each router, so failures can be retried and shown.
+  db.exec(`CREATE TABLE IF NOT EXISTS suspension_devices (
+    device_id INTEGER PRIMARY KEY, customer_id INTEGER, want TEXT NOT NULL,   -- suspended | normal
+    state TEXT NOT NULL, detail TEXT, attempts INTEGER NOT NULL DEFAULT 0,  -- applied | pending | error | skipped
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')))`);
 }
 
 // One-time data backfill: give each existing account a matching customer and attach its sites.

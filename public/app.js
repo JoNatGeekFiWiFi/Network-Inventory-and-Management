@@ -101,6 +101,7 @@ function setupHeader() {
   $('#navDocs').style.display = isPriv() ? '' : 'none';
   $('#navPnl').style.display = isPriv() ? '' : 'none';
   $('#navVendors').style.display = isPriv() ? '' : 'none';
+  $('#navSusp').style.display = isPriv() ? '' : 'none';
   $('#navTickets').style.display = isPriv() ? '' : 'none';
   $('#navPackages').style.display = isPriv() ? '' : 'none';
   $('#navUsers').style.display = isAdmin() ? '' : 'none';
@@ -249,6 +250,7 @@ async function route() {
     if (p[0] === 'customer') { setNav('accounts'); return await renderCust(p[1]); }
     if (p[0] === 'inventory') { setNav('inventory'); return await renderInventory(); }
     if (p[0] === 'alerts') { setNav('alerts'); return await renderAlerts(); }
+    if (p[0] === 'suspensions') { setNav('suspensions'); return await renderSuspensions(); }
     if (p[0] === 'device' && p[1] === 'new') { setNav('inventory'); return await formDevice(q); }
     if (p[0] === 'device' && p[2] === 'edit') { setNav('inventory'); return await formDevice({ id: p[1] }); }
     if (p[0] === 'device' && p[2] === 'dhcp') { setNav('inventory'); return await renderDeviceDhcp(p[1]); }
@@ -1018,6 +1020,7 @@ async function renderCust(id) {
       <div class="metric"><div class="l">Needs attention</div><div class="v" style="color:var(--warning)">${c.needs_attention}</div></div>
     </div>
     ${serviceCard(c)}
+    <div id="suspCard"></div>
     ${c.notes ? `<div class="card" style="padding:12px 14px"><div class="small sec-muted">${esc(c.notes)}</div></div>` : ''}
     ${bill && bill.any ? `<div class="card"><div class="hd"><h2><i class="ti ti-file-invoice"></i> Billing</h2>
       <div style="display:flex;align-items:center;gap:10px">${bill.outstanding > 0 ? `<span class="mono" style="color:var(--warning)">${fmtMoney(bill.outstanding)} outstanding</span>` : '<span class="pill s-up">Settled</span>'}<a class="btn sm" href="#/billing">All billing</a></div></div>
@@ -1030,6 +1033,156 @@ async function renderCust(id) {
       <div id="attachsite"></div>${sites || '<div class="row muted">No sites yet — attach an existing site or add a new one</div>'}</div>
     <div id="docsFor-customer-${c.id}"></div>`;
   if (isPriv()) loadDocumentsFor('customer', c.id);
+  if (isPriv()) loadSuspensionCard(c.id);
+}
+
+// ---------- Suspension for nonpayment ----------
+// Server: lib/suspension.js (policy), lib/suspendrouter.js (router rules), domains/suspension.js.
+function standingText(st) {
+  if (!st.balance) return 'Nothing owed';
+  const bits = [`${fmtMoney(st.balance)} owed`];
+  if (st.late) bits.push(`${st.daysLate} day${st.daysLate === 1 ? '' : 's'} past due`);
+  if (st.exempt) bits.push('exempt from auto-suspension');
+  else if (st.held) bits.push(`held on until ${st.holdUntil}`);
+  else if (st.protectedBy) bits.push(st.protectedBy === 'extension' ? 'on an extension' : 'on a payment plan');
+  if (st.suspendOn && !st.exempt && !st.held) bits.push((st.due ? 'due for suspension since ' : 'suspends on ') + st.suspendOn);
+  return bits.join(' · ');
+}
+const ENF_LOOK = { applied: ['s-up', 'done'], pending: ['s-warn', 'retrying'], error: ['s-down', 'failed'], skipped: ['s-off', 'skipped'] };
+async function loadSuspensionCard(id) {
+  const box = $('#suspCard'); if (!box) return;
+  let s; try { s = await api('/customers/' + id + '/suspension'); } catch { box.innerHTML = ''; return; }
+  window._susp = s;
+  const st = s.standing;
+  if (!st.balance && !s.suspended_at && !s.arrangement && !s.exempt && !s.log.length) { box.innerHTML = ''; return; }
+  const routers = s.routers.map(r => { const e = r.enforcement; const [c, l] = e ? (ENF_LOOK[e.state] || ENF_LOOK.pending) : ['s-off', 'untouched'];
+    return `<div class="row small"><i class="ti ti-router sec-muted"></i><span style="flex:1"><a class="iplink" href="#/device/${r.id}">${esc(r.name)}</a> · ${esc(r.site)} · ${esc(r.platform)}${r.shared ? ' · <b>shared</b>' : ''}${e && e.detail ? `<br><span class="sec-muted">${esc(e.detail)}</span>` : ''}</span>${e ? `<span class="pill ${c}">${e.want === 'suspended' ? 'suspend' : 'restore'}: ${l}</span>` : ''}</div>`; }).join('');
+  const arr = s.arrangement;
+  const arrHtml = !arr ? '' : arr.kind === 'extension'
+    ? `<div class="row small"><i class="ti ti-calendar-plus sec-muted"></i><span style="flex:1">Extension until <b>${esc(arr.extend_until)}</b>${arr.notes ? ' — ' + esc(arr.notes) : ''}</span><button class="btn sm" onclick="cancelArrangement(${arr.id},${id})">Cancel</button></div>`
+    : `<div class="row small"><i class="ti ti-calendar-dollar sec-muted"></i><span style="flex:1">Payment plan · ${fmtMoney(arr.paid_since)} paid of ${fmtMoney(arr.balance_at_start)}${arr.notes ? ' — ' + esc(arr.notes) : ''}</span><button class="btn sm" onclick="cancelArrangement(${arr.id},${id})">Cancel</button></div>
+       ${arr.progress.map(i => `<div class="row small" style="padding-left:40px"><span style="flex:1">${esc(i.due_date)} · ${fmtMoney(i.amount)}</span>${i.paid ? '<span class="pill s-up">paid</span>' : i.due_date < new Date().toISOString().slice(0, 10) ? '<span class="pill s-down">late</span>' : '<span class="pill s-off">upcoming</span>'}</div>`).join('')}`;
+  box.innerHTML = `<div class="card"><div class="hd"><h2><i class="ti ti-plug-connected-x"></i> Service standing</h2>
+      ${s.suspended_at ? '<span class="pill s-down"><span class="dot" style="background:var(--danger)"></span>Suspended</span>' : st.due ? '<span class="pill s-down">Due for suspension</span>' : st.warn ? '<span class="pill s-warn">Warning sent</span>' : ''}
+      <span style="flex:1"></span>
+      ${s.suspended_at ? `<button class="btn sm primary" onclick="restoreCustomer(${id})"><i class="ti ti-plug-connected"></i> Restore</button>` : `<button class="btn sm" onclick="suspendCustomer(${id})"><i class="ti ti-plug-connected-x"></i> Suspend</button>`}
+      ${st.balance ? `<button class="btn sm" onclick="arrangementForm(${id})"><i class="ti ti-calendar-dollar"></i> Payment arrangement</button>` : ''}</div>
+    <div style="padding:0 14px 8px"><div>${esc(standingText(st))}</div>
+      ${s.suspended_at ? `<div class="small sec-muted">Suspended ${esc(s.suspended_at)} by ${esc(s.suspended_by === 'auto' ? 'the automatic policy' : s.suspended_by)}${s.suspended_reason ? ' — ' + esc(s.suspended_reason) : ''}${s.suspended_by === 'auto' ? ' · restores automatically when paid' : ' · a person must restore it'}</div>` : ''}
+      ${s.landing_url ? `<div class="small sec-muted">Their payment page: <a class="iplink" href="${esc(s.landing_url)}" target="_blank">${esc(s.landing_url)}</a></div>` : '<div class="small" style="color:var(--warning)">Set the public URL in Settings so suspended customers can reach their payment page.</div>'}
+      <label class="small" style="display:flex;gap:8px;align-items:center;margin-top:6px"><input type="checkbox" ${s.exempt ? 'checked' : ''} onchange="setExempt(${id}, this.checked)"> Never suspend automatically${s.exempt_reason ? ' — ' + esc(s.exempt_reason) : ''}</label></div>
+    <div id="arrForm"></div>
+    ${arrHtml}
+    ${routers ? `<div class="small sec-muted" style="padding:8px 14px 2px">Routers</div>${routers}${s.routers.some(r => r.enforcement && r.enforcement.state === 'pending') ? `<div style="padding:6px 14px"><button class="btn sm" onclick="retrySuspension(${id})"><i class="ti ti-refresh"></i> Retry routers now</button></div>` : ''}`
+      : '<div class="help" style="padding:4px 14px 10px">No platform-managed router at this customer\'s sites — a suspension is recorded but nothing on the network changes.</div>'}
+    ${s.log.length ? `<div class="small sec-muted" style="padding:8px 14px 2px">History</div>${s.log.slice(0, 8).map(l => `<div class="row small"><span style="flex:1"><b>${esc(l.action)}</b>${l.reason ? ' — ' + esc(l.reason) : ''}</span><span class="sec-muted">${esc(l.actor || '')} · ${esc(String(l.created_at).slice(0, 16))}</span></div>`).join('')}` : ''}
+  </div>`;
+}
+async function suspendCustomer(id) {
+  const reason = prompt('Reason for suspending (the customer is told their service is paused and given their payment link):', 'Nonpayment');
+  if (reason === null) return;
+  try { await api(`/customers/${id}/service/suspend`, { method: 'POST', body: JSON.stringify({ reason }) }); toast('Suspended'); loadSuspensionCard(id); } catch (e) { toast(e.message); }
+}
+async function restoreCustomer(id) {
+  const s = window._susp || {};
+  let hold = null;
+  if (s.standing && s.standing.balance > 0 && !s.standing.protectedBy && !s.exempt) {
+    // Without a hold (or an arrangement) the next hourly pass would suspend them again.
+    const d = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+    hold = prompt('They still owe money. Keep them on until what date? (After it, the normal policy applies again.)', d);
+    if (hold === null) return;
+  }
+  const reason = prompt('Reason for restoring:', hold ? 'Promised to pay' : 'Paid') ;
+  if (reason === null) return;
+  try { await api(`/customers/${id}/service/restore`, { method: 'POST', body: JSON.stringify({ reason, hold_until: hold || undefined }) }); toast('Restored'); loadSuspensionCard(id); } catch (e) { toast(e.message); }
+}
+async function setExempt(id, on) {
+  let exempt_reason = '';
+  if (on) { exempt_reason = prompt('Why is this customer exempt? (e.g. hospital, school, partner)', '') ; if (exempt_reason === null) { loadSuspensionCard(id); return; } }
+  try { await api(`/customers/${id}/suspension`, { method: 'PUT', body: JSON.stringify({ exempt: on, exempt_reason }) }); toast(on ? 'Exempt from auto-suspension' : 'Normal policy applies'); loadSuspensionCard(id); } catch (e) { toast(e.message); }
+}
+async function retrySuspension(id) {
+  try { await api(`/customers/${id}/suspension/retry`, { method: 'POST', body: '{}' }); toast('Tried the routers again'); loadSuspensionCard(id); } catch (e) { toast(e.message); }
+}
+async function cancelArrangement(aid, cid) {
+  if (!confirm('Cancel this payment arrangement? The normal suspension policy applies again.')) return;
+  try { await api(`/arrangements/${aid}/cancel`, { method: 'POST', body: '{}' }); toast('Arrangement cancelled'); loadSuspensionCard(cid); } catch (e) { toast(e.message); }
+}
+function arrangementForm(id) {
+  const box = $('#arrForm'); if (!box) return;
+  const s = window._susp || {}; const bal = s.standing ? s.standing.balance : 0;
+  const in7 = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+  box.innerHTML = `<div class="box" style="margin:6px 14px 10px">
+    <div class="small" style="margin-bottom:8px">Covers the <b>${fmtMoney(bal)}</b> owed now (${(s.open_invoices || []).map(i => esc(i.number)).join(', ')}). New bills that come due while it runs are judged separately.</div>
+    <div class="seg" style="margin-bottom:10px"><button class="segbtn on" id="arrK-ext" onclick="arrKind('ext')">Extra time</button><button class="segbtn" id="arrK-inst" onclick="arrKind('inst')">Split into payments</button></div>
+    <div id="arrExt"><label class="small">They have until <input type="date" id="arrUntil" value="${in7}"></label></div>
+    <div id="arrInst" style="display:none"><label class="small">Split into <input type="number" id="arrCount" min="2" max="24" value="3" style="width:60px"> payments,</label>
+      <label class="small">first one due <input type="date" id="arrFirst" value="${in7}"></label>, <label class="small">then every <input type="number" id="arrEvery" min="7" max="31" value="30" style="width:60px"> days</label>
+      <div class="help" id="arrPreview"></div></div>
+    <div style="margin-top:8px"><input id="arrNotes" placeholder="Notes (optional) — what was agreed, with whom" style="width:100%"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn sm" onclick="$('#arrForm').innerHTML=''">Cancel</button><button class="btn sm primary" onclick="saveArrangement(${id})"><i class="ti ti-check"></i> Save arrangement</button></div></div>`;
+  window._arrKind = 'ext';
+  ['arrCount', 'arrFirst', 'arrEvery'].forEach(k => $('#' + k).addEventListener('input', arrPreview));
+  arrPreview();
+}
+function arrKind(k) {
+  window._arrKind = k;
+  $('#arrK-ext').classList.toggle('on', k === 'ext'); $('#arrK-inst').classList.toggle('on', k === 'inst');
+  $('#arrExt').style.display = k === 'ext' ? '' : 'none'; $('#arrInst').style.display = k === 'inst' ? '' : 'none';
+}
+function arrPreview() {
+  const s = window._susp || {}; const bal = s.standing ? s.standing.balance : 0;
+  const n = Math.max(1, Math.min(24, Number($('#arrCount').value) || 1)), every = Number($('#arrEvery').value) || 30, first = $('#arrFirst').value;
+  if (!first) return;
+  const cents = Math.round(bal * 100), each = Math.floor(cents / n);
+  const rows = Array.from({ length: n }, (_, i) => { const d = new Date(Date.parse(first + 'T00:00:00Z') + i * every * 86400000).toISOString().slice(0, 10); return `${d}: ${fmtMoney((i === n - 1 ? cents - each * (n - 1) : each) / 100)}`; });
+  $('#arrPreview').textContent = rows.join(' · ');
+}
+async function saveArrangement(id) {
+  const body = window._arrKind === 'ext'
+    ? { kind: 'extension', extend_until: $('#arrUntil').value, notes: $('#arrNotes').value }
+    : { kind: 'installments', count: Number($('#arrCount').value), first_due: $('#arrFirst').value, every_days: Number($('#arrEvery').value), notes: $('#arrNotes').value };
+  try { const r = await api(`/customers/${id}/arrangements`, { method: 'POST', body: JSON.stringify(body) }); toast(r.action === 'restore' ? 'Arrangement saved — service restored' : 'Arrangement saved'); loadSuspensionCard(id); }
+  catch (e) { toast(e.message); }
+}
+
+// ---- the Suspensions report ----
+async function renderSuspensions() {
+  const [r, set] = await Promise.all([api('/suspension/report'), api('/suspension/settings')]);
+  const custRow = (c, extra = '') => `<div class="row"><i class="ti ti-user sec-muted"></i>
+    <div style="flex:1;min-width:0"><div><a class="iplink" href="#/customer/${c.id}"><b>${esc(c.name)}</b></a></div><div class="small sec-muted">${esc(standingText(c.standing))}</div>${extra}</div></div>`;
+  const suspended = r.suspended.map(c => custRow(c, `<div class="small sec-muted">Suspended ${esc(String(c.suspended_at).slice(0, 16))} by ${esc(c.suspended_by === 'auto' ? 'policy' : c.suspended_by)}${c.suspended_reason ? ' — ' + esc(c.suspended_reason) : ''}
+    ${c.routers.map(d => { const [cl, l] = ENF_LOOK[d.state] || ENF_LOOK.pending; return ` · ${esc(d.device_name || 'router')} <span class="pill ${cl}" style="padding:0 6px">${l}</span>`; }).join('')}</div>`)).join('');
+  const due = r.due.map(c => custRow(c)).join('');
+  const over = r.overrides.map(c => custRow(c)).join('');
+  const arrs = r.arrangements.map(a => `<div class="row small"><i class="ti ti-calendar-dollar sec-muted"></i><span style="flex:1"><a class="iplink" href="#/customer/${a.customer_id}">${esc(a.customer_name)}</a> ·
+    ${a.kind === 'extension' ? 'extension until ' + esc(a.extend_until) : a.installments.length + ' payments of ' + a.installments.map(i => fmtMoney(i.amount)).join(' / ')} · ${fmtMoney(a.balance_at_start)}${a.notes ? ' — ' + esc(a.notes) : ''}</span>
+    <span class="pill ${a.status === 'active' ? 's-up' : a.status === 'broken' ? 's-down' : 's-off'}">${esc(a.status)}</span></div>`).join('');
+  const hist = r.history.map(l => `<div class="row small"><span style="flex:1"><a class="iplink" href="#/customer/${l.customer_id}">${esc(l.customer_name || 'customer')}</a> · <b>${esc(l.action)}</b>${l.reason ? ' — ' + esc(l.reason) : ''}</span><span class="sec-muted">${esc(l.actor || '')} · ${esc(String(l.created_at).slice(0, 16))}</span></div>`).join('');
+  view().innerHTML = `<div class="head"><div class="t"><h1>Suspensions</h1><div class="small sec-muted" style="margin-top:3px">Late payment, suspended service, payment arrangements and overrides</div></div>
+      <button class="btn" onclick="runSuspensionPass()" title="Check every customer now instead of waiting for the hourly pass"><i class="ti ti-player-play"></i> Run now</button></div>
+    <div class="box" style="margin-top:12px">${r.auto ? `<i class="ti ti-robot"></i> Automatic: customers are warned ${r.policy.warnDays} days before and suspended ${r.policy.graceDays} days after their oldest unpaid invoice was due, and restored the moment they pay.` : '<i class="ti ti-hand-stop"></i> Automatic suspension is <b>off</b> — only people suspend customers.'}</div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-plug-connected-x"></i> Suspended now · ${r.suspended.length}</h2></div>${suspended || '<div class="row muted">Nobody is suspended.</div>'}</div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-clock-exclamation"></i> Late · ${r.due.length}</h2></div>${due || '<div class="row muted">Nobody is late.</div>'}</div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-calendar-dollar"></i> Payment arrangements</h2></div>${arrs || '<div class="row muted">None — set one up from a customer\'s page.</div>'}</div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-shield-check"></i> Overrides</h2></div>${over || '<div class="row muted">No exemptions or holds.</div>'}</div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-adjustments"></i> Policy</h2></div><div style="padding:6px 14px 12px" id="spol">
+      <label class="small" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="sp-auto" ${set.auto ? 'checked' : ''}> Suspend automatically</label>
+      <div class="grid3" style="margin-top:8px">${field('Days late before suspension', 'graceDays', set.graceDays)}${field('Warn this many days before', 'warnDays', set.warnDays)}${field('Payment-plan grace (days)', 'arrangementGraceDays', set.arrangementGraceDays)}</div>
+      ${field('Walled garden — sites a suspended customer can still reach (payment processor). One per line; blank = the Stripe defaults.', 'garden', set.garden_setting || '', { type: 'textarea', ph: set.garden.join('\n') })}
+      ${field('Captive redirect IP (only if routers cannot find this server on their management network)', 'captive_redirect_ip', set.captive_redirect_ip || '', { mono: true, ph: 'auto' })}
+      <div class="help">Suspended routers send web traffic to port ${set.captive_port} on this server over the management network; the customer lands on ${esc(set.public_base_url || '(set the public URL in Settings)')}/suspended/…</div>
+      <button class="btn sm primary" onclick="saveSuspPolicy()"><i class="ti ti-check"></i> Save policy</button></div></div>
+    <div class="card"><div class="hd"><h2><i class="ti ti-history"></i> History</h2></div>${hist || '<div class="row muted">Nothing yet.</div>'}</div>`;
+}
+async function runSuspensionPass() {
+  toast('Checking every customer…');
+  try { await api('/suspension/run', { method: 'POST', body: '{}' }); toast('Done'); renderSuspensions(); } catch (e) { toast(e.message); }
+}
+async function saveSuspPolicy() {
+  const d = collect('#spol');
+  const body = { auto: $('#sp-auto').checked, graceDays: Number(d.graceDays), warnDays: Number(d.warnDays), arrangementGraceDays: Number(d.arrangementGraceDays), garden: d.garden, captive_redirect_ip: d.captive_redirect_ip };
+  try { await api('/suspension/settings', { method: 'PUT', body: JSON.stringify(body) }); toast('Policy saved'); renderSuspensions(); } catch (e) { toast(e.message); }
 }
 
 /**

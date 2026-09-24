@@ -261,6 +261,9 @@ export default function registerBilling(app, ctx) {
     const balance = r2(Math.max(0, inv.balance - amt));
     const status = balance <= 0 ? 'paid' : 'partial';
     db.prepare('UPDATE bill_invoices SET balance=?, status=? WHERE id=?').run(balance, status, invId);
+    // A payment can end a suspension: check now rather than at the next hourly pass, so the customer
+    // who just paid from the suspended page is back online in seconds.
+    if (ctx.suspension) setImmediate(() => { ctx.suspension.onPayment(inv.customer_id).catch(e => console.warn('restore after payment:', e.message)); });
     return { balance, status };
   }
   function billCompany() {
