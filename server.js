@@ -1858,9 +1858,23 @@ function endpointName(type, refId) {
 }
 const endpointHref = (type, refId) => (type === 'site' ? '#/site/' + refId : type === 'pop' ? '#/pop/' + refId : type === 'account' ? '#/account/' + refId : type === 'structure' ? '#/fiber/structure/' + refId : null);
 const INTERNAL_ENDPOINTS = ['site', 'pop', 'structure']; // at least one end must be our own plant
+/**
+ * Which circuits belong on the Circuits page.
+ *
+ * A circuit is a SERVICE circuit — ours to manage, bill and troubleshoot — when at least one end is
+ * one of our sites or POPs. A circuit whose ends are both fiber structures came from the GIS import:
+ * it is a Zayo customer's circuit riding strands we can see, useful when tracing plant and nothing
+ * else. Those live in the GIS only. The rule is derived from the endpoints rather than stored, so
+ * the moment someone ties a GIS circuit to one of our sites or POPs it appears on the Circuits page,
+ * and taking that end off puts it back in the GIS.
+ */
+const SERVICE_ENDPOINTS = ['site', 'pop'];
+const IN_SERVICE_SQL = "(a_type IN ('site','pop') OR z_type IN ('site','pop'))";
+const isGisOnlyCircuit = (c) => !SERVICE_ENDPOINTS.includes(c.a_type) && !SERVICE_ENDPOINTS.includes(c.z_type);
 function decorateCircuit(c) {
   return {
     ...c,
+    gis_only: isGisOnlyCircuit(c),
     a_name: endpointName(c.a_type, c.a_ref_id), a_href: endpointHref(c.a_type, c.a_ref_id),
     z_name: endpointName(c.z_type, c.z_ref_id), z_href: endpointHref(c.z_type, c.z_ref_id),
     provider_name: c.provider_id ? (db.prepare('SELECT name FROM upstream_providers WHERE id=?').get(c.provider_id) || {}).name : null
@@ -1881,9 +1895,17 @@ app.get('/api/circuits-options', (req, res) => {
     accounts: db.prepare('SELECT id, name FROM accounts ORDER BY name').all()
   });
 });
+// How many circuits are held in the GIS only, for the note on the Circuits page.
+app.get('/api/circuits-gis-count', (req, res) => {
+  res.json({ count: db.prepare(`SELECT COUNT(*) n FROM circuits WHERE NOT ${IN_SERVICE_SQL} AND archived_at IS NULL`).get().n });
+});
 app.get('/api/circuits', (req, res) => {
   const q = '%' + String(req.query.q || '').trim() + '%'; const st = String(req.query.status || '');
-  let rows = db.prepare(`SELECT * FROM circuits${andWhere(archiveFilter(req))} ORDER BY id DESC`).all().map(decorateCircuit);
+  // scope: 'service' (default) = on the Circuits page; 'gis' = fiber-plant circuits only; 'all'.
+  // A ref= lookup (a site's or POP's own circuits) is already specific, so it is not narrowed further.
+  const scope = req.query.ref ? 'all' : (['gis', 'all'].includes(req.query.scope) ? req.query.scope : 'service');
+  const scopeSql = scope === 'service' ? IN_SERVICE_SQL : scope === 'gis' ? `NOT ${IN_SERVICE_SQL}` : '';
+  let rows = db.prepare(`SELECT * FROM circuits${andWhere(archiveFilter(req), scopeSql)} ORDER BY id DESC`).all().map(decorateCircuit);
   if (req.query.ref) { const [t, idr] = String(req.query.ref).split(':'); const rid = Number(idr); rows = rows.filter(c => (c.a_type === t && c.a_ref_id === rid) || (c.z_type === t && c.z_ref_id === rid)); }
   if (st) rows = rows.filter(c => c.status === st);
   if (req.query.q) { const needle = String(req.query.q).toLowerCase(); rows = rows.filter(c => [c.label, c.circuit_id, c.a_name, c.z_name, c.provider_name, c.bandwidth, c.ctype].some(x => (x || '').toLowerCase().includes(needle))); }

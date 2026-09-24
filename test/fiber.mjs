@@ -516,8 +516,16 @@ import { looksLikeIqgeo, parseIqgeo, parsePins } from '../lib/iqgeo.js';
   rr = await call('/api/fiber/import', { method: 'POST', body: { data: JSON.stringify(span2), commit: true } });
   ok(rr.json.circuits_created === 1 && rr.json.cables_created === 1, 'import creates the circuit and the cable');
 
-  const ck = (await call('/api/circuits')).json.find(x => x.circuit_id === 'TEST/999//ZFS');
+  ok(!(await call('/api/circuits')).json.some(x => x.circuit_id === 'TEST/999//ZFS'), 'a GIS circuit is NOT on the Circuits page — it lives in the GIS');
+  const ck = (await call('/api/circuits?scope=gis')).json.find(x => x.circuit_id === 'TEST/999//ZFS');
   ok(!!ck, 'circuit created with the IQGeo CID as its circuit_id');
+  ok(ck.gis_only === true, 'and is marked as GIS-only');
+  ok((await call('/api/circuits-gis-count')).json.count >= 1, 'the Circuits page can say how many are held in the GIS');
+  {
+    const sr = (await call('/api/search?q=' + encodeURIComponent('TEST/999'))).json;
+    const g = (t) => (sr.groups || []).find(x => x.type === t);
+    ok(!g('circuit') && g('gis_circuit') && g('gis_circuit').items[0].href === '#/fiber/circuit/' + ck.id, 'search lists it under fiber circuits, opening in the GIS');
+  }
   ok(ck.label === 'Ring_Test_001' && ck.ctype === 'FTT - Dark Fiber' && ck.status === 'Up', 'ring name → label, product group → type, Active → Up');
   ok(ck.a_type === 'structure' && ck.z_type === 'structure' && ck.a_name && ck.z_name, 'circuit endpoints are the span structures');
   ok(ck.a_href === '#/fiber/structure/' + ck.a_ref_id, 'structure endpoints link to the fiber structure page');
@@ -537,7 +545,20 @@ import { looksLikeIqgeo, parseIqgeo, parsePins } from '../lib/iqgeo.js';
   // idempotent
   rr = await call('/api/fiber/import', { method: 'POST', body: { data: JSON.stringify(span2), commit: true } });
   ok(rr.json.circuits_created === 0, 're-import does not duplicate the circuit');
-  ok((await call('/api/circuits')).json.filter(x => x.circuit_id === 'TEST/999//ZFS').length === 1, 'still exactly one circuit for that CID');
+  ok((await call('/api/circuits?scope=all')).json.filter(x => x.circuit_id === 'TEST/999//ZFS').length === 1, 'still exactly one circuit for that CID');
+
+  // Assigning it to one of our POPs makes it a service circuit; the other end keeps its structure.
+  {
+    const pop = (await call('/api/pops')).json[0];
+    const body = { ...ck, z_type: 'pop', z_ref_id: pop.id };
+    ok((await call('/api/circuits/' + ck.id, { method: 'PUT', body })).status === 200, 'a GIS circuit can be assigned to a POP');
+    const now = (await call('/api/circuits')).json.find(x => x.id === ck.id);
+    ok(now && now.gis_only === false && now.a_type === 'structure', 'and then appears on the Circuits page, still running out to its fiber structure');
+    ok((await call('/api/circuits?ref=pop:' + pop.id)).json.some(x => x.id === ck.id), 'and on that POP');
+    const sr = (await call('/api/search?q=' + encodeURIComponent('TEST/999'))).json;
+    ok((sr.groups || []).some(x => x.type === 'circuit'), 'search now lists it as a circuit');
+    await call('/api/circuits/' + ck.id, { method: 'PUT', body: { ...ck } });   // back to the GIS, for the rest of the suite
+  }
 
   // a span with no CID yields no circuit, but still a cable
   const noCid = JSON.parse(JSON.stringify(span2));

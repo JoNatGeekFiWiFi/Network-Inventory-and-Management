@@ -228,6 +228,7 @@ async function route() {
     if (p[0] === 'fiber' && p[1] === 'locate') { setNav('fiber'); return await renderLocate(q); }
     if (p[0] === 'files') { setNav('files'); return await renderFiles(q); }
     if (p[0] === 'fiber' && p[1] === 'cable' && p[2]) { setNav('fiber'); return await renderCable(p[2]); }
+    if (p[0] === 'fiber' && p[1] === 'circuit' && p[2]) { setNav('fiber'); return await renderCircuit(p[2]); }
     if (p[0] === 'fiber' && p[1] === 'route' && p[2]) { setNav('fiber'); return await renderFiberRoute(p[2]); }
     if (p[0] === 'fiber' && p[1] === 'structure' && p[2]) { setNav('fiber'); return await renderStructure(p[2]); }
     if (p[0] === 'fiber') { setNav('fiber'); return await renderFiber(); }
@@ -5343,8 +5344,15 @@ async function renderCircuits() {
     <div style="display:flex;gap:8px;margin:14px 0 10px">
       <input id="cq" placeholder="Search label, circuit ID, endpoint, carrier…" style="flex:1" oninput="circSearch()"/>
       <select id="cst" style="width:auto" onchange="loadCirc()"><option value="">All statuses</option>${CIRCUIT_STATUSES.map(s => `<option value="${s}">${s}</option>`).join('')}</select></div>
+    <div id="cgis"></div>
     <div class="card" id="clist"><div class="loading">Loading…</div></div>`;
   loadCirc();
+  // Circuits imported with the fiber plant (Zayo's, riding strands we can see) are not ours to
+  // manage, so they are kept in the GIS. Say so, so nobody thinks they were lost.
+  api('/circuits-gis-count').then(r => {
+    const el = $('#cgis'); if (!el || !r.count) return;
+    el.innerHTML = `<div class="help" style="margin:-4px 0 10px"><i class="ti ti-map-2"></i> Showing circuits that reach one of your sites or POPs. ${r.count.toLocaleString()} fiber circuit${r.count === 1 ? '' : 's'} from the GIS import ${r.count === 1 ? 'is' : 'are'} kept on the <a class="iplink" href="#/fiber">Fiber map</a> — find one with the search bar.</div>`;
+  }).catch(() => {});
 }
 function circSearch() { clearTimeout(window._cqT); window._cqT = setTimeout(loadCirc, 250); }
 async function loadCirc() {
@@ -5360,12 +5368,23 @@ async function loadCirc() {
 }
 async function renderCircuit(id) {
   const c = await api('/circuits/' + id);
+  // A fiber-plant circuit from the GIS belongs to the Fiber section, whichever link led here.
+  if (c.gis_only && !location.hash.startsWith('#/fiber/circuit/')) { location.replace('#/fiber/circuit/' + c.id); return; }
+  if (!c.gis_only && location.hash.startsWith('#/fiber/circuit/')) { location.replace('#/circuit/' + c.id); return; }
+  setNav(c.gis_only ? 'fiber' : 'circuits');
   const row = (l, v) => v ? `<div class="row"><div style="width:150px;color:var(--muted)">${l}</div><div style="flex:1">${v}</div></div>` : '';
-  view().innerHTML = `<div class="crumb" onclick="location.hash='#/circuits'"><i class="ti ti-chevron-left"></i> Circuits</div>
+  const back = c.gis_only ? `<div class="crumb" onclick="location.hash='#/fiber'"><i class="ti ti-chevron-left"></i> Fiber map</div>`
+    : `<div class="crumb" onclick="location.hash='#/circuits'"><i class="ti ti-chevron-left"></i> Circuits</div>`;
+  const actions = !isPriv() ? '' : c.gis_only
+    ? `<button class="btn" onclick="assignGisCircuit(${c.id})"><i class="ti ti-link"></i> Assign to a site or POP</button>`
+    : `<a class="btn" href="#/circuit/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a><button class="btn" onclick="delCkt(${c.id})"><i class="ti ti-trash"></i> Delete</button>`;
+  window._gisCircuit = c;
+  view().innerHTML = `${back}
     <div class="head"><div class="t"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1>${esc(c.label || (c.a_name + ' ↔ ' + c.z_name))}</h1>${statusPill(c.status)}</div>
       <div class="small sec-muted" style="margin-top:3px">${endpointChip(c.a_name, c.a_type, c.a_href)} <span class="muted">↔</span> ${endpointChip(c.z_name, c.z_type, c.z_href)}</div></div>
       <a class="btn" href="#/fiber/locate?type=circuit&id=${c.id}"><i class="ti ti-ruler-measure"></i> Locate along</a>
-      ${isPriv() ? `<a class="btn" href="#/circuit/${c.id}/edit"><i class="ti ti-edit"></i> Edit</a><button class="btn" onclick="delCkt(${c.id})"><i class="ti ti-trash"></i> Delete</button>` : ''}</div>
+      ${actions}</div>
+    ${c.gis_only ? `<div class="help" style="margin-top:10px"><i class="ti ti-map-2"></i> Fiber circuit from the GIS import. It is kept here, with the plant, and not on the Circuits page. Assign one end to a site or POP when it serves one of your customers or POPs, and it becomes a service circuit.</div><div id="gisassign"></div>` : ''}
     <div class="card" style="margin-top:14px">
       ${row('A-end', endpointChip(c.a_name, c.a_type, c.a_href))}
       ${row('Z-end', endpointChip(c.z_name, c.z_type, c.z_href))}
@@ -5391,7 +5410,8 @@ function circRefOptions(type, sel) {
 }
 function circEndpoint(side, sel) {
   const type = $('#' + side + '_type').value;
-  $('#' + side + '_ref').innerHTML = circRefOptions(type, sel);
+  const st = window._circStructs && window._circStructs[side];
+  $('#' + side + '_ref').innerHTML = type === 'structure' && st ? `<option value="${st.id}" selected>${esc(st.name || 'structure')}</option>` : circRefOptions(type, sel);
 }
 async function formCircuit(qy) {
   if (!isPriv()) { view().innerHTML = '<div class="card" style="padding:20px">NOC/Admin only.</div>'; return; }
@@ -5401,7 +5421,10 @@ async function formCircuit(qy) {
   // ?pop=<id> (from a POP page / legacy upstream link): pre-set Z-end to that POP, A-end to a carrier account
   else if (qy.pop) { c = { a_type: 'account', z_type: 'pop', z_ref_id: Number(qy.pop), status: 'Up' }; }
   else if (qy.site) { c = { a_type: 'account', z_type: 'site', z_ref_id: Number(qy.site), status: 'Up' }; }
-  const typeSel = (side, cur) => `<select id="${side}_type" onchange="circEndpoint('${side}')" style="width:110px">${[['site', 'Site'], ['pop', 'POP'], ['account', 'Account'], ['carrier', 'Carrier']].map(t => `<option value="${t[0]}" ${cur === t[0] ? 'selected' : ''}>${t[1]}</option>`).join('')}</select>`;
+  // An end at a fiber structure (a GIS circuit that was assigned to a site) keeps that structure as
+  // an option, so editing the circuit does not silently move its far end.
+  window._circStructs = { a: c.a_type === 'structure' ? { id: c.a_ref_id, name: c.a_name } : null, z: c.z_type === 'structure' ? { id: c.z_ref_id, name: c.z_name } : null };
+  const typeSel = (side, cur) => `<select id="${side}_type" onchange="circEndpoint('${side}')" style="width:110px">${[['site', 'Site'], ['pop', 'POP'], ['account', 'Account'], ['carrier', 'Carrier']].concat(window._circStructs[side] ? [['structure', 'Fiber structure']] : []).map(t => `<option value="${t[0]}" ${cur === t[0] ? 'selected' : ''}>${t[1]}</option>`).join('')}</select>`;
   view().innerHTML = `<div class="crumb" onclick="location.hash='${qy.id ? '#/circuit/' + qy.id : '#/circuits'}'"><i class="ti ti-chevron-left"></i> Back</div>
     <h1>${qy.id ? 'Edit' : 'Add'} circuit</h1>
     <div class="card" style="margin-top:14px;padding:16px" id="cf">
@@ -5425,12 +5448,40 @@ async function saveCkt(id) {
   d.a_type = $('#a_type').value; d.a_ref_id = $('#a_ref').value;
   d.z_type = $('#z_type').value; d.z_ref_id = $('#z_ref').value;
   if (!d.a_ref_id || !d.z_ref_id) { toast('Pick both endpoints'); return; }
-  if (d.a_type === 'carrier' && d.z_type === 'carrier') { toast('At least one end must be a site or POP'); return; }
+  if (!['site', 'pop'].includes(d.a_type) && !['site', 'pop'].includes(d.z_type)) { toast('At least one end must be a site or POP'); return; }
   try {
     if (id) { await api('/circuits/' + id, { method: 'PUT', body: JSON.stringify(d) }); location.hash = '#/circuit/' + id; }
     else { const r = await api('/circuits', { method: 'POST', body: JSON.stringify(d) }); location.hash = '#/circuit/' + r.id; }
     toast('Saved');
   } catch (e) { toast(e.message); }
+}
+/**
+ * Tie a GIS circuit to one of our sites or POPs. The chosen end is replaced; the other keeps its
+ * fiber structure, so the circuit still reads as running from our site out into the plant.
+ */
+async function assignGisCircuit(id) {
+  const c = window._gisCircuit; const box = $('#gisassign'); if (!c || !box) return;
+  window._circOpts = window._circOpts || await api('/circuits-options');
+  box.innerHTML = `<div class="card" style="margin-top:10px;padding:14px" id="gaf">
+    <div class="grid2">
+      <div class="fld"><label class="fl">Replace which end</label><select id="ga_end">
+        <option value="a">A-end · ${esc(c.a_name || '—')}</option><option value="z">Z-end · ${esc(c.z_name || '—')}</option></select></div>
+      <div class="fld"><label class="fl">With</label><div style="display:flex;gap:8px">
+        <select id="ga_type" style="width:110px" onchange="$('#ga_ref').innerHTML = circRefOptions(this.value)"><option value="site">Site</option><option value="pop">POP</option></select>
+        <select id="ga_ref" style="flex:1">${circRefOptions('site')}</select></div></div>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end"><button class="btn" onclick="$('#gisassign').innerHTML=''">Cancel</button>
+      <button class="btn primary" onclick="saveGisAssign(${id})"><i class="ti ti-check"></i> Assign</button></div></div>`;
+}
+async function saveGisAssign(id) {
+  const c = window._gisCircuit; const end = $('#ga_end').value;
+  const d = { label: c.label, a_type: c.a_type, a_ref_id: c.a_ref_id, z_type: c.z_type, z_ref_id: c.z_ref_id,
+    provider_id: c.provider_id, circuit_id: c.circuit_id, ctype: c.ctype, bandwidth: c.bandwidth, status: c.status,
+    monthly_cost: c.monthly_cost, install_date: c.install_date, notes: c.notes };
+  d[end + '_type'] = $('#ga_type').value; d[end + '_ref_id'] = $('#ga_ref').value;
+  if (!d[end + '_ref_id']) { toast('Pick a site or POP'); return; }
+  try { await api('/circuits/' + id, { method: 'PUT', body: JSON.stringify(d) }); toast('Now a service circuit'); location.hash = '#/circuit/' + id; }
+  catch (e) { toast(e.message); }
 }
 async function delCkt(id) {
   if (!confirm('Delete this circuit?')) return;
@@ -5992,7 +6043,7 @@ async function restoreBilling(input) {
 // One endpoint answers "asset, coordinate or address?", so both entry points share this code.
 
 const TYPE_ICON = {
-  circuit: 'ti-topology-star-3', cable: 'ti-line', route: 'ti-line', structure: 'ti-map-pin',
+  circuit: 'ti-topology-star-3', gis_circuit: 'ti-topology-star-3', cable: 'ti-line', route: 'ti-line', structure: 'ti-map-pin',
   site: 'ti-building-store', pop: 'ti-server-2', device: 'ti-router',
   customer: 'ti-users', account: 'ti-building-bank', coords: 'ti-crosshair', address: 'ti-map-search'
 };
@@ -6255,12 +6306,13 @@ async function locSearch() {
   const s = el.value.trim();
   if (s.length < 2) { $('#locpick').innerHTML = ''; return; }
   let r; try { r = await api('/search?q=' + encodeURIComponent(s)); } catch { return; }
-  const groups = (r.groups || []).filter(g => ['circuit', 'cable', 'route'].includes(g.type));
+  // GIS circuits are what a fault locate most often runs along, so they are offered here too.
+  const groups = (r.groups || []).filter(g => ['circuit', 'gis_circuit', 'cable', 'route'].includes(g.type));
   if (!groups.length) { $('#locpick').innerHTML = `<div class="help">No circuits, cables or routes match “${esc(s)}”.</div>`; return; }
   $('#locpick').innerHTML = groups.map(g => `<div style="margin-top:8px">
     <div class="small sec-muted">${esc(g.label)}</div>
     ${g.items.map(i => `<button class="btn sm" style="margin:4px 6px 0 0"
-        onclick="locLoadPath('${g.type}',${i.id})"><i class="ti ${typeIcon(g.type)}"></i> ${esc(i.title)}</button>`).join('')}
+        onclick="locLoadPath('${g.type === 'gis_circuit' ? 'circuit' : g.type}',${i.id})"><i class="ti ${typeIcon(g.type)}"></i> ${esc(i.title)}</button>`).join('')}
   </div>`).join('');
 }
 

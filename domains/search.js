@@ -55,12 +55,25 @@ export default function registerSearch(app, ctx) {
   const GROUPS = [
     {
       type: 'circuit', label: 'Circuits',
+      // Only service circuits (an end at one of our sites or POPs). Circuits that exist only in the
+      // fiber plant — imported from the GIS — are their own group below and open in the GIS.
       sql: `SELECT id, label, circuit_id, ctype, status FROM circuits
-            WHERE label LIKE :q ESCAPE '\\' OR circuit_id LIKE :q ESCAPE '\\' OR ctype LIKE :q ESCAPE '\\'
+            WHERE (a_type IN ('site','pop') OR z_type IN ('site','pop'))
+              AND (label LIKE :q ESCAPE '\\' OR circuit_id LIKE :q ESCAPE '\\' OR ctype LIKE :q ESCAPE '\\')
             ORDER BY ${RANK('COALESCE(circuit_id, label)')}, label LIMIT ${CAP}`,
       map: r => ({ id: r.id, title: t(r.circuit_id) || t(r.label) || ('Circuit ' + r.id),
                    subtitle: [t(r.label) !== t(r.circuit_id) ? t(r.label) : null, t(r.ctype)].filter(Boolean).join(' · '),
                    badge: r.status, href: '#/circuit/' + r.id })
+    },
+    {
+      type: 'gis_circuit', label: 'Fiber circuits (GIS)',
+      sql: `SELECT id, label, circuit_id, ctype, status FROM circuits
+            WHERE NOT (a_type IN ('site','pop') OR z_type IN ('site','pop'))
+              AND (label LIKE :q ESCAPE '\\' OR circuit_id LIKE :q ESCAPE '\\' OR ctype LIKE :q ESCAPE '\\')
+            ORDER BY ${RANK('COALESCE(circuit_id, label)')}, label LIMIT ${CAP}`,
+      map: r => ({ id: r.id, title: t(r.circuit_id) || t(r.label) || ('Circuit ' + r.id),
+                   subtitle: [t(r.label) !== t(r.circuit_id) ? t(r.label) : null, t(r.ctype)].filter(Boolean).join(' · '),
+                   badge: r.status, href: '#/fiber/circuit/' + r.id })
     },
     {
       type: 'cable', label: 'Cables',

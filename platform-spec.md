@@ -186,6 +186,13 @@ On each check, if the observed IP differs from `current_ip`, update it and appen
 
 ### 3.6 Circuit (POP uplinks — NOC)
 
+**Service circuits vs GIS circuits.** The Circuits page lists only circuits with at least one end at
+one of our sites or POPs. Circuits imported with the fiber plant (IQGeo/Zayo CIDs, both ends at
+fiber structures) are kept in the GIS only: they open from the fiber map, strands and search
+("Fiber circuits (GIS)") and are available to Locate, but never appear on the Circuits page. Assigning
+one end to a site or POP turns a GIS circuit into a service circuit; the rule is derived from the
+endpoints, not stored.
+
 Type, speed, A/Z endpoints, status. Belongs to a POP. `provider` → Upstream Provider (§3.8).
 
 ### 3.7 Customer / Account (top of the customer hierarchy)
