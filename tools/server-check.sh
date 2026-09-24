@@ -108,7 +108,11 @@ console.log('  flat backups still referenced:', n("SELECT COUNT(*) FROM router_b
 // Settings that must be set for W-9s and signing links to be right — reports SET / not set only.
 const set = (k) => { const r = one('SELECT value FROM settings WHERE key=?', k); return r && r.value ? 'set' : 'NOT SET'; };
 const bub = (one("SELECT value FROM settings WHERE key='backup_upload_base'") || {}).value || '';
-console.log('  router backup upload URL :', !bub ? 'not set' : (/:3000\b/.test(bub) ? 'set, points at port 3000 directly' : 'set, goes through nginx'), bub ? '(host: ' + (bub.match(/^\w+:\/\/([^/:]+)/) || [])[1] + ')' : '');
+// Legacy: nothing in the platform reads this any more (backups are PULLED over SSH/FTP). Reported
+// so a leftover value is not mistaken for something that needs port 3000 open.
+console.log('  backup upload URL (legacy, unused):', bub ? 'set — safe to clear in Settings' : 'not set');
+const pbu = (one("SELECT value FROM settings WHERE key='public_base_url'") || {}).value || '';
+console.log('  public URL (routers phone home here):', pbu ? (/:3000\b/.test(pbu) ? 'set, uses port 3000 directly' : 'set, via nginx') : 'not set — provisioning is off');
 console.log('  settings      : company_name', set('company_name'), '| company_address', set('company_address'), '| inbound_secret', set('inbound_secret'), '| public_base_url', set('public_base_url'));
 NODE
   # The seed accounts. The sign-in page used to print them with their passwords, so if any is still
