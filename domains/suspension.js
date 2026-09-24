@@ -8,10 +8,7 @@ import os from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { promises as dnsp } from 'node:dns';
 import { standing, decide, validateArrangement, splitInstallments, installmentProgress, isOpen, isoDay, DEFAULTS } from '../lib/suspension.js';
-import {
-  gardenHosts, captiveIpFor, routerosPlan, routerosSuspend, routerosClear, routerosIsSuspended,
-  findOverlayZone, openwrtPlan, openwrtOurs
-} from '../lib/suspendrouter.js';
+import { gardenHosts, captiveIpFor, enforceRouterOS, enforceOpenWrt } from '../lib/suspendrouter.js';
 import { driverFor, platformOf } from '../lib/drivers/index.js';
 import { sshExec } from '../lib/sshexec.js';
 
@@ -106,40 +103,20 @@ export default function registerSuspension(app, ctx) {
     return [...ips];
   }
 
-  async function enforceRouterOS(d, suspend) {
+  async function routerOSFor(d, suspend) {
     const call = async (method, path, body) => {
       const r = await restReq(d.mgmt_address, path, { headers: rosHeaders(d), method, body, timeoutMs: 15000 });
       return { status: r.status, body: r.body };
     };
-    if (!suspend) { const n = await routerosClear(call); return n ? `removed ${n} rule(s)` : 'nothing to remove'; }
+    if (!suspend) return enforceRouterOS(call, { suspend: false });
     const captiveIp = captiveTarget(d);
-    await routerosSuspend(call, routerosPlan({ captiveIp, captivePort: CAPTIVE_PORT, garden: garden() }), { protect: [captiveIp, d.mgmt_address] });
-    if (!(await routerosIsSuspended(call))) throw new Error('The rules were sent but are not on the router');
-    return 'suspension rules on';
+    return enforceRouterOS(call, { suspend: true, captiveIp, captivePort: CAPTIVE_PORT, garden: garden(), protect: [captiveIp, d.mgmt_address] });
   }
 
-  async function enforceOpenWrt(d, suspend) {
+  async function openWrtFor(d, suspend) {
     const driver = await driverFor(d, { sshExec });
-    if (!driver.uciGetAll) throw new Error('This device\'s driver cannot change the firewall');
-    const fw = await driver.uciGetAll('firewall');
-    if (!fw.ok) throw new Error('Could not read the firewall: ' + fw.error);
-    const ours = openwrtOurs(fw.values);
-    for (const name of ours) { const r = await driver.uciDelete('firewall', name); if (!r.ok) { await driver.uciRevert('firewall'); throw new Error(r.error); } }
-    if (suspend) {
-      const captiveIp = captiveTarget(d);
-      const ifs = await driver.interfaces();
-      const zone = findOverlayZone({ interfaces: ifs, firewall: fw.values, mgmtAddress: d.mgmt_address });
-      if (!zone) { await driver.uciRevert('firewall'); throw new Error('Could not find the firewall zone for the management network on this router'); }
-      const plan = openwrtPlan({ captiveIp, captivePort: CAPTIVE_PORT, gardenIps: await resolveAll(garden()), overlayZone: zone });
-      for (const s of plan) {
-        const r = await driver.uciAdd('firewall', s.type, s.name, s.values);
-        if (!r.ok) { await driver.uciRevert('firewall'); throw new Error(`Could not stage ${s.name}: ${r.error}`); }
-      }
-    } else if (!ours.length) return 'nothing to remove';
-    // Confirmed apply: if the change cut us off, the router undoes it by itself.
-    const applied = await driver.applyConfirmed({ timeoutSeconds: 60 });
-    if (!applied.ok) throw new Error(applied.error);
-    return suspend ? 'suspension rules on' : `removed ${ours.length} section(s)`;
+    if (!suspend) return enforceOpenWrt(driver, { suspend: false });
+    return enforceOpenWrt(driver, { suspend: true, mgmtAddress: d.mgmt_address, captiveIp: captiveTarget(d), captivePort: CAPTIVE_PORT, gardenIps: await resolveAll(garden()) });
   }
 
   async function enforceDevice(d, cid, suspend) {
@@ -148,8 +125,8 @@ export default function registerSuspension(app, ctx) {
     if (!d.mgmt_address || !d.admin_password) { recordDevice.run(d.id, cid, want, 'skipped', 'No management address or admin password'); return; }
     try {
       let detail;
-      if (d.platformKey === 'routeros') detail = await enforceRouterOS(d, suspend);
-      else if (d.platformKey === 'openwrt') detail = await enforceOpenWrt(d, suspend);
+      if (d.platformKey === 'routeros') detail = await routerOSFor(d, suspend);
+      else if (d.platformKey === 'openwrt') detail = await openWrtFor(d, suspend);
       else { recordDevice.run(d.id, cid, want, 'skipped', `Suspension is not supported on ${d.platformKey}`); return; }
       recordDevice.run(d.id, cid, want, 'applied', detail);
       audit({ user: { email: 'system', role: 'system' } }, 'suspend-router', 'device#' + d.id, `${want}: ${detail}`);
