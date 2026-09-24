@@ -397,22 +397,71 @@ app.post('/api/users', requireCookieAuth, requireAdmin, (req, res) => {
   audit(req, 'create', 'user#' + info.lastInsertRowid, b.email);
   res.json({ id: info.lastInsertRowid });
 });
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/** Active admins other than `exceptId`. The platform must never be left with nobody who can manage users. */
+const otherActiveAdmins = (exceptId) =>
+  db.prepare("SELECT COUNT(*) n FROM users WHERE role='admin' AND active=1 AND id<>?").get(Number(exceptId)).n;
+
+/**
+ * Edit a user: name, EMAIL, role, password, active.
+ *
+ * Email used to be read-only, which left the seeded admin@geekitek.test impossible to turn into a
+ * real person's account. It can change now; it must stay unique, because it is the sign-in name.
+ *
+ * Three guards, all about not locking the company out of its own system:
+ *   * you cannot deactivate yourself (you would be signed out mid-edit with no way back);
+ *   * the last active admin cannot be deactivated or demoted;
+ *   * deactivating someone ends their sessions immediately rather than whenever the cookie expires.
+ */
 app.put('/api/users/:id', requireCookieAuth, requireAdmin, (req, res) => {
   const b = req.body || {};
   const ex = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.id);
   if (!ex) return res.status(404).json({ error: 'not found' });
   if (b.role && !VALID_ROLES.includes(b.role)) return res.status(400).json({ error: 'Invalid role' });
-  db.prepare('UPDATE users SET name=?, role=?, active=? WHERE id=?')
-    .run(N(b.name, ex.name), b.role || ex.role, b.active === undefined ? ex.active : (b.active ? 1 : 0), req.params.id);
-  if (b.password) db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(hashPassword(b.password), req.params.id);
-  audit(req, 'edit', 'user#' + req.params.id, ex.email + (b.password ? ' (password reset)' : ''));
+
+  let email = ex.email;
+  if (b.email !== undefined && String(b.email).trim().toLowerCase() !== ex.email) {
+    email = String(b.email).trim().toLowerCase();
+    if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'That is not a valid email address' });
+    const taken = db.prepare('SELECT id FROM users WHERE lower(email)=? AND id<>?').get(email, ex.id);
+    if (taken) return res.status(409).json({ error: 'Another user already signs in with that email' });
+  }
+  const role = b.role || ex.role;
+  const active = b.active === undefined ? ex.active : (b.active && b.active !== '0' ? 1 : 0);
+  const self = Number(ex.id) === Number(req.user.id);
+  if (self && !active) return res.status(400).json({ error: 'You cannot deactivate your own account' });
+  if (ex.role === 'admin' && ex.active && (role !== 'admin' || !active) && otherActiveAdmins(ex.id) === 0) {
+    return res.status(400).json({ error: 'This is the only active admin. Make someone else an admin first.' });
+  }
+
+  db.prepare('UPDATE users SET name=?, email=?, role=?, active=? WHERE id=?')
+    .run(N(b.name, ex.name), email, role, active, ex.id);
+  if (b.password) db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(hashPassword(b.password), ex.id);
+  // Deactivated or given a new password: every existing sign-in for that account ends now. A reset
+  // password that leaves an attacker's old session running has not reset anything.
+  if ((ex.active && !active) || (b.password && !self)) db.prepare('DELETE FROM sessions WHERE user_id=?').run(ex.id);
+
+  const changes = [];
+  if (email !== ex.email) changes.push(`email ${ex.email} → ${email}`);
+  if (role !== ex.role) changes.push(`role ${ex.role} → ${role}`);
+  if (active !== ex.active) changes.push(active ? 'reactivated' : 'deactivated');
+  if (b.password) changes.push('password reset');
+  audit(req, active !== ex.active && !active ? 'archive' : 'edit', 'user#' + ex.id, `${ex.email}${changes.length ? ': ' + changes.join(', ') : ''}`);
   res.json({ ok: true });
 });
+
+// Removing a user DEACTIVATES them. Their name is on the audit log, on documents they sent and on
+// changes they made; deleting the row would leave all of that pointing at nobody. Same rule as every
+// other business record — and a deactivated account can be switched back on.
 app.delete('/api/users/:id', requireCookieAuth, requireAdmin, (req, res) => {
-  if (Number(req.params.id) === req.user.id) return res.status(400).json({ error: 'Cannot delete yourself' });
-  db.prepare('DELETE FROM users WHERE id=?').run(req.params.id);
-  audit(req, 'delete', 'user#' + req.params.id);
-  res.json({ ok: true });
+  const ex = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.id);
+  if (!ex) return res.status(404).json({ error: 'not found' });
+  if (Number(ex.id) === Number(req.user.id)) return res.status(400).json({ error: 'You cannot deactivate your own account' });
+  if (ex.role === 'admin' && ex.active && otherActiveAdmins(ex.id) === 0) return res.status(400).json({ error: 'This is the only active admin. Make someone else an admin first.' });
+  db.prepare('UPDATE users SET active=0 WHERE id=?').run(ex.id);
+  db.prepare('DELETE FROM sessions WHERE user_id=?').run(ex.id);
+  audit(req, 'archive', 'user#' + ex.id, `${ex.email}: deactivated`);
+  res.json({ ok: true, deactivated: true });
 });
 
 // ---- device model catalog (NOC/Admin manage) ----

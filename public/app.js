@@ -2102,13 +2102,17 @@ async function saveDevice(id) {
 async function renderUsers() {
   if (!isAdmin()) { view().innerHTML = '<div class="card" style="padding:20px">Admin only.</div>'; return; }
   const users = await api('/users');
-  const rows = users.map(u => `<div class="row">
+  // Active people first; deactivated accounts stay listed (their names are on the history) but last.
+  users.sort((a, b) => (b.active - a.active) || String(a.name || a.email).localeCompare(String(b.name || b.email)));
+  const rows = users.map(u => `<div class="row" style="${u.active ? '' : 'opacity:.6'}">
     <div class="av">${initials(u.name || u.email)}</div>
     <div style="flex:1;min-width:0"><div>${esc(u.name || '—')} ${u.id === CURRENT_USER.id ? '<span class="muted small">(you)</span>' : ''}</div><div class="small sec-muted">${esc(u.email)}</div></div>
     <span class="roletag">${esc(u.role)}</span>
-    ${u.active ? '' : '<span class="pill s-down"><span class="dot" style="background:var(--danger)"></span>inactive</span>'}
-    <a class="btn sm" href="#/users/${u.id}/edit" title="Edit name, role, password or active status"><i class="ti ti-edit"></i> Edit</a>
-    ${u.id === CURRENT_USER.id ? '' : `<button class="btn sm" onclick="delUser(${u.id})" title="Delete this user"><i class="ti ti-trash"></i> Delete</button>`}
+    ${u.active ? '' : '<span class="pill s-down"><span class="dot" style="background:var(--danger)"></span>deactivated</span>'}
+    <a class="btn sm" href="#/users/${u.id}/edit" title="Edit name, email, role or password"><i class="ti ti-edit"></i> Edit</a>
+    ${u.id === CURRENT_USER.id ? '' : (u.active
+      ? `<button class="btn sm" onclick="setUserActive(${u.id}, 0, ${esc(JSON.stringify(u.email))})" title="Stop this person signing in. Their history stays."><i class="ti ti-user-off"></i> Deactivate</button>`
+      : `<button class="btn sm" onclick="setUserActive(${u.id}, 1, ${esc(JSON.stringify(u.email))})" title="Let this person sign in again"><i class="ti ti-user-check"></i> Reactivate</button>`)}
   </div>`).join('');
   view().innerHTML = `<div class="head"><h1 style="flex:1">Users</h1><a class="btn" href="#/users/new"><i class="ti ti-plus"></i> Add user</a></div>
     <div class="card" style="margin-top:14px">${rows}</div>
@@ -2122,17 +2126,16 @@ async function formUser(q) {
     <h1>${q.id ? 'Edit' : 'Add'} user</h1>
     <div class="card" style="margin-top:14px;padding:16px" id="f">
       ${field('Name', 'name', u.name, { ph: 'Full name' })}
-      ${field('Email', 'email', u.email, { type: q.id ? 'text' : 'email' })}
-      ${q.id ? '<input type="hidden" name="email" value="' + esc(u.email) + '"/>' : ''}
+      ${field('Email (used to sign in)', 'email', u.email, { type: 'email' })}
       ${field('Role', 'role', u.role, { type: 'select', options: [{ v: 'admin', l: 'Admin' }, { v: 'noc', l: 'NOC' }, { v: 'field', l: 'Field tech' }, { v: 'support', l: 'Support tech' }] })}
       ${field(q.id ? 'New password (leave blank to keep)' : 'Password', 'password', '', { type: 'password' })}
-      ${q.id ? `<div class="fld"><label class="fl">Active</label>${selBool('active', u.active)}</div>` : ''}
+      ${q.id && u.id !== CURRENT_USER.id ? `<div class="fld"><label class="fl">Can sign in</label>${selBool('active', u.active)}</div>` : ''}
+      ${q.id && u.id === CURRENT_USER.id ? '<div class="help">This is your account. If you change the email, sign in with the new one next time.</div>' : ''}
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px"><button class="btn" onclick="history.back()">Cancel</button>
       <button class="btn primary" onclick="saveUser(${q.id || 'null'})"><i class="ti ti-check"></i> Save</button></div>
     </div>`;
-  if (q.id) { const em = view().querySelector('input[name=email][type=text]'); if (em) em.setAttribute('readonly', 'readonly'); }
 }
-function selBool(name, val) { return `<select name="${name}"><option value="1" ${val ? 'selected' : ''}>Active</option><option value="0" ${val ? '' : 'selected'}>Inactive</option></select>`; }
+function selBool(name, val) { return `<select name="${name}"><option value="1" ${val ? 'selected' : ''}>Active</option><option value="0" ${val ? '' : 'selected'}>Deactivated — cannot sign in</option></select>`; }
 async function saveUser(id) {
   const d = collect('#f');
   if (d.active !== undefined) d.active = Number(d.active);
@@ -2142,9 +2145,9 @@ async function saveUser(id) {
     toast('Saved'); location.hash = '#/users';
   } catch (e) { toast(e.message); }
 }
-async function delUser(id) {
-  if (!confirm('Delete this user?')) return;
-  try { await api('/users/' + id, { method: 'DELETE' }); toast('Deleted'); renderUsers(); } catch (e) { toast(e.message); }
+async function setUserActive(id, active, email) {
+  if (!active && !confirm(`Deactivate ${email}?\n\nThey are signed out now and cannot sign in again. Everything they did stays on record, and you can reactivate them later.`)) return;
+  try { await api('/users/' + id, { method: 'PUT', body: { active } }); toast(active ? 'Reactivated' : 'Deactivated'); renderUsers(); } catch (e) { toast(e.message); }
 }
 
 // ---------- Device model catalog (NOC/Admin) ----------
